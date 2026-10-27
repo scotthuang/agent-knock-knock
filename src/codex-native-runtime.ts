@@ -76,6 +76,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions) {
     recordCallbackProcessDelivery: () => { throw new Error("Codex native callbacks use their durable outbox"); } });
   const callbacks = createHostProfileCallbackTransport({ legacyTransport: legacy, environment: cliEnv, cwd: cliCwd(), now: cliNow });
   const tasks = createCodexNativeTaskService({ repository, ...transport, now: cliNow,
+    canDeliver: callbacks.canDeliver,
     deliver: options.callbackDeliver ?? (input => callbacks.deliver(input)),
     resolveCallbackContext: task => ({ legacyOptions: { gatewayMethod: "chat.send", openclawSession: task.controller_session,
       gatewaySession: task.controller_session, openclawBin: options.openclawBin } }) });

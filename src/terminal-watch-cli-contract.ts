@@ -21,6 +21,8 @@ export interface TerminalWatchCliOptions {
   callbackRoute?: CallbackRouteV1;
   /** Private Host-adapter authority describing how a route template is bound. */
   callbackRouteControllerScope?: "startup_v1" | "route_bound_v1";
+  /** Private startup authority; never accepted from a CLI or model argument. */
+  callbackRecoveryRoutes?: readonly CallbackRouteV1[];
   claudeHome?: string;
   hardTimeoutMinutes?: number | string;
   openclawBin?: string;

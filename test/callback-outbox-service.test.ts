@@ -191,6 +191,32 @@ function callbackMessage(conversation: Conversation) {
   });
 }
 
+test("managed callbacks cannot claim or schedule another Host's route", () => {
+  const h = createHarness();
+  (h.conversation as Conversation).callback_route = GENERIC_ROUTE;
+  h.ports.delivery.canDeliver = () => false;
+  const options = { statePath: STATE_PATH, messageJson: JSON.stringify(callbackMessage(h.conversation)), preserveMessageId: true };
+  assert.throws(() => h.service.prepare({ options, logPath: LOG_PATH }), /no delivery attempt was claimed/u);
+  assert.equal(h.stored().callback_delivery, undefined);
+  assert.equal(h.retryMonitors.length, 0);
+  h.ports.delivery.canDeliver = () => true;
+  assert.equal(h.service.prepare({ options, logPath: LOG_PATH }).outcome, "deliver");
+  const delivery = h.stored().callback_delivery as Record<string, unknown>;
+  h.replaceStored({ ...h.stored(), callback_delivery: { ...delivery,
+    attempt_pid: undefined, attempt_lease_expires_at: undefined,
+    retry_monitor_pid: undefined, next_attempt_at: undefined } });
+  const before = structuredClone(h.stored());
+  h.ports.delivery.canDeliver = () => false;
+  assert.equal(h.service.reconcileDelivery({ statePath: STATE_PATH, logPath: LOG_PATH }).reason,
+    "callback_route_runtime_unavailable");
+  h.service.runRetryMonitor({ statePath: STATE_PATH, initialDelayMs: 0 });
+  assert.deepEqual(h.stored(), before);
+  assert.equal(h.retryMonitors.length, 1);
+  h.ports.delivery.canDeliver = () => true;
+  assert.equal(h.service.reconcileDelivery({ statePath: STATE_PATH, logPath: LOG_PATH }).status, "launched");
+  assert.equal(h.retryMonitors.length, 2);
+});
+
 test("fresh callback preparation preserves watchdog, event, state, and log order", () => {
   const harness = createHarness();
   const message = callbackMessage(harness.conversation);
@@ -567,6 +593,7 @@ test("non-retryable requests preserve the two fresh disposition observations", (
 
 test("terminal completion holds the state claim through outbox preparation", () => {
   const harness = createHarness();
+  harness.ports.delivery.canDeliver = () => false;
   (harness.conversation as Conversation).native_session_takeover = {
     terminal_bridge_message_id: "terminal-message-a"
   };
@@ -591,7 +618,7 @@ test("terminal completion holds the state claim through outbox preparation", () 
   });
 
   assert.equal(result.claimed, true);
-  assert.equal(result.prepared.outcome, "record_only");
+  assert.equal(result.prepared.outcome, "record_only", "local completion needs no callback delivery authority");
   assert.deepEqual(harness.order, [
     "derive:store-dir",
     "writer:/store",

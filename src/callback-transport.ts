@@ -138,7 +138,16 @@ export interface CallbackTransportDeliverInput {
  */
 export interface CallbackTransport {
   readonly kind: string;
+  /** Optional local eligibility check before an outbox claims an attempt. */
+  canDeliver?(route: CallbackRouteV1 | undefined): boolean;
   deliver(input: CallbackTransportDeliverInput): CallbackAttemptOutcome;
+}
+
+export function callbackRouteDeliveryEligible(
+  transport: Pick<CallbackTransport, "canDeliver">, route: CallbackRouteV1 | undefined
+): boolean {
+  try { return transport.canDeliver?.(route) ?? true; }
+  catch { return false; }
 }
 
 export interface LegacyOpenClawCallbackRouteInput {

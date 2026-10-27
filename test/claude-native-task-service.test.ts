@@ -70,6 +70,26 @@ function harness(t: TestContext) {
   return { dir, repository, state, deps, snapshot, accepted, service: createClaudeNativeTaskService(deps) };
 }
 
+test("Claude callbacks wait without a lease until this Host can deliver the immutable route", async t => {
+  const h = harness(t);
+  h.deps.canDeliver = () => false;
+  const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.selected!.state = "completed";
+  const pendingTask = await h.service.reconcile(sent.id);
+  assert.equal(pendingTask.status, "completed");
+  assert.equal(pendingTask.notifications[0].status, "ready");
+  assert.equal(pendingTask.notifications[0].attempts, 0);
+  assert.equal(h.state.deliveries.length, 0);
+  const envelope = structuredClone(pendingTask.notifications[0].envelope);
+  h.deps.canDeliver = () => { throw new Error("recovery catalogue unavailable"); };
+  assert.deepEqual((await h.service.reconcile(sent.id)).notifications, pendingTask.notifications);
+  h.deps.canDeliver = candidate => candidate?.controller_session_id === input.controllerSession;
+  const accepted = await h.service.reconcile(sent.id);
+  assert.equal(accepted.notifications[0].status, "accepted");
+  assert.equal(accepted.notifications[0].attempts, 1);
+  assert.deepEqual(h.state.deliveries[0].envelope, envelope);
+});
+
 test("expired Claude Send history rejects repeated messages before inspecting or sending to the native CLI", async t => {
   const h = harness(t), request = { ...input, callbackRoute: route };
   const sent = await h.service.send(request);

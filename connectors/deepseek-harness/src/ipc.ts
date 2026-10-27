@@ -5,7 +5,7 @@ import net from "node:net";
 import {
   CALLBACK_MAX_REQUEST_BYTES,
   CALLBACK_MAX_RESPONSE_BYTES,
-  CALLBACK_TIMEOUT_MS,
+  CALLBACK_IPC_TIMEOUT_MS,
 } from "./constants.js";
 import type {
   AgentRouteTable,
@@ -37,10 +37,10 @@ export function createCallbackIpcServer(options: {
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
-    socket.setTimeout(CALLBACK_TIMEOUT_MS, () => socket.destroy());
+    socket.setTimeout(CALLBACK_IPC_TIMEOUT_MS, () => socket.destroy());
     socket.once("close", () => sockets.delete(socket));
     socket.once("error", () => undefined);
-    readFrame(socket, CALLBACK_MAX_REQUEST_BYTES).then((frame) => {
+    readFrame(socket, CALLBACK_MAX_REQUEST_BYTES).then(async (frame) => {
       const request = parseWireRequest(frame);
       if (!request || !sameSecret(request.token, options.token)) {
         return writeFrame(socket, {
@@ -48,7 +48,7 @@ export function createCallbackIpcServer(options: {
           errorCode: "callback_authentication_failed",
         });
       }
-      const acknowledgement = options.routes.deliver(request);
+      const acknowledgement = await options.routes.deliverRecoverable(request);
       return writeFrame(socket, {
         status: acknowledgement.result.status,
         ...(acknowledgement.result.acceptance_id
@@ -116,7 +116,7 @@ export function sendCallbackOverIpc(options: {
       socket.destroy();
       callback();
     };
-    socket.setTimeout(CALLBACK_TIMEOUT_MS, () => {
+    socket.setTimeout(CALLBACK_IPC_TIMEOUT_MS, () => {
       finish(() => reject(new Error("AKK callback IPC timed out")));
     });
     socket.once("error", () => {

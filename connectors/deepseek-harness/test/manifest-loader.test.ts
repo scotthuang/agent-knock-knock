@@ -301,6 +301,50 @@ test("loads runtime helpers from the launcher-owned set instead of connector dev
   }
 });
 
+test("detects recovery by coherent launcher-owned class APIs instead of a version cutoff", async () => {
+  for (const flushMethod of ["flush() {}", ""]) {
+    const fixture = recoveryRuntimeFixture(flushMethod);
+    try {
+      const runtime = await loadSupportedDeepSeekHarnessRuntime(fixture.resolver);
+      assert.equal(runtime.version, "0.1.2-alpha.1");
+      assert.equal(runtime.supportsCallbackRecovery, flushMethod.length > 0);
+    } finally { fixture.remove(); }
+  }
+});
+
+test("rejects a split optional recovery package before importing it", async () => {
+  const fixture = recoveryRuntimeFixture("flush() {}", "0.1.1-rc.2");
+  try {
+    await assert.rejects(loadSupportedDeepSeekHarnessRuntime(fixture.resolver),
+      /coherent DeepSeek Harness 0\.1\.2-alpha\.1 package set; @deepseek-ai\/dsh-session is 0\.1\.1-rc\.2/u);
+  } finally { fixture.remove(); }
+});
+
+function recoveryRuntimeFixture(flushMethod: string, sessionVersion = "0.1.2-alpha.1") {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-recovery-capability-"));
+  const entry = path.join(directory, "bin.js");
+  writePackage(directory, "@deepseek-ai/dsh", "0.1.2-alpha.1");
+  fs.writeFileSync(entry, "", "utf8");
+  const anchor = path.join(directory, "node_modules", "@deepseek-ai", "dsh-base");
+  writePackage(anchor, "@deepseek-ai/dsh-base", "0.1.2-alpha.1");
+  const modules = {
+    "@deepseek-ai/dsh-agent": "", "@deepseek-ai/dsh-commands": "", "@deepseek-ai/dsh-skill": "",
+    "@deepseek-ai/dsh-llm": "export function createUserMessage() {}",
+    "@deepseek-ai/dsh-tools": "export function assertSupportedJsonSchema() {}",
+    "@deepseek-ai/dsh-api-session-controller": "export class SessionController { resolveAgent() {} }",
+    "@deepseek-ai/dsh-session-query": "export class SessionQueryEngine { observeSession() {} }",
+    "@deepseek-ai/dsh-session": sessionVersion !== "0.1.2-alpha.1"
+      ? "throw new Error('split recovery module must not execute');"
+      : `export class SessionStore { ${flushMethod} }`,
+  };
+  for (const [packageName, body] of Object.entries(modules)) {
+    writePackage(path.join(anchor, "node_modules", packageName), packageName,
+      packageName === "@deepseek-ai/dsh-session" ? sessionVersion : "0.1.2-alpha.1", body);
+  }
+  return { resolver: createDeepSeekHarnessManifestResolver(entry),
+    remove: () => fs.rmSync(directory, { recursive: true, force: true }) };
+}
+
 function fakeHarnessResolver(options: {
   launcherVersion?: string;
   runtimeAnchorVersion?: string;

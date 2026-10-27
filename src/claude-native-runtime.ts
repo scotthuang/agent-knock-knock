@@ -53,6 +53,7 @@ export function createClaudeNativeRuntime(options: ClaudeNativeRuntimeOptions) {
     recordCallbackProcessDelivery: () => { throw new Error("Claude native callbacks use their durable outbox"); } });
   const callbacks = createHostProfileCallbackTransport({ legacyTransport: legacy, environment: cliEnv, cwd: cliCwd(), now: cliNow });
   const tasks = createClaudeNativeTaskService({ repository, inspect, now: cliNow, senderPermissionClass: options.senderPermissionClass,
+    canDeliver: callbacks.canDeliver,
     send: (identity, input) => { assertConfigured(identity); return client.send(identity, input); },
     observe: async (entry, observation) => {
       const current = await inspect(entry);

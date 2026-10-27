@@ -52,6 +52,13 @@ export type {
   CreateTrustedHostProfileRuntimeOptions,
   TrustedHostProfileRuntimeV1
 } from "./host-profile-runtime.js";
+/** @internal Explicit native-connector callback recovery authority. */
+export { createHostProfileCallbackRecoveryCatalog, hostProfileCallbackRecoveryFingerprint,
+  AKK_HOST_PROFILE_CALLBACK_RECOVERY, AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT
+} from "./host-profile-callback-recovery.js";
+export type { HostProfileCallbackRecoveryCatalogV1 } from "./host-profile-callback-recovery.js";
+export { readHostCallbackRecoveryWatch } from "./host-callback-recovery-candidates.js";
+export type { HostCallbackRecoveryWatch } from "./host-callback-recovery-candidates.js";
 
 /** Stable relay entrypoint for native Host connector packages. */
 export const defaultHostAdapterRelayPath = defaultSemanticToolRelayPath;

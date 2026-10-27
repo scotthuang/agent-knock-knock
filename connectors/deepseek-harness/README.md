@@ -253,30 +253,42 @@ The related controls are deliberately different:
 
 ## Callback delivery and recovery
 
-The synchronous callback acknowledgement means that the message was admitted
-to the exact DeepSeek Harness Agent's inbox/session log. It does not prove that
-the model consumed the message or that asynchronous persistence reached stable
-storage. `status` and Terminal Watch are the recovery path.
+On Hosts exposing persistent session recovery and a durability barrier, callback
+ownership is stored under the canonical Web Profile and AKK Store. Restarting
+that same Host restores the original persistent Session through DSH's session
+controller. The callback contract revision stays stable across restarts; the
+private socket and token still rotate. Each callback uses the current runtime's
+helper and credentials, never an old socket left in a temporary directory.
 
-- Inspect the original `turn_id` or `watch_id` with `status`. If that exact
-  record advertises `retry_callback`, a requested retry reuses the persisted
-  callback message and delivery identity. An uncertain result is not evidence
-  of non-delivery; do not replay it without a supported recovery action.
-- A completed Watch still provides its exact result even when the original
-  callback route is gone. Read that result; creating another Watch does not
-  recover or replay the historical notification. For work that is still
-  running, a fresh observation from a current `list` row requires the user's
-  monitoring request. Do not transfer an old record's callback ownership.
-- A Host restart creates a new private Profile revision. Existing watches retain
-  their original route, so callbacks owned by the old Host incarnation fail
-  closed instead of being redirected to a new Agent. There is deliberately no
-  cross-restart callback migration in this prerelease.
-- Replacing an Agent object with another Agent that has the same session id also
-  does not transfer its route. Start a current command/tool invocation from the
-  new Agent before expecting new callback ownership.
-- Exact process-lifetime idempotency records return the original acceptance id
-  for a duplicate callback. Reusing an idempotency key with different content
-  is rejected.
+- A successful callback acknowledgement means DSH admitted the message and its
+  session durability barrier completed. It does not prove that the model has
+  consumed the message or that the browser displayed it.
+- Delivery identity and the precreated DSH message ID are journaled before
+  admission. Retries retain the original ID; after restart, recovery checks the
+  original Session's own persisted events, including consumed inbox messages.
+  Inherited fork messages do not prove admission. Ambiguous evidence remains
+  uncertain instead of authorizing a duplicate injection.
+- The same session ID alone is not recovery authority: profile/Store ownership,
+  immutable Session header, and the live Agent object must match. A different
+  same-ID Agent in the current process cannot inherit an existing callback.
+- Inspect the original `turn_id` or `watch_id` with `status`. Observation and
+  settlement are separate from notification delivery. A working or unknown
+  activity Watch does not settle merely because the Host restarted. Terminal
+  activity becoming idle remains best-effort evidence, not exact task success.
+- Older Hosts without the required APIs retain live-session callback behavior
+  and log that restart recovery is unavailable. OpenClaw and other connectors
+  do not opt into the DSH recovery authority.
+
+Watches created by the earlier process-private connector require explicit
+operator adoption; their nonce and encoded Session ID do not establish which
+Web Profile owns them. Select the original Watch and its original generated
+Profile file in the configuration below. AKK validates both records, the known
+connector callback contract, and the original persistent DSH Session before
+recording scoped adoption. It does not rewrite the Watch, change its deadline,
+reset an uncertain/permanent notification, or run the historical helper. Once
+adoption is recorded, the old temporary file is no longer required. Missing or
+conflicting evidence stops adoption with a diagnostic; do not hand-edit Store
+records or substitute a similarly named Session.
 
 ## Configuration
 
@@ -288,6 +300,11 @@ configuration object:
   name: '@scotthuang/agent-knock-knock-deepseek-harness'
   config:
     lifecycleIntervalMs: 5000
+    # Optional, explicit one-time adoption of an earlier connector's Watch:
+    # callbackRecovery:
+    #   adoptWatches:
+    #     - watchId: terminal-watch-user-send-<exact-id>
+    #       historicalProfilePath: /absolute/path/to/original/host-profile.json
     pluginConfig:
       storeDir: /absolute/path/to/akk-store
 ```
@@ -296,10 +313,9 @@ configuration object:
 `storeDir`; a relative value is resolved from the Web Host's working directory.
 When omitted, this connector uses
 `~/.agent-knock-knock/hosts/deepseek-harness/store` for both tools and lifecycle
-reconciliation. Keep a custom Store separate from OpenClaw, Pi, and other DSH
-Host processes: the pinned core does not isolate every native callback claim
-by Host authority when several Hosts share one Store. An unrelated reconciler
-can otherwise claim a callback that it cannot deliver.
+reconciliation. Keep a custom Store separate from OpenClaw, Pi, and other DSH Host processes.
+The opt-in recovery runtime filters unowned callback routes before claiming
+notifications; this does not authorize unrelated Hosts to share Store writers.
 
 The default separates DSH from other Host types, not from another DSH process.
 If running multiple DSH Hosts or profiles concurrently, configure a distinct
@@ -328,7 +344,12 @@ The optional bundle patch mounts only the Host plugin:
   absolute Node executable and package artifact without a shell or `PATH`
   lookup.
 - The callback IPC frame is authenticated and bounded. Successful admission is
-  tied to one exact Agent object and one Host incarnation.
+  tied to the authorized persistent Session and its current exact Agent object.
+- Durable callback authority and delivery journals are private files under
+  `<profile>/.akk-callback-authority/`, scoped to the canonical Store path. An
+  exclusive process-generation lock rejects concurrent owners; only a proven
+  dead owner can be reclaimed. Keep this directory when upgrading or backing
+  up the profile. Deleting it discards restart recovery authority.
 - AKK's durable Store contains task, Session, Turn, receipt, watch, and callback
   recovery metadata and may contain user request or callback text. AKK creates
   Store directories as `0700` and files as `0600`; keep a custom Store on a
@@ -348,8 +369,8 @@ The optional bundle patch mounts only the Host plugin:
 | Activation reports an unsupported or split Harness | Check `dsh --version` and run `dsh plugin --profile web why @deepseek-ai/dsh-base @deepseek-ai/dsh-agent @deepseek-ai/dsh-commands @deepseek-ai/dsh-llm @deepseek-ai/dsh-tools`. Update the whole Host coherently; do not repair it with a standalone connector npm install. |
 | `/akk list` finds no live conversations | Check the selected target's direct-connection or terminal discovery diagnostics and core compatibility. A supported Codex CLI backend/Desktop connection does not require tmux/Herdr; terminal-only control needs an eligible live pane. Do not infer missing identity from cwd alone. |
 | A mutation is absent or rejected | Refresh `/akk list` or structured `list` and use only the action currently advertised for that exact row. Resolve a current approval first when it blocks input. Do not reuse stale IDs or action payloads. |
-| The callback never appears | Query the original Turn/Watch Status and separate task result, callback admission, and user visibility. Use only a retry/recovery action advertised for that record and requested by the user. A new Host does not inherit old callback ownership. |
-| Callback delivery reports IPC unavailable or timeout | Keep the originating Web Host alive and inspect whether it was restarted or disposed. The socket is Host-process-private and has an eight-second callback boundary; there is no cross-process fallback route. |
+| The callback never appears | Query the original Turn/Watch Status and separate task result, callback admission, and user visibility. Use only a retry/recovery action advertised for that record and requested by the user. Recovery requires the same profile/Store owner and original persistent Session; legacy routes require explicit adoption. |
+| Callback delivery reports IPC unavailable or timeout | Inspect the current Host startup and recovery diagnostics. A restarted authorized Host uses its new private socket; old socket files are not recovery targets. Missing session authority must be resolved explicitly. |
 | A Watch completed but its callback was missed | Read the original `watch_id` Status for its exact task result and callback disposition. Do not create a replacement Watch for completed work or treat it as historical-notification recovery. |
 | A tool call fails schema validation | Pass only the documented fields and complete semantic IDs returned by AKK. DeepSeek's discovery schema is a projection; the connector always enforces the full original AKK schema before execution. |
 | Windows, headless, or one-shot use fails | These surfaces are outside this prerelease's supported scope. Use the resident POSIX Web Host. |

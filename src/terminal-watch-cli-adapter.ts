@@ -551,7 +551,7 @@ function createWatchCallbackDeliveryEligibility(
     return explicitRoute
       ? hostProfileCallbackRouteMatchesRuntime(route, {
           callbackRoute: explicitRoute,
-          controllerScope: options.callbackRouteControllerScope ?? "startup_v1"
+          controllerScope: options.callbackRouteControllerScope ?? "startup_v1", recoveryRoutes: options.callbackRecoveryRoutes
         })
       : route.transport === "openclaw_gateway_v1";
   };

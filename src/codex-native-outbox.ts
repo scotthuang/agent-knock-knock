@@ -1,12 +1,13 @@
 import { backendCallbackMaxAttempts, backendObservationStopped } from "./backend-task-recovery.js";
 import { randomUUID } from "node:crypto";
-import { parseCallbackAttemptOutcome, type CallbackAttemptOutcome, type CallbackTransportContextV1, type CallbackTransportDeliverInput } from "./callback-transport.js";
+import { callbackRouteDeliveryEligible, parseCallbackAttemptOutcome, type CallbackAttemptOutcome, type CallbackTransport, type CallbackTransportContextV1, type CallbackTransportDeliverInput } from "./callback-transport.js";
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
 import type { CodexNativeNotification, CodexNativeStateRepository, CodexNativeTaskRecord } from "./codex-native-state-store.js";
 
 export interface NativeOutboxDependencies {
   repository: CodexNativeStateRepository;
   deliver?(input: CallbackTransportDeliverInput): CallbackAttemptOutcome | Promise<CallbackAttemptOutcome>;
+  canDeliver?: CallbackTransport["canDeliver"];
   resolveCallbackContext?(task: CodexNativeTaskRecord): CallbackTransportContextV1 | undefined;
   now?(): Date;
   randomUUID?(): string;
@@ -56,8 +57,11 @@ export function createNativeNotificationOutbox(deps: NativeOutboxDependencies) {
   }
   return {
     async deliverPending(id: string, notificationId?: string): Promise<void> {
+      const previous = deps.repository.load(id);
+      if (previous && !callbackRouteDeliveryEligible(deps, previous.callback_route)) return;
       let claimed: { task: CodexNativeTaskRecord; notification: CodexNativeNotification } | undefined;
       update(id, task => {
+        if (!callbackRouteDeliveryEligible(deps, task.callback_route)) return;
         for (const n of task.notifications) {
           if (notificationId && n.id !== notificationId) continue;
           if (n.status === "leased" && Date.parse(n.lease_expires_at!) <= now().getTime()) {

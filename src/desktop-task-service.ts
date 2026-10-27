@@ -4,8 +4,8 @@ import { backendCallbackMaxAttempts } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
-  createCallbackEnvelope, parseCallbackAttemptOutcome, parseCallbackRoute,
-  type CallbackAttemptOutcome, type CallbackRouteV1,
+  callbackRouteDeliveryEligible, createCallbackEnvelope, parseCallbackAttemptOutcome, parseCallbackRoute,
+  type CallbackAttemptOutcome, type CallbackRouteV1, type CallbackTransport,
   type CallbackTransportContextV1, type CallbackTransportDeliverInput
 } from "./callback-transport.js";
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
@@ -30,6 +30,7 @@ export interface DesktopTaskServiceDependencies extends DesktopTransportPort {
   /** Notification wording follows the installed build; never authorizes dispatch. */
   interactionResponsesVerified?: DesktopCapabilityProfile | boolean;
   deliver?(input: CallbackTransportDeliverInput): CallbackAttemptOutcome | Promise<CallbackAttemptOutcome>;
+  canDeliver?: CallbackTransport["canDeliver"];
   resolveCallbackContext?(task: DesktopTaskRecord): CallbackTransportContextV1 | undefined;
   now?(): Date;
   randomUUID?(): string;
@@ -190,6 +191,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     let claimed: { task: DesktopTaskRecord; notification: DesktopNotification } | undefined;
     this.repo.withLock(id, () => {
       const task = this.status(id); let dirty = false;
+      if (!callbackRouteDeliveryEligible(this.deps, task.callback_route)) return;
       for (const notification of task.notifications) {
         if (notificationId && notification.id !== notificationId) continue;
         if (notification.status === "leased" && Date.parse(notification.lease_expires_at!) <= this.now().getTime()) {

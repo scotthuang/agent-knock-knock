@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import type { DurableCallbackAuthority, DurableRouteRecord } from "./callback-authority.js";
+import type { DshRecoveryHostPorts } from "./host-ports.js";
 
 // DSH 0.2 removed the catch-all plugin source. Each producer owns one kind;
 // declaration merging is also supported by the older reviewed Host releases.
@@ -48,6 +50,13 @@ export interface LiveAgentLookup {
   get(agentId: Agent["id"]): Agent | undefined;
 }
 
+export interface RecoverableCallbackPorts {
+  readonly authority: DurableCallbackAuthority;
+  readonly host: DshRecoveryHostPorts;
+  readonly callbackRoute?: (controllerId: string) =>
+    Parameters<DurableCallbackAuthority["registerCallbackRoute"]>[1];
+}
+
 interface AcceptedDelivery {
   readonly fingerprint: string;
   readonly acceptanceId: string;
@@ -63,6 +72,10 @@ export class AgentRouteTable {
   private readonly disposedAgents = new WeakSet<Agent>();
   private readonly routeByControllerId = new Map<string, AgentRoute>();
   private readonly accepted = new Map<string, AcceptedDelivery>();
+  private readonly deliveries = new Map<string, Promise<CallbackAcknowledgement>>();
+  private readonly admissions = new Map<string, "admitted" | "uncertain">();
+  private readonly claimedControllers = new Map<string, Agent>();
+  private readonly restoring = new Map<string, Promise<AgentRoute>>();
   private nextAgentNonce = 0;
   private active = true;
 
@@ -70,6 +83,7 @@ export class AgentRouteTable {
     private readonly agents: LiveAgentLookup,
     private readonly createUserMessage: CreateUserMessage,
     private readonly instanceNonce = randomBytes(12).toString("hex"),
+    private readonly recovery?: RecoverableCallbackPorts,
   ) {}
 
   bind(agent: Agent): AgentRoute {
@@ -81,15 +95,38 @@ export class AgentRouteTable {
       throw new Error("AKK cannot reuse a disposed DeepSeek Harness Agent");
     }
     const existing = this.routeByAgent.get(agent);
-    if (existing) return existing;
+    if (existing) {
+      // Restoring an older callback may populate this cache before a tool
+      // binds. New tool Watches use the current Profile contract, which must
+      // also survive the next package/Profile revision.
+      if (this.recovery?.callbackRoute) this.recovery.authority.registerCallbackRoute(
+        existing.controllerId, this.recovery.callbackRoute(existing.controllerId),
+      );
+      return existing;
+    }
 
     this.nextAgentNonce += 1;
-    const controllerId = [
+    let controllerId = [
       "akk-dsh",
       this.instanceNonce,
-      this.nextAgentNonce.toString(36),
+      this.recovery ? randomBytes(12).toString("hex") : this.nextAgentNonce.toString(36),
       Buffer.from(String(agent.id), "utf8").toString("base64url"),
     ].join(":");
+    if (this.recovery) {
+      const identity = this.recovery.host.sessionIdentity(agent);
+      let persisted = this.recovery.authority.bindRoute(identity, controllerId);
+      const claimed = this.claimedControllers.get(persisted.controllerId);
+      if (claimed && claimed !== agent) {
+        // A replacement may own new commands, but must never inherit the
+        // previous live object's callback controller within this Host run.
+        persisted = this.recovery.authority.bindFreshRoute(identity, controllerId);
+      }
+      controllerId = persisted.controllerId;
+      if (this.recovery.callbackRoute) this.recovery.authority.registerCallbackRoute(
+        controllerId, this.recovery.callbackRoute(controllerId),
+      );
+      this.claimedControllers.set(controllerId, agent);
+    }
     const route = Object.freeze({ controllerId, agent });
     this.routeByAgent.set(agent, route);
     this.routeByControllerId.set(controllerId, route);
@@ -109,6 +146,7 @@ export class AgentRouteTable {
     if (!this.active || !validRequest(request)) {
       return rejected(base, "invalid_or_stopped_callback_route");
     }
+    if (this.recovery) return retry(base, "callback_requires_durable_delivery");
 
     const deliveryKey = `${request.controllerId}\u0000${request.idempotencyKey}`;
     const fingerprint = requestFingerprint(request);
@@ -152,6 +190,111 @@ export class AgentRouteTable {
     const acceptanceId = String(message.id);
     this.accepted.set(deliveryKey, { fingerprint, acceptanceId });
     return accepted(base, acceptanceId);
+  }
+
+  /** Serialize one delivery through durable admission and acknowledgement. */
+  deliverRecoverable(request: CallbackRequest): Promise<CallbackAcknowledgement> {
+    if (!this.recovery) return Promise.resolve(this.deliver(request));
+    const base = acknowledgementBase(request);
+    if (!this.active || !validRequest(request)) {
+      return Promise.resolve(rejected(base, "invalid_or_stopped_callback_route"));
+    }
+    const key = `${request.controllerId}\u0000${request.idempotencyKey}`;
+    const prior = this.deliveries.get(key);
+    const pending = (prior ?? Promise.resolve()).then(() => this.deliverDurably(request, key))
+      .catch(() => this.active ? retry(base, "callback_recovery_unavailable")
+        : rejected(base, "invalid_or_stopped_callback_route"));
+    this.deliveries.set(key, pending);
+    void pending.finally(() => {
+      if (this.deliveries.get(key) === pending) this.deliveries.delete(key);
+    });
+    return pending;
+  }
+
+  private async deliverDurably(request: CallbackRequest, key: string): Promise<CallbackAcknowledgement> {
+    const base = acknowledgementBase(request);
+    const recovery = this.recovery!;
+    if (!this.active) return rejected(base, "invalid_or_stopped_callback_route");
+    const persisted = recovery.authority.getRoute(request.controllerId);
+    if (!persisted) return rejected(base, "callback_controller_unauthorized");
+    const claimed = this.claimedControllers.get(request.controllerId);
+    if (claimed && !this.isLive(claimed)) return rejected(base, "agent_route_not_live");
+    const fingerprint = requestFingerprint(request);
+    let record = recovery.authority.readDelivery(request.controllerId, request.idempotencyKey);
+    if (record && record.requestFingerprint !== fingerprint) return rejected(base, "idempotency_collision");
+    if (record?.state === "accepted") return accepted(base, record.messageId);
+    const route = await this.restoreRoute(persisted);
+    if (!this.currentRoute(route, persisted)) return rejected(base, "agent_route_not_live");
+
+    let message = this.createUserMessage({
+      content: [{ type: "text", text: request.body }],
+      source: { kind: "agent-knock-knock", form: "notice", summary: "AKK terminal update" },
+    });
+    let admitted = this.admissions.get(key) === "admitted";
+    if (record) {
+      // The Host must flush and inspect complete, own-session message events.
+      // An unreadable inventory throws; absence is never inferred from error.
+      admitted = await recovery.host.findOwnMessage(route.agent, record.messageId) || admitted;
+      if (!this.currentRoute(route, persisted)) return rejected(base, "agent_route_not_live");
+      if (!admitted && this.admissions.has(key)) return retry(base, "agent_inbox_admission_uncertain");
+      message = { ...message, id: record.messageId as typeof message.id };
+    } else {
+      record = recovery.authority.prepareDelivery(request.controllerId, request.idempotencyKey, {
+        requestFingerprint: fingerprint, messageId: String(message.id),
+      });
+    }
+    if (!admitted) {
+      if (!this.currentRoute(route, persisted)) return rejected(base, "agent_route_not_live");
+      if (route.agent.status !== "running" && route.agent.status !== "idle") {
+        return rejected(base, "agent_status_invalid");
+      }
+      this.admissions.set(key, "uncertain");
+      try {
+        if (route.agent.status === "running") route.agent.inject(message);
+        else route.agent.followup(message);
+        this.admissions.set(key, "admitted");
+      } catch {
+        return retry(base, "agent_inbox_admission_uncertain");
+      }
+    }
+    if (!await recovery.host.flush(route.agent)) return retry(base, "agent_session_not_durable");
+    if (!this.currentRoute(route, persisted)) return rejected(base, "agent_route_not_live");
+    recovery.authority.acceptDelivery(request.controllerId, request.idempotencyKey, {
+      requestFingerprint: fingerprint, messageId: record.messageId,
+    });
+    return accepted(base, record.messageId);
+  }
+
+  private isLive(agent: Agent): boolean {
+    return this.active && !this.disposedAgents.has(agent) && this.agents.get(agent.id) === agent;
+  }
+
+  private currentRoute(route: AgentRoute, persisted: DurableRouteRecord): boolean {
+    if (!this.isLive(route.agent)) return false;
+    const identity = this.recovery!.host.sessionIdentity(route.agent);
+    return identity.sessionId === persisted.sessionId &&
+      identity.headerFingerprint === persisted.headerFingerprint;
+  }
+
+  private async restoreRoute(persisted: DurableRouteRecord): Promise<AgentRoute> {
+    const existing = this.routeByControllerId.get(persisted.controllerId);
+    if (existing) return existing;
+    const restoring = this.restoring.get(persisted.controllerId);
+    if (restoring) return restoring;
+    const pending = (async () => {
+      const agent = await this.recovery!.host.restoreAgent(persisted);
+      const route = Object.freeze({ controllerId: persisted.controllerId, agent });
+      if (!this.currentRoute(route, persisted)) throw new Error("Restored Agent identity does not match callback authority");
+      const claimed = this.claimedControllers.get(persisted.controllerId);
+      if (claimed && claimed !== agent) throw new Error("Callback Agent was replaced during recovery");
+      this.claimedControllers.set(persisted.controllerId, agent);
+      this.routeByControllerId.set(persisted.controllerId, route);
+      this.routeByAgent.set(agent, route);
+      return route;
+    })();
+    this.restoring.set(persisted.controllerId, pending);
+    try { return await pending; }
+    finally { this.restoring.delete(persisted.controllerId); }
   }
 
   close(): void {

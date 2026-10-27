@@ -404,6 +404,17 @@ test("route-bound Watch reconciliation keeps each initiating controller session"
   });
   assert.equal(deliveries.length, 0, "a different Profile revision cannot claim");
   await facade.runReconcileWatches({
+    storeDir: fixture.storeDir, callbackRoute: lifecycleTemplate,
+    callbackRouteControllerScope: "route_bound_v1",
+    callbackRecoveryRoutes: [{ ...initiatingRoute, controller_session_id: "another-agent" }]
+  });
+  assert.equal(deliveries.length, 0, "historical authority is scoped to the exact controller");
+  await facade.runReconcileWatches({
+    storeDir: fixture.storeDir, callbackRoute: lifecycleTemplate,
+    callbackRouteControllerScope: "route_bound_v1", callbackRecoveryRoutes: [initiatingRoute]
+  });
+  assert.equal(deliveries.length, 1, "an explicitly authorized historical route can use the current Host");
+  await facade.runReconcileWatches({
     storeDir: fixture.storeDir,
     callbackRoute: {
       ...lifecycleTemplate,

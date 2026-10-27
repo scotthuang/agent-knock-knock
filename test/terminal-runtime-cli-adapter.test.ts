@@ -497,10 +497,15 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const executable = path.join(directory, "lsof");
   const argsPath = path.join(directory, "args.txt");
+  const codexExecutable = path.join(directory, "releases", "0.153.0", "bin", "codex");
+  fs.mkdirSync(path.dirname(codexExecutable), { recursive: true });
+  fs.writeFileSync(codexExecutable, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.153.0'\n", { mode: 0o700 });
+  const evidence = codexProcessEvidence(directory, codexExecutable);
   fs.writeFileSync(executable, [
     "#!/bin/sh",
     `printf '%s\\n' \"$@\" > \"${argsPath}\"`,
-    "printf '%s\\n' 'n/Users/test/.codex/packages/standalone/releases/0.153.0-aarch64-apple-darwin/bin/codex'",
+    `/bin/cat '${evidence.mappedPath}'`,
+    "printf '%s\\n' 'ftxt'",
     "printf '%s\\n' 'n/Users/test/.local/share/claude/versions/2.1.259'"
   ].join("\n"));
   fs.chmodSync(executable, 0o700);
@@ -510,7 +515,7 @@ test("agent versions and provider-owned takeover facts stay data-only", async (t
   }, async () => {
     assert.equal(runtime().agentVersionForRunningProcess("codex", 77), "0.153.0");
     assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
-      ["-a", "-p", "77", "-d", "txt", "-Fn"]);
+      ["-a", "-p", "77", "-d", "txt", "-FpnDi"]);
     assert.equal(runtime().agentVersionForRunningProcess("claude", 78), "2.1.259");
   });
   assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
@@ -591,17 +596,20 @@ test("running Codex 0.155.1 catalog uses its exact executable and custom CODEX_H
   fs.mkdirSync(workingDirectory);
   fs.writeFileSync(codexExecutable, [
     "#!/bin/sh",
+    "if [ \"$1\" = '--version' ]; then printf '%s\\n' 'codex-cli 0.155.1'; exit 0; fi",
     `printf '%s\\n' \"$@\" > \"${argsPath}\"`,
     `printf '%s\\n' \"$CODEX_HOME\" > \"${homePath}\"`,
     `pwd > \"${cwdPath}\"`,
     "printf '%s\\n' '{\"models\":[{\"slug\":\"gpt-6-astra\",\"display_name\":\"GPT-6 Astra\",\"visibility\":\"list\",\"supported_reasoning_levels\":[{\"effort\":\"high\"},{\"effort\":\"ultra\"}]}]}'"
   ].join("\n"));
   fs.chmodSync(codexExecutable, 0o700);
+  fs.writeFileSync(secondExecutable, "unused");
+  const evidence = codexProcessEvidence(directory, codexExecutable);
   const writeLsof = (paths: readonly string[]) => {
     fs.writeFileSync(lsofExecutable, [
       "#!/bin/sh",
       `printf '%s\\n' \"$@\" > \"${lsofArgsPath}\"`,
-      ...paths.map((entry) => `printf '%s\\n' 'n${entry}'`)
+      `printf '%s\\n' '${evidence.mappedRecords(paths)}'`
     ].join("\n"));
     fs.chmodSync(lsofExecutable, 0o700);
   };
@@ -622,7 +630,7 @@ test("running Codex 0.155.1 catalog uses its exact executable and custom CODEX_H
     }] });
     assert.deepEqual(
       fs.readFileSync(lsofArgsPath, "utf8").trim().split("\n"),
-      ["-a", "-p", "77", "-d", "txt", "-Fn"]
+      ["-a", "-p", "77", "-d", "txt", "-FpnDi"]
     );
     assert.deepEqual(
       fs.readFileSync(argsPath, "utf8").trim().split("\n"),
@@ -650,7 +658,7 @@ test("running Codex 0.155.1 catalog uses its exact executable and custom CODEX_H
     );
 
     writeLsof([codexExecutable]);
-    fs.writeFileSync(codexExecutable, "#!/bin/sh\nexit 7\n");
+    fs.writeFileSync(codexExecutable, "#!/bin/sh\nif [ \"$1\" = '--version' ]; then printf '%s\\n' 'codex-cli 0.155.1'; exit 0; fi\nexit 7\n");
     fs.chmodSync(codexExecutable, 0o700);
     assert.throws(
       () => runtime({ codexHome }).codexModelCatalogForRunningProcess(
@@ -701,6 +709,90 @@ test("static terminal observations never inspect host executable versions", asyn
 
   assert.equal(fs.existsSync(callsPath), false);
 });
+
+test("running Codex versions follow the exact npm native image and reject stale process evidence", async (t) => {
+  for (const scenario of ["npm wrapper", "direct native", "ambiguous children",
+    "grandchild only", "different arguments", "replaced image", "wrong mapped PID",
+    "root reused", "child reused", "image changed during probe"] as const) {
+    await t.test(scenario, async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-codex-version-"));
+      t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+      const executable = path.join(directory, "node_modules", "@openai", "codex-darwin-arm64",
+        "vendor", "aarch64-apple-darwin", "bin", "codex");
+      fs.mkdirSync(path.dirname(executable), { recursive: true });
+      fs.writeFileSync(executable, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.164.0'\n", { mode: 0o700 });
+      const nativePid = scenario === "direct native" ? 77 : 78;
+      const evidence = codexProcessEvidence(directory, executable, nativePid);
+      const wrapper = `node ${directory}/bin/codex --yolo`;
+      const nativeCommand = `${executable} --yolo`;
+      const rows = nativePid === 77 ? [evidence.processRow(77, 10, nativeCommand)] : [
+        evidence.processRow(77, 10, wrapper), evidence.processRow(78, 77, nativeCommand)
+      ];
+      if (scenario === "ambiguous children") rows.push(evidence.processRow(79, 77, nativeCommand));
+      if (scenario === "grandchild only") {
+        rows[1] = evidence.processRow(78, 77, "/bin/sh worker");
+        rows.push(evidence.processRow(79, 78, nativeCommand));
+      }
+      if (scenario === "different arguments") rows[1] = evidence.processRow(78, 77, `${executable} app-server`);
+      evidence.writeProcesses(rows);
+      if (scenario === "replaced image") fs.writeFileSync(evidence.mappedPath,
+        evidence.mappedRecords([executable]).replace(/\ni\d+/u, "\ni1"));
+      if (scenario === "wrong mapped PID") fs.writeFileSync(evidence.mappedPath,
+        evidence.mappedRecords([executable]).replace(`p${nativePid}`, "p999"));
+      const marker = path.join(directory, "version-probed");
+      const probeEffect: string[] = [];
+      if (scenario === "root reused" || scenario === "child reused") {
+        const changed = [...rows];
+        const index = scenario === "root reused" ? 0 : 1;
+        changed[index] = changed[index]!.replace(evidence.birth, evidence.laterBirth);
+        const replacement = path.join(directory, "replacement-processes");
+        fs.writeFileSync(replacement, `${changed.join("\n")}\n`);
+        probeEffect.push(`/bin/cat '${replacement}' > '${evidence.processesPath}'`);
+      }
+      if (scenario === "image changed during probe") probeEffect.push("printf '\\n' >> \"$0\"");
+      fs.writeFileSync(executable, ["#!/bin/sh", `printf 'probed' > '${marker}'`,
+        ...probeEffect, "printf '%s\\n' 'codex-cli 0.164.0'", ""].join("\n"));
+      // A conflicting PATH installation must never supply running-version authority.
+      fs.writeFileSync(path.join(directory, "codex"), "#!/bin/sh\nprintf '%s\\n' 'codex-cli 9.9.9'\n", { mode: 0o700 });
+      await runCliCommandExecution("runtime-npm-version-test", {}, {
+        env: { PATH: directory, HOME: directory }, runtimeLog: () => undefined
+      }, async () => {
+        const instance = runtime();
+        const expected = ["npm wrapper", "direct native"].includes(scenario) ? "0.164.0" : undefined;
+        assert.equal(instance.agentVersionForRunningProcess("codex", 77), expected);
+        const shouldProbe = expected !== undefined || ["root reused", "child reused", "image changed during probe"].includes(scenario);
+        assert.equal(fs.existsSync(marker), shouldProbe);
+        if (scenario === "ambiguous children") {
+          evidence.writeProcesses(rows.slice(0, 2));
+          assert.equal(instance.agentVersionForRunningProcess("codex", 77), "0.164.0",
+            "an unavailable observation must not be cached after the ambiguity clears");
+        }
+      });
+    });
+  }
+});
+
+/** Real files plus OS-command fixtures exercise the production runtime boundary. */
+function codexProcessEvidence(directory: string, executable: string, nativePid = 77) {
+  const psDate = (offset: number) => new Date(Date.now() + offset).toUTCString()
+    .replace(/^(\w{3}), (\d{2}) (\w{3}) (\d{4}) (\S+) GMT$/u, "$1 $3 $2 $5 $4");
+  const birth = psDate(60_000);
+  const laterBirth = psDate(120_000);
+  const processesPath = path.join(directory, "processes.txt");
+  const mappedPath = path.join(directory, "mapped.txt");
+  const processRow = (pid: number, ppid: number, command: string) => `${pid} ${ppid} ${birth} ${command}`;
+  const writeProcesses = (rows: readonly string[]) => fs.writeFileSync(processesPath, `${rows.join("\n")}\n`);
+  const mappedRecords = (paths: readonly string[]) => [`p${nativePid}`, ...paths.flatMap(file => {
+    const stat = fs.statSync(file, { bigint: true });
+    return ["ftxt", `D0x${stat.dev.toString(16)}`, `i${stat.ino}`, `n${file}`];
+  }), ""].join("\n");
+  writeProcesses([processRow(nativePid, 10, `${executable} --yolo`)]);
+  fs.writeFileSync(mappedPath, mappedRecords([executable]));
+  for (const [command, file] of [["ps", processesPath], ["lsof", mappedPath]] as const) {
+    fs.writeFileSync(path.join(directory, command), `#!/bin/sh\n/bin/cat '${file}'\n`, { mode: 0o700 });
+  }
+  return { birth, laterBirth, processesPath, mappedPath, processRow, writeProcesses, mappedRecords };
+}
 
 function agentSessionProvider(
   active: ActiveCodexProcess[],

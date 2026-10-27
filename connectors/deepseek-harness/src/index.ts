@@ -27,7 +27,11 @@ import {
   type SupportedDeepSeekHarnessVersion,
 } from "./constants.js";
 import { createCallbackIpcServer } from "./ipc.js";
-import { createConnectorProfileResources, resolveConnectorPluginConfig } from "./profile.js";
+import { createConnectorProfileResources, connectorCallbackRoute, resolveConnectorPluginConfig,
+  type ConnectorProfileResources } from "./profile.js";
+import { openCallbackAuthority, type CallbackAuthority } from "./callback-authority.js";
+import { createDshRecoveryHostPorts } from "./host-ports.js";
+import { adoptLegacyCallbackWatches, type LegacyCallbackWatchAdoption } from "./legacy-callback-adoption.js";
 import {
   AgentRouteTable,
   type CreateUserMessage,
@@ -47,11 +51,16 @@ export interface Config {
   lifecycleIntervalMs?: number;
   /** Existing AKK plugin options such as storeDir or executor timeouts. */
   pluginConfig?: Record<string, unknown>;
+  /** Explicit operator adoption of pre-durable-routing Watches into this profile. */
+  callbackRecovery?: { adoptWatches?: LegacyCallbackWatchAdoption[] };
 }
 
 export const Config: z<Config> = z.object({
   lifecycleIntervalMs: z.number().min(50).default(5_000),
   pluginConfig: z.dict(z.any()).default({}),
+  callbackRecovery: z.object({
+    adoptWatches: z.array(z.object({ watchId: z.string(), historicalProfilePath: z.string() })).default([]),
+  }),
 });
 
 /**
@@ -74,6 +83,9 @@ export interface ConnectorDependencies {
   readonly createConnectorProfileResources: typeof createConnectorProfileResources;
   readonly createCallbackIpcServer: typeof createCallbackIpcServer;
   readonly createHostAdapter: typeof createHostAdapter;
+  readonly createDshRecoveryHostPorts: typeof createDshRecoveryHostPorts;
+  readonly openCallbackAuthority: typeof openCallbackAuthority;
+  readonly adoptLegacyCallbackWatches: typeof adoptLegacyCallbackWatches;
 }
 
 const DEFAULT_DEPENDENCIES: ConnectorDependencies = Object.freeze({
@@ -81,6 +93,9 @@ const DEFAULT_DEPENDENCIES: ConnectorDependencies = Object.freeze({
   createConnectorProfileResources,
   createCallbackIpcServer,
   createHostAdapter,
+  createDshRecoveryHostPorts,
+  openCallbackAuthority,
+  adoptLegacyCallbackWatches,
 });
 
 /** @internal Mount with replaceable process/IPC seams for deterministic tests. */
@@ -91,11 +106,27 @@ export async function applyWithDependencies(
 ): Promise<() => Promise<void>> {
   const resolved = { ...DEFAULT_DEPENDENCIES, ...dependencies };
   const harnessRuntime = await resolved.loadSupportedDeepSeekHarnessRuntime();
+  // Cordis activates rows by service availability, not bundle ordering. A
+  // capable Web Host must not permanently select live-only routing merely
+  // because its session controller is still starting. Older package sets do
+  // not gain mandatory dependencies on services they never provided.
+  if (harnessRuntime.supportsCallbackRecovery && ctx.get("profileContext")) {
+    const recovery = ctx.inject(["sessionController", "sessionQuery", "sessions"], (child) =>
+      mountResolvedConnector(child, config, resolved, harnessRuntime));
+    return async () => { await recovery.dispose(); };
+  }
+  return mountResolvedConnector(ctx, config, resolved, harnessRuntime);
+}
 
+async function mountResolvedConnector(
+  ctx: Context,
+  config: Config,
+  resolved: ConnectorDependencies,
+  harnessRuntime: SupportedDeepSeekHarnessRuntime,
+): Promise<() => Promise<void>> {
   const pluginConfig = resolveConnectorPluginConfig(config.pluginConfig);
-  const resources = resolved.createConnectorProfileResources(
-    harnessRuntime.version,
-  );
+  let resources: ConnectorProfileResources | undefined;
+  let authority: CallbackAuthority | undefined;
   let routes: AgentRouteTable | undefined;
   let server: ReturnType<typeof createCallbackIpcServer> | undefined;
   let adapter: HostAdapter | undefined;
@@ -103,28 +134,50 @@ export async function applyWithDependencies(
   let lifecycleStarted = false;
 
   try {
+    const recoveryHost = resolved.createDshRecoveryHostPorts(ctx, String(pluginConfig.storeDir));
+    const adoptions = config.callbackRecovery?.adoptWatches ?? [];
+    if (recoveryHost) {
+      authority = resolved.openCallbackAuthority(recoveryHost);
+      await resolved.adoptLegacyCallbackWatches({
+        adoptions, storeDirectory: recoveryHost.storeDirectory, authority, host: recoveryHost,
+      });
+    } else if (adoptions.length) {
+      throw new Error("DSH cannot adopt callback routes without persistent session recovery APIs; " +
+        "use a Host exposing profileContext, sessionController, sessionQuery, and sessions.flush");
+    } else {
+      ctx.logger.warn("AKK callback recovery is unavailable in this Host; existing live-session callbacks remain enabled");
+    }
+    const activeResources = resolved.createConnectorProfileResources(
+      harnessRuntime.version, undefined,
+      authority ? { ownerScope: authority.scope, routes: authority.callbackRoutes() } : undefined,
+    );
+    resources = activeResources;
     const bundledSkill = loadBundledAkkSkillBundle();
     const builtRoutes = new AgentRouteTable(
       ctx.agents,
       harnessRuntime.createUserMessage,
-      resources.instanceNonce,
+      activeResources.instanceNonce,
+      authority && recoveryHost ? {
+        authority, host: recoveryHost,
+        callbackRoute: (controllerId) => connectorCallbackRoute(activeResources, controllerId),
+      } : undefined,
     );
     routes = builtRoutes;
     const builtServer = resolved.createCallbackIpcServer({
-      socketPath: resources.socketPath,
-      token: resources.token,
+      socketPath: activeResources.socketPath,
+      token: activeResources.token,
       routes: builtRoutes,
     });
     server = builtServer;
-    const lifecycleControllerId = `akk-dsh:${resources.instanceNonce}:lifecycle`;
+    const lifecycleControllerId = `akk-dsh:${activeResources.instanceNonce}:lifecycle`;
     const builtAdapter = resolved.createHostAdapter({
       environmentForContext(context) {
         if (context.sessionKey !== context.sessionId) {
           throw new Error("DeepSeek Harness AKK controller identities diverged");
         }
-        return resources.environment(context.sessionKey);
+        return activeResources.environment(context.sessionKey);
       },
-      lifecycleEnvironment: resources.environment(lifecycleControllerId),
+      lifecycleEnvironment: activeResources.environment(lifecycleControllerId),
       lifecycleIntervalMs: config.lifecycleIntervalMs,
       pluginConfig,
       logger: {
@@ -177,14 +230,16 @@ export async function applyWithDependencies(
       await builtAdapter.lifecycle.stop();
       builtRoutes.close();
       await builtServer.stop();
-      resources.remove();
+      activeResources.remove();
+      authority?.close();
     };
   } catch (error) {
     for (const dispose of disposers.reverse()) dispose();
     if (lifecycleStarted && adapter) await adapter.lifecycle.stop();
     routes?.close();
     if (server) await server.stop();
-    resources.remove();
+    resources?.remove();
+    authority?.close();
     throw error;
   }
 }
@@ -359,6 +414,8 @@ export interface DeepSeekHarnessManifestResolver {
   runtimeAnchorManifest(): unknown;
   runtimePackageManifest(packageName: string): unknown;
   runtimePackageEntry(packageName: string): string;
+  /** Optional recovery modules, resolved from the same launcher runtime anchor. */
+  sessionRecoveryPackageEntry?(packageName: string): string;
 }
 
 /** Host-owned DSH functions whose implementation must match the verified package set. */
@@ -366,7 +423,14 @@ export interface SupportedDeepSeekHarnessRuntime {
   readonly version: SupportedDeepSeekHarnessVersion;
   readonly createUserMessage: CreateUserMessage;
   readonly assertSupportedJsonSchema: AssertSupportedJsonSchema;
+  readonly supportsCallbackRecovery?: boolean;
 }
+
+const SESSION_RECOVERY_PACKAGES = Object.freeze([
+  { name: "@deepseek-ai/dsh-api-session-controller", exportName: "SessionController", method: "resolveAgent" },
+  { name: "@deepseek-ai/dsh-session-query", exportName: "SessionQueryEngine", method: "observeSession" },
+  { name: "@deepseek-ai/dsh-session", exportName: "SessionStore", method: "flush" },
+]);
 
 /** @internal Resolve compatibility evidence only from the real DSH launcher tree. */
 export function createDeepSeekHarnessManifestResolver(
@@ -409,7 +473,7 @@ export function createDeepSeekHarnessManifestResolver(
     launcherManifest: () => readPackageManifest(launcherManifestPath),
     runtimeAnchorManifest: () => readPackageManifest(runtimeAnchorManifestPath),
     runtimePackageManifest(packageName: string): unknown {
-      assertKnownRuntimePackageName(packageName);
+      if (!SESSION_RECOVERY_PACKAGES.some((item) => item.name === packageName)) assertKnownRuntimePackageName(packageName);
       let manifestPath: string;
       try {
         manifestPath = fs.realpathSync(
@@ -431,6 +495,12 @@ export function createDeepSeekHarnessManifestResolver(
           `DeepSeek Harness launcher cannot load runtime package ${packageName}`,
         );
       }
+    },
+    sessionRecoveryPackageEntry(packageName: string): string {
+      if (!SESSION_RECOVERY_PACKAGES.some((item) => item.name === packageName)) {
+        throw new Error(`unsupported DeepSeek Harness recovery package ${packageName}`);
+      }
+      return fs.realpathSync(requireFromRuntimeAnchor.resolve(packageName));
     },
   });
 }
@@ -465,7 +535,30 @@ export async function loadSupportedDeepSeekHarnessRuntime(
     createUserMessage: createUserMessage as CreateUserMessage,
     assertSupportedJsonSchema:
       assertSupportedJsonSchema as AssertSupportedJsonSchema,
+    supportsCallbackRecovery: await supportsSessionRecovery(resolver, version),
   });
+}
+
+async function supportsSessionRecovery(
+  resolver: DeepSeekHarnessManifestResolver,
+  version: SupportedDeepSeekHarnessVersion,
+): Promise<boolean> {
+  if (!resolver.sessionRecoveryPackageEntry) return false;
+  for (const capability of SESSION_RECOVERY_PACKAGES) {
+    let entry: string;
+    let manifest: unknown;
+    try {
+      entry = resolver.sessionRecoveryPackageEntry(capability.name);
+      manifest = resolver.runtimePackageManifest(capability.name);
+    } catch { return false; }
+    // A missing old API is optional. An installed split package set is not.
+    assertMatchingDeepSeekHarnessPackage(manifest, capability.name, version);
+    const loaded = await import(pathToFileURL(entry).href) as Record<string, unknown>;
+    const implementation = loaded[capability.exportName];
+    if (typeof implementation !== "function" ||
+        typeof implementation.prototype?.[capability.method] !== "function") return false;
+  }
+  return true;
 }
 
 /** @internal Fail before mounting if the launcher-owned DSH package set split. */
