@@ -37,6 +37,31 @@ test("helper returns an exact ACK through the authenticated Unix socket", async 
   }
 });
 
+test("IPC waits for asynchronous durable delivery before acknowledging the helper", async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const deliveryStarted = new Promise<void>((resolve) => { entered = resolve; });
+  const fixture = await callbackFixture(async () => { entered(); await pending; });
+  try {
+    let acknowledged = false;
+    const delivery = runCallbackHelper({ arguments: fixture.arguments,
+      body: "callback body", environment: fixture.environment }).then((value) => {
+      acknowledged = true;
+      return value;
+    });
+    await deliveryStarted;
+    assert.equal(acknowledged, false);
+    assert.equal(fixture.followed.length, 0);
+    release();
+    assert.equal((await delivery).result.status, "accepted");
+    assert.equal(fixture.followed.length, 1);
+  } finally {
+    release();
+    await fixture.close();
+  }
+});
+
 test("compiled callback helper executable emits the Profile JSON ACK", async () => {
   const fixture = await callbackFixture();
   try {
@@ -92,7 +117,7 @@ test("parses each required helper argument exactly once", () => {
   );
 });
 
-async function callbackFixture() {
+async function callbackFixture(beforeDelivery?: () => Promise<void>) {
   const resources = createConnectorProfileResources("0.1.2-alpha.1", {});
   const followed: unknown[] = [];
   const agent = {
@@ -107,6 +132,13 @@ async function callbackFixture() {
     "host",
   );
   const route = routes.bind(agent);
+  if (beforeDelivery) {
+    const deliver = routes.deliverRecoverable.bind(routes);
+    routes.deliverRecoverable = async (request) => {
+      await beforeDelivery();
+      return deliver(request);
+    };
+  }
   const server = createCallbackIpcServer({
     socketPath: resources.socketPath,
     token: resources.token,

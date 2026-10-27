@@ -212,6 +212,7 @@ test(`in-process CLI closes Codex ${version} List to one-shot model control with
   fs.mkdirSync(path.dirname(codexExecutable), { recursive: true });
   fs.writeFileSync(codexExecutable, [
     "#!/bin/sh",
+    `if [ "$1" = '--version' ]; then printf '%s\\n' 'codex-cli ${version}'; exit 0; fi`,
     "printf '%s\\n' '{\"models\":[" +
       "{\"slug\":\"gpt-6-astra\",\"display_name\":\"GPT-6 Astra\"," +
       "\"visibility\":\"list\",\"supported_reasoning_levels\":[" +
@@ -228,18 +229,29 @@ test(`in-process CLI closes Codex ${version} List to one-shot model control with
       "{\"effort\":\"high\"},{\"effort\":\"xhigh\"}]}]}'"
   ].join("\n"));
   fs.chmodSync(codexExecutable, 0o700);
+  const panePid = 9000;
+  const codexPid = 4242;
+  // Keep the simulated process birth after installation of its mapped image.
+  const processBirth = new Date(Date.now() + 60_000).toUTCString()
+    .replace(/^(\w{3}), (\d{2}) (\w{3}) (\d{4}) (\S+) GMT$/u, "$1 $3 $2 $5 $4");
+  const executableStat = fs.statSync(codexExecutable, { bigint: true });
   const lsofExecutable = path.join(fakeBin, "lsof");
   fs.writeFileSync(lsofExecutable, [
     "#!/bin/sh",
-    `printf '%s\\n' 'n${codexExecutable}'`
+    `printf '%s\\n' 'p${codexPid}' 'ftxt' 'D0x${executableStat.dev.toString(16)}' ` +
+      `'i${executableStat.ino}' 'n${codexExecutable}'`
   ].join("\n"));
   fs.chmodSync(lsofExecutable, 0o700);
+  const psExecutable = path.join(fakeBin, "ps");
+  fs.writeFileSync(psExecutable, [
+    "#!/bin/sh",
+    `printf '%s\\n' '${panePid} 1 ${processBirth} zsh' ` +
+      `'${codexPid} ${panePid} ${processBirth} ${codexExecutable}'`
+  ].join("\n"));
+  fs.chmodSync(psExecutable, 0o700);
 
-  const panePid = 9000;
-  const codexPid = 4242;
   const target = "model-control:0.0";
   const terminalId = `terminal:v2:tmux:codex:${target}:${codexPid}`;
-  const processBirth = "fixture-codex-process-birth";
   const processUuid = `codex-pid:${codexPid}:birth:${processBirth}`;
   const processSnapshots = [
     {

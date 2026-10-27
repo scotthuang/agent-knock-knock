@@ -55,10 +55,11 @@ import { createDurableNotificationLease } from
 import type { TranscriptEvent } from "./transcript.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
-  parseCallbackAttemptOutcome,
+  callbackRouteDeliveryEligible, parseCallbackAttemptOutcome,
   type CallbackEnvelopeV1,
-  type CallbackRouteV1
+  type CallbackRouteV1, type CallbackTransport
 } from "./callback-transport.js";
+import { resolveCallbackRouteAuthority } from "./callback-route-authority.js";
 import {
   isRecord,
   nonBlankString as stringValue
@@ -251,6 +252,7 @@ export interface CallbackOutboxServicePorts {
     crashCheckpoint(name: "after_local_completion_state"): void;
   };
   delivery: {
+    canDeliver?: CallbackTransport["canDeliver"];
     deliver(input: DeliverCallbackInput): CallbackDeliveryOutcome;
     runTransaction(options: CallbackPreparationOptions): CallbackExecutionResult;
   };
@@ -338,6 +340,7 @@ export function createCallbackOutboxService(
       inheritedDelivery
     });
     assertDispatchCallbackRouteAuthority(conversation, callbackRoute);
+    if (options.recordOnly !== true) assertCallbackRouteRuntime(ports.delivery, callbackRoute);
     const deliveryOptions = resolvedDeliveryOptions({
       options,
       conversation,
@@ -1450,6 +1453,12 @@ function rejectManualRetryDisposition(
   }
 }
 
+function assertCallbackRouteRuntime(transport: Pick<CallbackTransport, "canDeliver">, route: CallbackRouteV1 | undefined): void {
+  if (!callbackRouteDeliveryEligible(transport, route)) {
+    throw new Error("callback route is unavailable in this Host runtime; no delivery attempt was claimed");
+  }
+}
+
 function reconcileCallbackDelivery(
   ports: CallbackOutboxServicePorts,
   settlement: CallbackSettlement,
@@ -1561,6 +1570,12 @@ function reconcileCallbackDelivery(
         status: "skipped",
         reason: disposition.reason
       };
+    }
+
+    if (!callbackRouteDeliveryEligible(ports.delivery,
+      resolveCallbackRouteAuthority({ conversation, primaryOutbox: callbackDelivery }))) {
+      return { handled: true as const, conversationId, status: "skipped",
+        reason: "callback_route_runtime_unavailable" };
     }
 
     const configuredDelayMs = Number(delayMs);
@@ -1722,6 +1737,8 @@ function observeCallbackRetryMonitor(
   if (disposition.state !== "retryable") {
     return { kind: "stop" };
   }
+  if (!callbackRouteDeliveryEligible(ports.delivery,
+    resolveCallbackRouteAuthority({ conversation, primaryOutbox: delivery }))) return { kind: "stop" };
   return {
     kind: "retryable",
     conversation,

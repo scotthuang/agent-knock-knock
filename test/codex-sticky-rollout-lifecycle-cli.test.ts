@@ -15,6 +15,7 @@ import {
 } from "../src/session-store.js";
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import { createRunningCodexExecutableFixture } from "./support/running-codex-executable-fixture.js";
 
 test("emitted CLI keeps the tmux/process/sqlite-adapter A -> B -> A contract", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "akk-sticky-bin-"));
@@ -35,9 +36,8 @@ test("emitted CLI keeps the tmux/process/sqlite-adapter A -> B -> A contract", (
   const target = "tmux-sticky-bin:0.0";
   const panePid = 74_000;
   const codexPid = 74_001;
-  const processBirth = "Thu Aug  6 11:00:00 2026";
-  const executable =
-    "/opt/akk-test/releases/0.146.0-aarch64-apple-darwin/bin/codex";
+  const { executablePath: executable, processBirth, mappedFields } =
+    createRunningCodexExecutableFixture(tempDir, "0.146.0");
   const terminalId = `terminal:v2:tmux:codex:${target}:${codexPid}`;
   const rolloutPath = path.join(
     sessionsDir,
@@ -102,6 +102,9 @@ childProcess.spawnSync = (command, args = [], options) => {
     return successful(fs.readFileSync(${JSON.stringify(screenPath)}, "utf8"));
   }
   if (commandName === "ps") {
+    if (args.includes("pid=,ppid=,lstart=,command=")) return successful(${JSON.stringify(
+      `${panePid} 1 ${processBirth} zsh\n${codexPid} ${panePid} ${processBirth} ${executable}\n`
+    )});
     return successful(args.includes("lstart=")
       ? ${JSON.stringify(`${processBirth}\n`)}
       : ${JSON.stringify(
@@ -119,7 +122,7 @@ childProcess.spawnSync = (command, args = [], options) => {
     }
     if (args.includes("txt")) {
       return successful(${JSON.stringify(
-        `p${codexPid}\nftxt\nn${executable}\n`
+        `p${codexPid}\n${mappedFields}`
       )});
     }
     return successful(${JSON.stringify(
@@ -186,6 +189,9 @@ fi
 `);
     writeExecutable(path.join(fakeBinDir, "ps"), `#!/bin/sh
 case " $* " in
+  *' pid=,ppid=,lstart=,command= '*)
+    printf '%s\\n' ${sh(`${panePid} 1 ${processBirth} zsh`)}
+    printf '%s\\n' ${sh(`${codexPid} ${panePid} ${processBirth} ${executable}`)} ;;
   *' lstart= '*) printf '%s\\n' ${sh(processBirth)} ;;
   *)
     printf 'PID PPID ELAPSED COMMAND\\n'
@@ -200,7 +206,7 @@ case " $* " in
     printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\n'
     printf '%s\\n' ${sh(`codex ${codexPid} me cwd DIR 1,18 64 123 ${workspace}`)}
     ;;
-  *' txt '*) printf 'p%s\\nftxt\\nn%s\\n' ${sh(String(codexPid))} ${sh(executable)} ;;
+  *' txt '*) printf '%s' ${sh(`p${codexPid}\n${mappedFields}`)} ;;
   *)
     printf 'p%s\\nf12u\\ntREG\\nD%s\\ni%s\\nn%s\\n' \
       ${sh(String(codexPid))} ${sh(String(rolloutStat.dev))} \

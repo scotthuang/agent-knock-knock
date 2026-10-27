@@ -50,6 +50,26 @@ function harness(t: TestContext) {
   return { dir, repository, state, deps, service: createDesktopTaskService(deps) };
 }
 
+test("Desktop callback reconciliation preserves unclaimed foreign routes for an authorized Host", async t => {
+  const h = harness(t);
+  h.deps.canDeliver = () => false;
+  const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const pendingTask = await h.service.reconcile(sent.id);
+  assert.equal(pendingTask.status, "completed");
+  assert.equal(pendingTask.notifications[0].status, "ready");
+  assert.equal(pendingTask.notifications[0].attempts, 0);
+  assert.equal(h.state.notifications.length, 0);
+  const envelope = structuredClone(pendingTask.notifications[0].envelope);
+  h.deps.canDeliver = () => { throw new Error("recovery catalogue unavailable"); };
+  assert.deepEqual((await h.service.reconcile(sent.id)).notifications, pendingTask.notifications);
+  h.deps.canDeliver = candidate => candidate?.controller_session_id === input.controllerSession;
+  const accepted = await h.service.reconcile(sent.id);
+  assert.equal(accepted.notifications[0].status, "accepted");
+  assert.equal(accepted.notifications[0].attempts, 1);
+  assert.deepEqual(h.state.notifications[0].envelope, envelope);
+});
+
 test("expired Desktop Send history cannot become another native task or callback", async t => {
   const h = harness(t), request = { ...input, callbackRoute: route };
   const sent = await h.service.send(request);

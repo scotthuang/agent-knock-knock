@@ -15,6 +15,8 @@ import {
   CALLBACK_ROUTE_VERSION,
   type CallbackRouteV1
 } from "./callback-transport.js";
+import { AKK_HOST_PROFILE_CALLBACK_RECOVERY, AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT,
+  hasHostProfileCallbackRecovery, readHostProfileCallbackRecovery } from "./host-profile-callback-recovery.js";
 
 export const AKK_HOST_PROFILE_SELECTION =
   HOST_PROFILE_PRIVATE_ENVIRONMENT_VARIABLES[0];
@@ -43,6 +45,8 @@ export interface TrustedHostProfileRuntimeV1 {
   readonly host: string;
   readonly hostVersion: string;
   readonly callbackRoute: CallbackRouteV1;
+  readonly recoveryRoutes?: readonly CallbackRouteV1[];
+  readonly recoveryCatalog?: Readonly<{ path: string; fingerprint: string }>;
 }
 
 export interface SelectHostProfileOptions {
@@ -107,12 +111,18 @@ export function createTrustedHostProfileRuntime(
     selected.profile,
     options.environment
   );
+  const recovery = readHostProfileCallbackRecovery(options.environment, {
+    profileFingerprint: selected.fingerprint, profileId: selected.profile.id,
+    transport: selected.profile.callback.driver, controllerScope: hostProfileControllerScope(selected.profile)
+  });
   return Object.freeze({
     selected,
     controllerScope: hostProfileControllerScope(selected.profile),
     controllerSessionId: context.controllerSessionId,
     host,
     hostVersion,
+    ...(recovery ? { recoveryRoutes: recovery.routes,
+      recoveryCatalog: Object.freeze({ path: recovery.path, fingerprint: recovery.fingerprint }) } : {}),
     callbackRoute: callbackRouteForHostProfile(
       selected.profile,
       context.controllerSessionId
@@ -130,8 +140,15 @@ export function hostProfileRelayEnvironment(
   runtime: TrustedHostProfileRuntimeV1,
   baseEnvironment: Readonly<NodeJS.ProcessEnv>
 ): NodeJS.ProcessEnv {
+  const cleaned = { ...baseEnvironment };
+  delete cleaned[AKK_HOST_PROFILE_CALLBACK_RECOVERY];
+  delete cleaned[AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT];
   return {
-    ...baseEnvironment,
+    ...cleaned,
+    ...(runtime.recoveryCatalog ? {
+      [AKK_HOST_PROFILE_CALLBACK_RECOVERY]: runtime.recoveryCatalog.path,
+      [AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT]: runtime.recoveryCatalog.fingerprint
+    } : {}),
     [AKK_HOST_PROFILE_SELECTION]: runtime.selected.selection,
     [AKK_HOST_PROFILE_SOURCE]: runtime.selected.source,
     [AKK_HOST_PROFILE_FINGERPRINT]: runtime.selected.fingerprint,
@@ -159,6 +176,7 @@ export function trustedHostProfileRuntimeFromEnvironment(
     environment[AKK_HOST_PROFILE_HOST_VERSION]
   ];
   if (selection === undefined && markerValues.every((value) => value === undefined)) {
+    if (hasHostProfileCallbackRecovery(environment)) throw new Error("Host callback recovery has no trusted Profile runtime");
     return undefined;
   }
   if (selection === undefined || markerValues.some((value) => value === undefined)) {
@@ -191,8 +209,14 @@ export function applyTrustedHostProfileCliOptions(
   environment: Readonly<NodeJS.ProcessEnv>,
   cwd: string
 ): Record<string, unknown> {
+  let cleanOptions = options;
+  if (Object.hasOwn(options, "callbackRecoveryRoutes")) {
+    const copied = { ...options };
+    delete copied.callbackRecoveryRoutes;
+    cleanOptions = copied;
+  }
   const runtime = trustedHostProfileRuntimeFromEnvironment(environment, { cwd });
-  if (!runtime) return options as Record<string, unknown>;
+  if (!runtime) return cleanOptions as Record<string, unknown>;
   const createsManagedTurn = commandName === "delegate" || commandName === "desktop-create" ||
     (commandName === "send" && !nonBlankString(options.turn));
   const ownsWatchRoute = commandName === "watch-terminal" ||
@@ -204,12 +228,13 @@ export function applyTrustedHostProfileCliOptions(
     commandName === "reconcile-claude-native-watches" ||
     commandName === "monitor-claude-native";
   if (!createsManagedTurn && !ownsWatchRoute) {
-    return options as Record<string, unknown>;
+    return cleanOptions as Record<string, unknown>;
   }
   return {
-    ...options,
+    ...cleanOptions,
     callbackRoute: runtime.callbackRoute,
     callbackRouteControllerScope: runtime.controllerScope,
+    callbackRecoveryRoutes: runtime.recoveryRoutes,
     openclawSession: runtime.controllerSessionId,
     gatewaySession: runtime.controllerSessionId,
     openclawBin: "agent-knock-knock-host-bridge"

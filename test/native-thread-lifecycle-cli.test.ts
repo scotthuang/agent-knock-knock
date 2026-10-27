@@ -17,6 +17,7 @@ import {
 } from "../src/session-store.js";
 import { ensureStoreWritable, listConversations } from "../src/store.js";
 import type { TerminalControlRef } from "../src/terminal-agent-adapter.js";
+import { createRunningCodexExecutableFixture } from "./support/running-codex-executable-fixture.js";
 
 const binPath = new URL("../src/cli.js", import.meta.url).pathname;
 const CODEX_EMPTY_COMPOSER_SCREEN =
@@ -40,7 +41,8 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
   const target = "tmux-test-fixture:0.0";
   const panePid = 71_000;
   const codexPid = 71_001;
-  const codexProcessBirth = "Thu Aug  6 10:00:00 2026";
+  const { executablePath, processBirth: codexProcessBirth } =
+    createRunningCodexExecutableFixture(tempDir, "0.147.0");
   const oldNativeThreadId = "11111111-1111-4111-8111-111111111111";
   const newNativeThreadId = "22222222-2222-4222-8222-222222222222";
   const terminalId = `terminal:v2:tmux:codex:${target}:${codexPid}`;
@@ -48,9 +50,6 @@ test("verified lifecycle target conflict preserves source and later rolls forwar
     sessionsDir,
     `rollout-2026-08-06T00-00-00-${newNativeThreadId}.jsonl`
   );
-  const executablePath =
-    "/opt/akk-test/releases/0.147.0-aarch64-apple-darwin/bin/codex";
-
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
@@ -643,7 +642,11 @@ function writeLifecycleFakeProcessTools(options: {
   const fakePs = path.join(options.fakeBinDir, "ps");
   fs.writeFileSync(fakePs, `#!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args.includes("lstart=")) {
+if (args.includes("pid=,ppid=,lstart=,command=")) {
+  process.stdout.write(${JSON.stringify(
+    `${options.panePid} 1 ${options.processBirth} zsh\n${options.codexPid} ${options.panePid} ${options.processBirth} ${options.executablePath}\n`
+  )});
+} else if (args.includes("lstart=")) {
   process.stdout.write(${JSON.stringify(`${options.processBirth}\n`)});
 } else {
   process.stdout.write("  PID  PPID ELAPSED COMMAND\\n" +
@@ -660,7 +663,9 @@ if (args.includes("cwd")) {
   process.stdout.write("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\n" +
     "codex ${options.codexPid} me cwd DIR 1,18 64 123 ${options.workspace}\\n");
 } else if (args.includes("txt")) {
-  process.stdout.write("p${options.codexPid}\\nftxt\\nn${options.executablePath}\\n");
+  const stat = fs.statSync(${JSON.stringify(options.executablePath)}, { bigint: true });
+  process.stdout.write("p${options.codexPid}\\nftxt\\nD0x" + stat.dev.toString(16) +
+    "\\ni" + stat.ino + "\\nn${options.executablePath}\\n");
 } else if (fs.existsSync(${JSON.stringify(options.materializedPath)})) {
   const stat = fs.statSync(${JSON.stringify(options.rolloutPath)});
   process.stdout.write("p${options.codexPid}\\nf12u\\ntREG\\nD" + stat.dev +
@@ -807,6 +812,9 @@ function tmux(args) {
 }
 
 function ps(args) {
+  if (args.includes("pid=,ppid=,lstart=,command=")) return result(${JSON.stringify(
+    `${options.panePid} 1 ${options.processBirth} zsh\n${options.codexPid} ${options.panePid} ${options.processBirth} ${options.executablePath}\n`
+  )});
   if (args.includes("lstart=")) {
     return result(${JSON.stringify(`${options.processBirth}\n`)});
   }
@@ -825,9 +833,9 @@ function lsof(args) {
     );
   }
   if (args.includes("txt")) {
-    return result(${JSON.stringify(
-      `p${options.codexPid}\nftxt\nn${options.executablePath}\n`
-    )});
+    const stat = fs.statSync(${JSON.stringify(options.executablePath)}, { bigint: true });
+    return result("p${options.codexPid}\\nftxt\\nD0x" + stat.dev.toString(16) +
+      "\\ni" + stat.ino + "\\nn${options.executablePath}\\n");
   }
   if (fs.existsSync(${JSON.stringify(options.materializedPath)})) {
     const stat = fs.statSync(${JSON.stringify(options.rolloutPath)});

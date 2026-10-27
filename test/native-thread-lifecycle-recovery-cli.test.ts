@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRunningCodexExecutableFixture } from "./support/running-codex-executable-fixture.js";
 import {
   nativeThreadCommandFingerprint,
   terminalBindingFrom,
@@ -636,16 +637,14 @@ function seededCodexRecoveryFixture(
   const panePid = 72_000;
   const codexPid = 72_001;
   const secondCodexPid = 72_002;
-  const processBirth = "Thu Aug  6 11:00:00 2026";
-  const secondProcessBirth = "Thu Aug  6 11:00:01 2026";
+  const { executablePath, processBirth, secondProcessBirth } =
+    createRunningCodexExecutableFixture(root, "0.146.0");
   const processUuid = `codex-pid:${codexPid}:birth:${processBirth}`;
   const terminalId = `terminal:v2:tmux:codex:${target}:${codexPid}`;
   const transitionId = `transition-recovery-${status}`;
   const dispatcherPid = options.dispatcherPid ?? 2_000_000_000;
   const sourceSessionId = `session-source-${status}`;
   const targetSessionId = `session-target-${status}`;
-  const executablePath =
-    "/opt/akk-test/releases/0.146.0-aarch64-apple-darwin/bin/codex";
   fs.mkdirSync(fakeBinDir, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
   const rolloutPaths = Object.fromEntries(
@@ -1722,7 +1721,13 @@ const args = process.argv.slice(2);
 const pidIndex = args.indexOf("-p");
 const requestedPid = pidIndex >= 0 ? Number(args[pidIndex + 1]) : undefined;
 const secondActive = fs.existsSync(${JSON.stringify(options.secondOwnerIdPath)});
-if (args.includes("lstart=")) {
+if (args.includes("pid=,ppid=,lstart=,command=")) {
+  process.stdout.write(${JSON.stringify(
+    `${options.panePid} 1 ${options.processBirth} zsh\n${options.codexPid} ${options.panePid} ${options.processBirth} ${options.executablePath}\n`
+  )} + (secondActive ? ${JSON.stringify(
+    `${options.secondCodexPid} 1 ${options.secondProcessBirth} ${options.executablePath}\n`
+  )} : ""));
+} else if (args.includes("lstart=")) {
   process.stdout.write(requestedPid === ${options.secondCodexPid}
     ? ${JSON.stringify(`${options.secondProcessBirth}\n`)}
     : ${JSON.stringify(`${options.processBirth}\n`)});
@@ -1748,7 +1753,9 @@ if (args.includes("cwd")) {
   process.stdout.write("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\n" +
     "codex " + selectedPid + " me cwd DIR 1,18 64 123 ${options.workspace}\\n");
 } else if (args.includes("txt")) {
-  process.stdout.write("p" + selectedPid + "\\nftxt\\nn${options.executablePath}\\n");
+  const stat = fs.statSync(${JSON.stringify(options.executablePath)}, { bigint: true });
+  process.stdout.write("p" + selectedPid + "\\nftxt\\nD0x" + stat.dev.toString(16) +
+    "\\ni" + stat.ino + "\\nn${options.executablePath}\\n");
 } else {
   if (fs.existsSync(${JSON.stringify(options.resolverErrorPath)})) {
     process.stderr.write("resolver fixture failure\\n");

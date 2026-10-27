@@ -299,7 +299,8 @@ function callbackOutboxService(): CallbackOutboxService {
         }
       }
     },
-    delivery: { deliver: deliverCallbackViaTransport,
+    delivery: { canDeliver: runtime.delivery.transport.canDeliver,
+    deliver: deliverCallbackViaTransport,
     runTransaction: runCallbackTransaction }
   });
 }

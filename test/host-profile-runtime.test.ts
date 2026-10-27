@@ -16,6 +16,9 @@ import {
   selectHostProfileV1,
   trustedHostProfileRuntimeFromEnvironment
 } from "../src/host-profile-runtime.js";
+import { AKK_HOST_PROFILE_CALLBACK_RECOVERY, AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT,
+  createHostProfileCallbackRecoveryCatalog, hostProfileCallbackRecoveryFingerprint
+} from "../src/host-profile-callback-recovery.js";
 
 const HOST_ID = "fixture-host";
 const HOST_VERSION = "1.7.3";
@@ -29,7 +32,7 @@ interface ProfileFixture {
   write(revision?: string): void;
 }
 
-function createProfileFixture(t: TestContext): ProfileFixture {
+function createProfileFixture(t: TestContext, routeBound = false): ProfileFixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-profile-runtime-"));
   const executable = path.join(root, "callback-driver");
   const profilePath = path.join(root, "host-profile.json");
@@ -48,7 +51,8 @@ function createProfileFixture(t: TestContext): ProfileFixture {
       },
       controllerContext: {
         driver: "environment_v1",
-        sessionIdVariable: SESSION_VARIABLE
+        sessionIdVariable: SESSION_VARIABLE,
+        ...(routeBound ? { scope: "route_bound_v1" } : {})
       },
       callback: {
         driver: "command_json_v1",
@@ -129,7 +133,9 @@ test("relay environment replaces untrusted markers with startup authority", (t) 
     [AKK_HOST_PROFILE_SOURCE]: "built_in",
     [AKK_HOST_PROFILE_FINGERPRINT]: "sha256:untrusted",
     [AKK_HOST_PROFILE_HOST]: "untrusted-host",
-    [AKK_HOST_PROFILE_HOST_VERSION]: "999.0.0"
+    [AKK_HOST_PROFILE_HOST_VERSION]: "999.0.0",
+    [AKK_HOST_PROFILE_CALLBACK_RECOVERY]: "/untrusted/aliases.json",
+    [AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT]: "untrusted"
   });
 
   assert.equal(relay.UNRELATED, "preserved");
@@ -142,6 +148,31 @@ test("relay environment replaces untrusted markers with startup authority", (t) 
   );
   assert.equal(relay[AKK_HOST_PROFILE_HOST], HOST_ID);
   assert.equal(relay[AKK_HOST_PROFILE_HOST_VERSION], HOST_VERSION);
+  assert.equal(relay[AKK_HOST_PROFILE_CALLBACK_RECOVERY], undefined);
+  assert.equal(relay[AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT], undefined);
+});
+
+test("trusted callback recovery is injected privately and cannot be supplied by ordinary CLI options", t => {
+  const fixture = createProfileFixture(t, true), runtime = startupRuntime(fixture);
+  const oldRoute = { ...runtime.callbackRoute, profile_revision: "old-revision", controller_session_id: "old-controller" };
+  const catalog = createHostProfileCallbackRecoveryCatalog({ currentProfileFingerprint: runtime.selected.fingerprint,
+    ownerScope: "verified-owner", routes: [oldRoute] });
+  const catalogPath = path.join(fixture.root, "recovery.json");
+  fs.writeFileSync(catalogPath, JSON.stringify(catalog), { mode: 0o600 });
+  const environment = hostProfileRelayEnvironment(runtime, { [SESSION_VARIABLE]: SESSION_ID });
+  environment[AKK_HOST_PROFILE_CALLBACK_RECOVERY] = catalogPath;
+  environment[AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT] = hostProfileCallbackRecoveryFingerprint(catalog);
+  const child = trustedHostProfileRuntimeFromEnvironment(environment)!;
+  assert.deepEqual(child.recoveryRoutes, [oldRoute]);
+  assert.equal(hostProfileRelayEnvironment(child, {})[AKK_HOST_PROFILE_CALLBACK_RECOVERY], catalogPath);
+  const forged = { callbackRecoveryRoutes: [{ ...oldRoute, controller_session_id: "forged-controller" }] };
+  assert.deepEqual(applyTrustedHostProfileCliOptions("reconcile-watches", forged, environment, fixture.root).callbackRecoveryRoutes, [oldRoute]);
+  assert.equal(applyTrustedHostProfileCliOptions("reconcile-watches", forged, {}, fixture.root).callbackRecoveryRoutes, undefined);
+  assert.equal(applyTrustedHostProfileCliOptions("status", forged, environment, fixture.root).callbackRecoveryRoutes, undefined);
+  assert.throws(() => trustedHostProfileRuntimeFromEnvironment({
+    [AKK_HOST_PROFILE_CALLBACK_RECOVERY]: catalogPath,
+    [AKK_HOST_PROFILE_CALLBACK_RECOVERY_FINGERPRINT]: hostProfileCallbackRecoveryFingerprint(catalog)
+  }), /no trusted Profile/u);
 });
 
 test("a child reloads the selected file and rejects an edited fingerprint", (t) => {

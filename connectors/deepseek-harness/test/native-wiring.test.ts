@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import type { Context } from "@deepseek-ai/cordis";
+import { Context } from "@deepseek-ai/cordis";
 import type { CommandDefinition } from "@deepseek-ai/dsh-commands";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { SkillRegistration } from "@deepseek-ai/dsh-skill";
@@ -19,7 +20,7 @@ import type {
   HostAdapterControllerContext,
 } from "@scotthuang/agent-knock-knock/host-adapter";
 
-import { applyWithDependencies } from "../src/index.js";
+import { applyWithDependencies, inject } from "../src/index.js";
 import type { AgentRouteTable } from "../src/routes.js";
 
 test("mounts native command/tools and routes every call through the exact Agent", async () => {
@@ -292,6 +293,65 @@ test("removes private resources when Host Adapter construction fails", async () 
   assert.equal(serverStarts, 0);
   assert.equal(serverStops, 1);
   assert.equal(profileRemovals, 1);
+});
+
+test("Cordis waits for late recovery services while older API sets keep immediate live-only mounting", { timeout: 5_000 }, async () => {
+  for (const supportsCallbackRecovery of [true, false]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-recovery-mount-"));
+    const ctx = new Context();
+    let profileCreates = 0;
+    let profileRemovals = 0;
+    let lifecycleStops = 0;
+    let serverStops = 0;
+    let sawDurableProfile = false;
+    let mounted!: () => void;
+    const mountComplete = new Promise<void>((resolve) => { mounted = resolve; });
+    ctx.provide("profileContext", { dir: directory });
+    ctx.provide("agents", { get: () => undefined } as never);
+    ctx.provide("commands", { register: () => () => {} } as never);
+    ctx.provide("tools", { register: () => () => {} } as never);
+    ctx.provide("skills", { register: () => () => {} } as never);
+    const parent = ctx.plugin({ inject, apply: (pluginContext) => applyWithDependencies(pluginContext,
+      { pluginConfig: { storeDir: path.join(directory, "store") } }, {
+        async loadSupportedDeepSeekHarnessRuntime() {
+          return { version: "0.1.2-alpha.1", createUserMessage, assertSupportedJsonSchema, supportsCallbackRecovery };
+        },
+        createConnectorProfileResources(_version, _environment, recovery) {
+          profileCreates += 1;
+          sawDurableProfile = recovery !== undefined;
+          return { instanceNonce: "late-host", directory, socketPath: path.join(directory, "callback.sock"),
+            token: "private", profilePath: path.join(directory, "profile.json"), profile: {}, fingerprint: "sha256:test",
+            environment: (id) => ({ AKK_DSH_CONTROLLER_ID: id }), remove() { profileRemovals += 1; } };
+        },
+        createCallbackIpcServer() { return { async start() {}, async stop() { serverStops += 1; } }; },
+        createHostAdapter(options) {
+          return fakeAdapter(options, { contexts: [], environments: [], disposedAuthorities: [], capabilityVerifications: [],
+            lifecycle: { start: mounted, async stop() { lifecycleStops += 1; } } });
+        },
+      }) });
+    try {
+      await parent;
+      assert.equal(profileCreates, supportsCallbackRecovery ? 0 : 1);
+      if (supportsCallbackRecovery) {
+        // Real Cordis activation, deliberately after the connector's parent has
+        // completed startup. No profile, IPC server, or owner lock exists yet.
+        ctx.provide("sessionController", { resolveAgent: async () => ({ error: new Error("unused") }) });
+        ctx.provide("sessionQuery", { observeSession: async () => { throw new Error("unused"); } });
+        ctx.provide("sessions", { get: () => undefined, flush: async () => true });
+      }
+      await mountComplete;
+      assert.equal(profileCreates, 1);
+      assert.equal(sawDurableProfile, supportsCallbackRecovery);
+      await parent.dispose();
+      assert.equal(profileRemovals, 1);
+      assert.equal(lifecycleStops, 1);
+      assert.equal(serverStops, 1);
+    } finally {
+      await parent.dispose();
+      await ctx.fiber.dispose();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
 });
 
 function fakeAdapter(

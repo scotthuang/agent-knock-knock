@@ -49,6 +49,27 @@ function pending(kind: NativeInteraction["kind"] = "blocking_question"): NativeI
     questions: [{ id: "native-question", title: "Choose a color", options: ["Blue", "Green"] }] };
 }
 
+test("Codex callbacks retain ready envelopes until this Host has route authority", async t => {
+  const h = harness(t); let eligible = false;
+  h.deps.canDeliver = candidate => eligible && candidate?.controller_session_id === input.controllerSession;
+  const sent = await h.service.send({ ...input, callbackRoute: route });
+  h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
+  const pendingTask = await h.service.reconcile(sent.id);
+  assert.equal(pendingTask.status, "completed");
+  assert.equal(pendingTask.notifications[0].status, "ready");
+  assert.equal(pendingTask.notifications[0].attempts, 0);
+  assert.equal(h.state.notifications.length, 0);
+  const envelope = structuredClone(pendingTask.notifications[0].envelope);
+  h.deps.canDeliver = () => { throw new Error("recovery catalogue unavailable"); };
+  assert.deepEqual((await h.service.reconcile(sent.id)).notifications, pendingTask.notifications);
+  eligible = true;
+  h.deps.canDeliver = candidate => eligible && candidate?.controller_session_id === input.controllerSession;
+  const accepted = await h.service.reconcile(sent.id);
+  assert.equal(accepted.notifications[0].status, "accepted");
+  assert.equal(accepted.notifications[0].attempts, 1);
+  assert.deepEqual(h.state.notifications[0].envelope, envelope);
+});
+
 test("expired Codex Send history preserves a same-message guard across fresh service instances", async t => {
   const h = harness(t), request = { ...input, callbackRoute: route };
   const sent = await h.service.send(request);

@@ -12,9 +12,10 @@ socket.
 
 ## Status and compatibility
 
-Connector **0.1.0-poc.10** pins AKK **0.16.2**, including CLI direct
-connections, Codex Desktop, Recovery, state-derived List guidance and degraded
-terminal-activity Watch identity handling. Its generated Skill and registered tools are verified
+Connector **0.1.0-poc.11** pins AKK **0.16.3**, including CLI direct
+connections, Codex Desktop, Recovery, state-derived List guidance and verified
+running-process Codex version discovery. Its generated Skill and registered
+tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
 operation-specific limits. Updating AKK core elsewhere does not update this
@@ -34,7 +35,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.2`, pinned by this connector's package and lockfile. A different
+- AKK `0.16.3`, pinned by this connector's package and lockfile. A different
   version at the repository root is not substituted automatically. Before core
   publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
@@ -86,8 +87,8 @@ pi list
 ```
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
-core `0.16.2` connector, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.10`; exact versions are pinned
+core `0.16.3` connector, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.11`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -452,7 +453,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.10
+npm run release:check -- --publish --confirm-version 0.1.0-poc.11
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -501,6 +502,15 @@ established conversation; diagnostic List retains their exact IDs. This is
 a presentation change, not evidence that a candidate is disconnected, and it
 does not change Send routing or callback ownership. Sole empty conversations
 and exact frontend associations remain visible.
+
+Connector **`0.1.0-poc.11`** pins AKK **`0.16.3`** and its synchronized Skill.
+Codex version discovery verifies the executable mapped by the selected live
+process, including the official Node launcher's unique native child, before
+using its version. It does not substitute the newly installed CLI version for
+an older running process. Pi Host compatibility, callback ownership and restart
+limits remain unchanged; the DSH-specific durable recovery support does not
+migrate Pi callbacks. This dependency refresh adds no new Pi live-model or
+external-channel acceptance claim and remains on npm `next`.
 
 Connector **`0.1.0-poc.10`** pins AKK **`0.16.2`** and its synchronized Skill.
 Degraded terminal-activity Watches tolerate absent optional process UUID/birth
@@ -558,8 +568,8 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.10` is an npm prerelease distributed through the `next` dist-tag;
-its publication is coordinated with core `0.16.2` and the DSH connector.
+`0.1.0-poc.11` is an npm prerelease distributed through the `next` dist-tag;
+its publication is coordinated with core `0.16.3` and the DSH connector.
 ClawHub publication remains a separate channel.
 
 ## Deliberate POC limits

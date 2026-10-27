@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   createTerminalWatchCliAdapter
 } from "../../src/terminal-watch-cli-adapter.js";
+import { inspectCodexScreen } from "../../src/codex-terminal-agent-adapter.js";
 import {
   type TerminalWatchCallbackInput
 } from "../../src/terminal-watch-callback-cli-adapter.js";
@@ -30,12 +31,13 @@ import {
   record
 } from "./fixtures.js";
 
-test("Terminal Watch falls back to a read-only activity epoch and settles after stable idle", async (t) => {
+test("Terminal Watch preserves a versionless activity epoch and settles when current version evidence recovers", async (t) => {
   const fixture = createFixture(t);
   const header = fs.readFileSync(fixture.rolloutPath, "utf8").split("\n")[0];
   fs.writeFileSync(fixture.rolloutPath, `${header}\n`, { mode: 0o600 });
   const activityTerminal = {
     ...fixture.terminal,
+    agent_version: undefined,
     activity_state: "working",
     available_actions: {}
   };
@@ -75,6 +77,9 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
   const first = record(record(printed.at(-1)).watch);
   assert.equal(first.watch_mode, "terminal_activity");
   assert.equal(first.confidence, "best_effort");
+  const originalAnchor = loadTerminalWatch(fixture.storeDir, String(first.watch_id)).anchor;
+  assert.equal(originalAnchor.schema, "agent-knock-knock/terminal-activity-watch-anchor");
+  assert.equal(Object.hasOwn(originalAnchor, "agent_version"), false);
   assert.match(
     (first.warnings as string[]).join("\n"),
     /exact_task_anchor_unavailable[\s\S]*terminal_activity_fallback/u
@@ -118,7 +123,36 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
   assert.equal(record(record(printed.at(-1)).watch).status, "active");
   assert.equal(callbacks.length, 0);
 
-  terminals = [{ ...activityTerminal, activity_state: "idle" }];
+  // Sanitized real 0.164.0 screen: the closed footer is deliberately unknown
+  // without the running version. A saved Watch must recover from fresh row
+  // metadata without rewriting its older versionless anchor.
+  const idleScreen = [
+    "» Summarize the current task",
+    "• The completed task is summarized here with enough visible answer text to exercise completion detection.",
+    "  Worked for 5m 4s • 18:39", "",
+    "» Ask Codex to do anything", "",
+    "  GPT-6-Astra ultra · ~/github/agent-knock-knock · 84% left",
+    "  ← for agents · ? for shortcuts"
+  ].join("\n");
+  const unversioned = inspectCodexScreen({ screen: idleScreen });
+  assert.equal(unversioned.activity.state, "unknown");
+  terminals = [{ ...activityTerminal, activity_state: unversioned.activity.state,
+    screen_excerpt: idleScreen }];
+  await facade.runReconcileWatches({ storeDir: fixture.storeDir });
+  const waiting = loadTerminalWatch(fixture.storeDir, String(first.watch_id));
+  assert.equal(waiting.status, "active");
+  assert.equal(record(waiting.observation_checkpoint).has_seen_activity, true);
+  assert.equal(record(waiting.observation_checkpoint).consecutive_idle_observations, 0);
+  assert.equal(callbacks.length, 0, "unknown screen activity cannot settle the existing Watch");
+
+  const runningVersion = "0.164.0";
+  const recovered = inspectCodexScreen({ screen: idleScreen,
+    runtime: { agentVersion: runningVersion }, requestText: "Summarize the current task",
+    screenChangedSinceSend: true });
+  assert.equal(recovered.activity.state, "idle");
+  assert.equal(recovered.completion, undefined, "fullscreen idle does not prove exact task completion");
+  terminals = [{ ...activityTerminal, agent_version: runningVersion,
+    activity_state: recovered.activity.state, screen_excerpt: idleScreen }];
   fixture.advance();
   await facade.runReconcileWatches({ storeDir: fixture.storeDir });
   assert.equal(callbacks.length, 0, "one idle sample is not enough");
@@ -133,6 +167,9 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
   assert.ok(callbacks.every(({ origin }) =>
     origin === "terminal_activity_fallback"
   ));
+  assert.ok(callbacks.every(({ completionText }) => completionText === undefined));
+  assert.deepEqual(loadTerminalWatch(fixture.storeDir, String(first.watch_id)).anchor,
+    originalAnchor, "current version evidence recovers the same persisted Watch without anchor migration");
   assert.deepEqual(
     callbacks.map(({ event, openclawSession }) => ({ event, openclawSession }))
       .sort((left, right) =>
@@ -157,6 +194,9 @@ test("Terminal Watch falls back to a read-only activity epoch and settles after 
     record(settled.settlement).reason_code,
     "terminal_activity_became_stably_idle"
   );
+  assert.equal(record(settled.settlement).completion_id, undefined);
+  assert.equal(settled.watch_mode, "terminal_activity");
+  assert.equal(settled.confidence, "best_effort");
 
   await facade.runWatch(options);
   const armed = record(record(printed.at(-1)).watch);

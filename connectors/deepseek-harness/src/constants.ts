@@ -1,7 +1,7 @@
 export const CONNECTOR_NAME = "agent-knock-knock-deepseek-harness";
 export const CONNECTOR_PACKAGE =
   "@scotthuang/agent-knock-knock-deepseek-harness";
-export const CONNECTOR_VERSION = "0.1.0-rc.13";
+export const CONNECTOR_VERSION = "0.1.0-rc.14";
 
 export const DSH_LAUNCHER_PACKAGE = "@deepseek-ai/dsh";
 export const SUPPORTED_DSH_VERSIONS = Object.freeze([
@@ -37,3 +37,6 @@ export const HOST_PROFILE_HOST_VERSION_ENV = "AKK_HOST_PROFILE_HOST_VERSION";
 export const CALLBACK_MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 export const CALLBACK_MAX_RESPONSE_BYTES = 64 * 1024;
 export const CALLBACK_TIMEOUT_MS = 8_000;
+// Leave time for the helper to emit a retry acknowledgement before core's
+// outer command deadline. Admission may still complete in the durable journal.
+export const CALLBACK_IPC_TIMEOUT_MS = 6_000;

@@ -1,5 +1,6 @@
 import { claudeTerminalObservationFailure, claudeTerminalWindowRole, normalizeClaudeAgentRows, readClaudeTerminalAgents } from "./claude-terminal-agent-observation.js";
 import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
+import { runningCodexExecutables } from "./codex-running-executable.js";
 import { spawnSync } from "node:child_process";
 import { assertCodexPaginatedProcess } from "./codex-paginated-thread-binding.js";
 import type { CodingAgentSessionProvider } from "./agent-session-provider.js";
@@ -652,7 +653,7 @@ function runningCodexModelCatalog(
         }
       : {})
   });
-  if (result.error || result.status !== 0 || result.signal) {
+  if (result.error || result.status !== 0 || result.signal || matches[0].isCurrent?.() === false) {
     throw new Error(
       `the exact running Codex ${expectedVersion} executable could not return its model catalog`
     );
@@ -669,16 +670,15 @@ function runningCodexModelCatalog(
 function runningAgentExecutables(
   agent: ExecutorKind,
   pid: number
-): readonly { path: string; version: string }[] {
+): readonly { path: string; version: string; isCurrent?: () => boolean }[] {
+  if (agent === "codex") return runningCodexExecutables(pid);
   const lsof = resolveOptionalExecutable("lsof");
   if (!lsof) return [];
   const result = spawnSync(lsof, ["-a", "-p", String(pid), "-d", "txt", "-Fn"],
     { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 }
   );
   if (result.error || result.status !== 0) return [];
-  const pattern = agent === "codex"
-    ? /\/releases\/(\d+\.\d+\.\d+)(?:-[^/]*)?\/bin\/codex$/u
-    : /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
+  const pattern = /\/claude\/versions\/(\d+\.\d+\.\d+)$/u;
   const entries = String(result.stdout ?? "").split(/\r?\n/u)
     .filter((line) => line.startsWith("n"))
     .flatMap((line) => {
