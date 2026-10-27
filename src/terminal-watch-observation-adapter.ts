@@ -76,9 +76,12 @@ export async function observeTerminalWatch(
   const activityTerminalIdentity = rawTerminal && isTerminalActivityWatch(watch)
     ? terminalActivityWatchIdentityMatch(rawTerminal, watch)
     : undefined;
+  const fallbackTerminalIdentity = rawTerminal && isUserExplicitFallbackWatch(watch)
+    ? terminalMatchesUserExplicitFallbackWatch(rawTerminal, watch)
+    : "unavailable";
   const terminalMatches = rawTerminal
     ? isUserExplicitFallbackWatch(watch)
-      ? terminalMatchesUserExplicitFallbackWatch(rawTerminal, watch)
+      ? fallbackTerminalIdentity === "match"
       : isTerminalActivityWatch(watch)
         ? activityTerminalIdentity === "match"
         : terminalMatchesWatch(rawTerminal, watch)
@@ -89,7 +92,7 @@ export async function observeTerminalWatch(
       exactTerminal,
       rawTerminal,
       projectedTerminal,
-      terminalMatches,
+      terminalIdentityMatch: fallbackTerminalIdentity,
       observedAt,
       options,
       dependencies

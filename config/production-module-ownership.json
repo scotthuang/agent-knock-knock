@@ -2079,6 +2079,10 @@
       "owner": "terminal-watch"
     },
     {
+      "path": "src/terminal-watch-identity-evidence.ts",
+      "owner": "terminal-watch"
+    },
+    {
       "path": "src/terminal-watch-interaction-observation.ts",
       "owner": "terminal-watch"
     },

@@ -221,15 +221,16 @@ export function createClaudeQuestionnaireFixture(t: test.TestContext) {
       now = new Date("2026-08-21T01:00:02.000Z");
     },
     terminal: {
-      id: "terminal:v2:claude:questionnaire-fixture",
+      id: "terminal:v2:tmux:claude:claude-watch-session:0.0:6311",
       source: "terminal",
       agent: "claude",
       pid,
       workspace,
       cwd: workspace,
       native_agent_session_id: sessionId,
-      native_agent_process_uuid: `claude-pid:${pid}:birth:${startedAt}`,
-      native_agent_process_birth: String(startedAt),
+      native_agent_process_uuid: `claude-pid:${pid}:started:${startedAt}`,
+      // The Claude List producer keeps OS birth separate from native startedAt.
+      _physical_agent_process_birth: "Fri Jul 24 13:13:20 2026",
       native_agent_process_started_at: startedAt,
       agent_version: version,
       lifecycle_binding_token: "e".repeat(64),
@@ -250,7 +251,7 @@ export function createClaudeQuestionnaireFixture(t: test.TestContext) {
         watch: {
           tool: "agent_knock_knock_watch",
           arguments: {
-            terminal_id: "terminal:v2:claude:questionnaire-fixture"
+            terminal_id: "terminal:v2:tmux:claude:claude-watch-session:0.0:6311"
           },
           requires_user_intent: true,
           use: "Monitor this human-started external task."
@@ -342,7 +343,7 @@ export function createFixture(
       now = new Date(value);
     },
     terminal: {
-      id: "terminal:v2:watch-fixture",
+      id: "terminal:v2:tmux:codex:watch-session:0.0:6206",
       source: "terminal",
       agent: "codex",
       pid: 6206,
@@ -391,7 +392,7 @@ export function createFixture(
         watch: {
           tool: "agent_knock_knock_watch",
           arguments: {
-            terminal_id: "terminal:v2:watch-fixture"
+            terminal_id: "terminal:v2:tmux:codex:watch-session:0.0:6206"
           },
           ...(codexVersion === "0.148.0"
             ? {}

@@ -1,3 +1,4 @@
+import { terminalWatchProcessEvidence } from "./terminal-watch-identity-evidence.js";
 import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES, monitorMinutesToMs } from "./monitor-deadline-policy.js";
 import {
   automaticSendWatchReceipt,
@@ -61,7 +62,7 @@ import {
   terminalControlForWatch,
   terminalWatchIdentity,
   terminalAgent,
-  terminalWorkspace,
+  optionalTerminalWorkspace,
   requiredWatchId,
   requiredString,
   positiveInteger,
@@ -70,7 +71,6 @@ import {
 import { observeTerminalWatch } from "./terminal-watch-observation-adapter.js";
 import { approvalFingerprint } from "./terminal-watch-observation-evidence.js";
 import { withNativeAuthorityWatchOwner } from "./native-store-authority-watch.js";
-
 export function createTerminalWatchCliAdapter(
   dependencies: TerminalWatchCliDependencies
 ): TerminalWatchCliFacade {
@@ -214,8 +214,8 @@ export function createTerminalWatchCliAdapter(
         capturedAt: dependencies.now(), terminalId: input.terminal.conversationId,
         pid: input.terminal.pid, requestHash: input.requestHash,
         before: rawTerminal, current: current.rawTerminal,
-        previousWorkspace: terminalWorkspace(rawTerminal),
-        currentWorkspace: terminalWorkspace(current.rawTerminal),
+        previousWorkspace: optionalTerminalWorkspace(rawTerminal),
+        currentWorkspace: optionalTerminalWorkspace(current.rawTerminal),
         control: terminalControlForWatch(current.rawTerminal)
       });
       callbackRoute = terminalWatchNotificationOnlyRoute(callbackRoute);
@@ -238,7 +238,7 @@ export function createTerminalWatchCliAdapter(
       ),
       terminalIdentity: terminalWatchIdentity(
         rawTerminal,
-        input.physicalToken
+        input.physicalToken, anchor, warnings
       ),
       physicalToken: input.physicalToken,
       requestHash: input.requestHash,
@@ -406,7 +406,7 @@ export function createTerminalWatchCliAdapter(
         pid: positiveInteger(rawTerminal.pid, "terminal PID"),
         initialActivityState,
         nativeProcessUuid: stringValue(rawTerminal.native_agent_process_uuid),
-        nativeProcessBirth: stringValue(rawTerminal.native_agent_process_birth),
+        nativeProcessBirth: terminalWatchProcessEvidence(rawTerminal).birth,
         agentVersion: stringValue(rawTerminal.agent_version)
       });
       warnings.push(
@@ -420,7 +420,7 @@ export function createTerminalWatchCliAdapter(
     }
     const binding = bestEffortBindingTokenForWatch(rawTerminal);
     if (binding.warning) warnings.push(binding.warning);
-    const terminalIdentity = terminalWatchIdentity(rawTerminal, binding.token);
+    const terminalIdentity = terminalWatchIdentity(rawTerminal, binding.token, anchor, warnings);
     const repository = createTerminalWatchStore(
       dependencies.storeDirFromOptions(options),
       { acquire: dependencies.acquireFileLock }

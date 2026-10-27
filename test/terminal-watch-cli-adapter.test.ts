@@ -1,5 +1,6 @@
 // Preserve the public test entry and registration order while grouping behavior domains.
 import "./terminal-watch-cli-adapter/activity-fallback.js";
+import "./terminal-watch-cli-adapter/degraded-identity.js";
 import "./terminal-watch-cli-adapter/accepted-fallback-interactions.js";
 import "./terminal-watch-cli-adapter/fallback-callbacks.js";
 import "./terminal-watch-cli-adapter/claude-fallback.js";
