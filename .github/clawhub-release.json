@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "a5fb36461600c96ea3a1f28dc777f8e478a84099",
-  "asset": "scotthuang-agent-knock-knock-0.16.0.tgz",
-  "sha256": "3629c6eeb4ad458581aa70a4671566cb648bea3db5119c811c86149a228dc3b2",
-  "bytes": 3881272,
-  "changelog": "Recover settled native-thread Store authority through verified owner/process identity and a durable transfer journal without terminal input or replaying old callbacks. Preserve per-call agent configuration during recovery checks. Remove the generic 90-second text-submission relay deadline while retaining transport/acceptance deadlines, explicit timeouts and Host cancellation. Store writer protocol 11, action contract 33 and List projection v4 retain identity and approval boundaries. Coordinate Pi 0.1.0-poc.8 and DeepSeek Harness 0.1.0-rc.11 with exact core 0.16.0 pins on next."
+  "commit": "c1d9b793c7419476663e006d4eba529b26579293",
+  "asset": "scotthuang-agent-knock-knock-0.16.1.tgz",
+  "sha256": "43ce16b344ece6dfa0560cc0c31ad385c0606d0bc256f54f9d8732ed54f90012",
+  "bytes": 3909129,
+  "changelog": "Add bounded List guidance derived from current actions and a once-per-scan Claude native-identity recheck. Preserve exact physical Send authority without claiming native acceptance. Refuse Claude physical input with drafts, occupied stashes or unproven foreground activity, including inline /clear stash notifications. Replace destructive marker/stash/erase preparation with one non-destructive restore probe; leave restored drafts for manual recovery and never retry uncertain input. Action contract 35, List v4, Store writer 11. Coordinate Pi 0.1.0-poc.9 and DSH 0.1.0-rc.12 with exact core 0.16.1 pins on next."
 }
