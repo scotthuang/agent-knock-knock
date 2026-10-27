@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "c1d9b793c7419476663e006d4eba529b26579293",
-  "asset": "scotthuang-agent-knock-knock-0.16.1.tgz",
-  "sha256": "43ce16b344ece6dfa0560cc0c31ad385c0606d0bc256f54f9d8732ed54f90012",
-  "bytes": 3909129,
-  "changelog": "Add bounded List guidance derived from current actions and a once-per-scan Claude native-identity recheck. Preserve exact physical Send authority without claiming native acceptance. Refuse Claude physical input with drafts, occupied stashes or unproven foreground activity, including inline /clear stash notifications. Replace destructive marker/stash/erase preparation with one non-destructive restore probe; leave restored drafts for manual recovery and never retry uncertain input. Action contract 35, List v4, Store writer 11. Coordinate Pi 0.1.0-poc.9 and DSH 0.1.0-rc.12 with exact core 0.16.1 pins on next."
+  "commit": "b05fb13ee3e16c73c81105f232db7e804af6f86f",
+  "asset": "scotthuang-agent-knock-knock-0.16.2.tgz",
+  "sha256": "0b6a8d1a62633549b784094d77fe15cb5777da64395fb47de71b4b259fd7b79c",
+  "bytes": 3913140,
+  "changelog": "Allow degraded activity Watches when optional native identity metadata is unavailable, using same-terminal absolute directory and physical process birth evidence. Distinguish match, mismatch and unavailable: missing evidence remains pending while independently proven mismatches still terminate observation. Preserve interaction identity, callback ownership, deadlines and deduplication. Terminal activity remains best-effort notification-only; existing exact-Watch Host-restart and notification-outbox recovery are unchanged. Coordinate Pi 0.1.0-poc.10 and DSH 0.1.0-rc.13 with exact core 0.16.2 pins on next. Action contract 35, List v4, Watch schema 3, Store writer 11."
 }
