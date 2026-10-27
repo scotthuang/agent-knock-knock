@@ -5,6 +5,7 @@ import { arrayValue, finiteNumber, nonEmptyString, stringArrayValue,
   truncateText } from "./semantic-tool-value-helpers.js";
 import { recordValue } from "./value-guards.js";
 import { isTerminalSpecificConversationAction } from "./conversation-list.js";
+import { withConversationUsage } from "./conversation-usage-guidance.js";
 
 /**
  * Bound structured controller-Host List output before Host serialization,
@@ -12,8 +13,8 @@ import { isTerminalSpecificConversationAction } from "./conversation-list.js";
  *
  * Watch inventory and retained history use the separate watches command. The controller
  * receives current resource identities and state, action names, and only the
- * dynamic semantic inputs needed to invoke those actions. Static explanations
- * live in the bundled agent-knock-knock skill.
+ * dynamic semantic inputs needed to invoke those actions. Current-state usage
+ * advice stays with each row; shared instructions live in the bundled skill.
  */
 export function compactAkkListModelProjection(
   value: unknown,
@@ -86,7 +87,7 @@ function compactConversationPresentation(value: unknown): Record<string, unknown
 }
 
 function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
-  return {
+  return withConversationUsage({
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
       "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
       "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "manual_action", "compatibility_policy", "compatibility_warning", "application_identity_verified"]),
@@ -94,11 +95,11 @@ function compactDesktopConversation(row: Record<string, unknown>): Record<string
       ["send", "approvals", "blockingAnswers", "asyncAnswers", "nativeControls"]) } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),
     ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
-  };
+  }, row);
 }
 
 function compactNativeConversation(row: Record<string, unknown>): Record<string, unknown> {
-  return {
+  return withConversationUsage({
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",
@@ -113,7 +114,7 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
     ...(Array.isArray(row.terminal_controls)
       ? { terminal_controls: arrayValue(row.terminal_controls).map(compactAkkListTerminal) } : {}),
     ...compactAkkListActions(row.available_actions, { conversation_id: row.conversation_id })
-  };
+  }, row);
 }
 
 function compactConversation(row: Record<string, unknown>, diagnostics: boolean): Record<string, unknown> {
@@ -129,7 +130,7 @@ function compactConversation(row: Record<string, unknown>, diagnostics: boolean)
   if (output.surface === "cli") projectCliConnection(output, row);
   for (const field of ["source", "backend_version", "terminal_controls", "terminal_control", "command", "pid",
     "process_state", "screen_state", "durable_activity_state", "native_identity_state"]) delete output[field];
-  return output;
+  return withConversationUsage(output, row);
 }
 
 function projectCliConnection(output: Record<string, unknown>, row: Record<string, unknown>): void {
@@ -222,6 +223,8 @@ function compactAkkListTerminal(
   const command = nonEmptyString(terminal.command);
   if (command) output.command = truncateText(command, 160);
 
+  compactAkkListNested(output, "physical_send_readiness", terminal.physical_send_readiness,
+    ["ready", "reason", "message"]);
   compactAkkListNested(output, "terminal_control", terminal.terminal_control,
     ["kind", "target"]);
   compactAkkListNested(output, "approval_state", terminal.approval_state, [
@@ -259,7 +262,7 @@ function compactAkkListTerminal(
       currentTurn?.id
   }));
   addAkkListWarningFlags(output, terminal);
-  return output;
+  return withConversationUsage(output, terminal);
 }
 
 function compactAkkListFeatures(

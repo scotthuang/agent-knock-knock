@@ -13,13 +13,18 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-This connector pins AKK **0.16.0** in its package and lockfile. It exposes
+This checkout's unpublished local preview **0.1.0-rc.12.list-guidance.6** pins
+AKK **0.16.1-list-guidance.6** in its package and lockfile. The preview adds
+state-derived List guidance and a bounded Claude identity recheck; it is built
+and installed from local tarballs, not from npm. It exposes
 that runtime's 27 semantic tools, including Codex CLI backend and Desktop
 operations when the selected conversation advertises them. `list` returns
 current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
 A newer root checkout does not silently replace this pinned dependency.
-Connector `0.1.0-rc.11` pins core `0.16.0` and uses the `next` dist-tag.
+The published connector `0.1.0-rc.11` pins core `0.16.0` and uses the `next`
+dist-tag. The npm installation instructions below refer to published packages,
+not this local preview.
 
 The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
 **4.0.5**. This is a release candidate, not a stable release; as checked on

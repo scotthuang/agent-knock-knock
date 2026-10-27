@@ -1,3 +1,4 @@
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { observeCodexPermissionSurface } from "./codex-permission-surface.js";
 import { createHash } from "node:crypto";
@@ -243,6 +244,7 @@ function terminalUserExplicitInputSafetyFailure(input: {
   readonly interactionActive: boolean;
   readonly modelControlSurface: boolean;
   readonly requireExactEmptyClaudeComposer: boolean;
+  readonly requireEmptyClaudeStash?: boolean;
 }): string | undefined {
   if (
     input.approvalBlocked || input.awaitingApproval || input.interactionActive ||
@@ -253,43 +255,18 @@ function terminalUserExplicitInputSafetyFailure(input: {
   ) {
     return `the explicit user Send is blocked by a ${input.displayName} approval, interaction, or modal prompt`;
   }
-  if (input.agent === "claude" && input.requireExactEmptyClaudeComposer) {
-    const frame = exactClaudeComposerFrame(
-      stripTerminalEscapeSequences(input.screen)
-    );
-    if (!frame || frame.composerRows.length !== 1 ||
-        !/^\s*❯\s*$/u.test(frame.composerRows[0]!) ||
-        !claudeUserExplicitPostClearTrailingIsKnown(frame.trailing)) {
-      return "Claude native stash action did not prove an empty main Composer";
-    }
-  }
+  if (input.agent === "claude") return claudeExplicitComposerProofFailure(input);
   return undefined;
 }
 
-function claudeUserExplicitPostClearTrailingIsKnown(
-  lines: readonly string[]
-): boolean {
-  if (lines.length === 0) return true;
-  const auxiliary = (line: string) =>
-    /^\s*(?:Draft restored\s*·\s*)?› stashed\s*$/u.test(line) ||
-    /^\s*[●○◐◉]\s+(?:low|medium|high|xhigh|max|ultracode)\s*·\s*\/effort\s*$/iu
-      .test(line);
-  if (lines.every(auxiliary)) return true;
-  let auxiliaryStart = lines.length;
-  while (auxiliaryStart > 0 && auxiliary(lines[auxiliaryStart - 1]!)) {
-    auxiliaryStart -= 1;
-  }
-  const footerRows = lines.slice(0, auxiliaryStart);
-  if (footerRows.length === 0 || footerRows.length > 2) return false;
-  const footer = footerRows.map((line) => line.trim()).join(" ");
-  // Claude 2.1.285 hides the shortcut hints after the Composer settles.
-  // Keep the remaining native manual-mode label exact, including its optional
-  // stash indicator; arbitrary trailing text must still block submission.
-  if (/^⏸ manual mode on(?:\s+(?:Draft restored\s*·\s*)?› stashed)?$/u.test(footer)) {
-    return true;
-  }
-  return /^\s*(?:[⏵⏴⏸]{1,2}|\?)\s+.*(?:manual mode|auto mode|accept edits|bypass permissions|for shortcuts).*(?:←\s+for\s+ag(?:ents|…)|\(shift\+tab\s+to\s+cycle\))(?:\s+(?:Draft restored\s*·\s*)?› stashed)?\s*$/iu
-    .test(footer);
+/** Every Claude proof precedes task text; existing stash contents are never cleared. */
+function claudeExplicitComposerProofFailure(input: {
+  screen: string;
+  requireExactEmptyClaudeComposer: boolean;
+  requireEmptyClaudeStash?: boolean;
+}): string | undefined {
+  const readiness = claudeUserExplicitReadiness(input.screen, { allowDraft: !input.requireExactEmptyClaudeComposer });
+  return readiness.ready ? undefined : readiness.message;
 }
 
 function codexActiveWriterViewerVisible(styledScreen: string): boolean {

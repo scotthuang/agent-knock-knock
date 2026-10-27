@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { readClaudeTerminalAgents } from "../src/claude-terminal-agent-observation.js";
 import { claudeNativeRuntimeOptions } from "../src/claude-native-cli-adapter.js";
 import { runCliCommandExecution } from "../src/cli-runtime-context.js";
-import { createTerminalRuntimeCliAdapter } from "../src/terminal-runtime-cli-adapter.js";
+import { createTerminalRuntimeCliAdapter, type TerminalRuntimeCliDependencies } from "../src/terminal-runtime-cli-adapter.js";
 
 function fixture(t: TestContext) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-vendor-reader-")));
@@ -34,7 +34,7 @@ process.stdout.write(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'a
   const run = (body: () => Promise<void>, overrides: NodeJS.ProcessEnv = {}) => runCliCommandExecution(
     "isolated-reader-test", {}, { cwd: dir, env: { ...env, ...overrides },
       runtimeLog: (_level, event, fields) => { logs.push({ event, fields }); } }, body);
-  const runtime = (options = {}) => createTerminalRuntimeCliAdapter({ options, dependencies: {},
+  const runtime = (options = {}, dependencies: TerminalRuntimeCliDependencies = {}) => createTerminalRuntimeCliAdapter({ options, dependencies,
     completion: { detectExactBound: () => ({ handled: false }), loadCodexContexts: async () => [] },
     identity: { resolveCurrent: async () => undefined, assertRuntime: () => undefined }, workspace: { assertConfigured: () => undefined } });
   return { dir, root, reader, row, registry, save, run, runtime, logs };
@@ -133,4 +133,25 @@ test("reader errors remain observable while unrelated valid catalog rows survive
     assert.equal(result.next_action, undefined);
     assert.throws(() => f.runtime().loadClaudeAgentRows({ required: true }), /claude_reader_failed/);
   }, { AKK_NATIVE_CLAUDE_CONFIG_DIRS: JSON.stringify([f.root, failedRoot]) });
+});
+
+test("background-window diagnostics use the invocation's unique configured root and never promote fixture metadata", async t => {
+  const f = fixture(t), other = path.join(f.dir, "other-root");
+  Object.assign(f.registry, { parkedJobId: "private-job" }); f.save();
+  fs.cpSync(f.root, other, { recursive: true });
+  await f.run(async () => {
+    assert.equal(f.runtime().observeClaudeWindowRole(f.row.pid, f.dir), "background_view");
+    for (const key of ["processesJson", "terminalsJson", "terminalScreensJson", "claudeAgentsJson"]) {
+      assert.equal(f.runtime({ [key]: [] }).observeClaudeWindowRole(f.row.pid, f.dir), undefined,
+        "static fixtures never borrow real process metadata");
+    }
+    assert.equal(f.runtime({}, { loadClaudeAgentRows: () => [f.row] })
+      .observeClaudeWindowRole(f.row.pid, f.dir), undefined, "injected discovery cannot borrow live metadata");
+    assert.equal(f.runtime({ claudeHome: path.join(f.dir, "absent") })
+      .observeClaudeWindowRole(f.row.pid, f.dir), undefined, "an explicit home never falls back to the environment home");
+  });
+  await f.run(async () => {
+    assert.equal(f.runtime().observeClaudeWindowRole(f.row.pid, f.dir), undefined, "duplicate roots are ambiguous");
+    assert.equal(f.runtime({ claudeHome: f.root }).observeClaudeWindowRole(f.row.pid, f.dir), "background_view");
+  }, { AKK_NATIVE_CLAUDE_CONFIG_DIRS: JSON.stringify([f.root, other]) });
 });

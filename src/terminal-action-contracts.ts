@@ -10,7 +10,7 @@ export const TERMINAL_WATCH_ACTION_USE =
 
 export function listActionContracts(): JsonRecord {
   return {
-    version: 33,
+    version: 35,
     instructions: actionContractInstructions(),
     field_semantics: actionFieldSemantics(),
     actions: terminalActionCatalog()
@@ -44,15 +44,18 @@ function actionContractInstructions() {
         "is gated only by one exact live physical terminal/process, a scanned, " +
         "non-blocked approval state, no active native questionnaire, and no " +
         "positively identified menu, editor, history search, or read-only viewer that " +
-        "owns input; parsed working activity and Codex rollout ambiguity do not veto " +
+        "owns input. For Codex, parsed working activity and rollout ambiguity do not veto " +
         "it; Composer visibility, stability, exactness, or existing draft contents do " +
-        "not veto it; and AKK Turn, Session, deferred-transfer, transition, ledger, " +
+        "not veto Codex Send. Claude additionally requires a recognized empty main Composer, " +
+        "no existing stashed draft, a known native footer, and no running or unproven foreground turn. Background shells " +
+        "alone do not block it. AKK Turn, Session, deferred-transfer, transition, ledger, " +
         "and Store health are not eligibility vetoes. A native thread owned by another " +
         "Store is a separate authority fence: use only its displayed transfer_store_authority " +
         "recovery, or the advertised automatic transfer before an eligible managed Send. Codex clears the current " +
-        "Composer once with C-u; Claude Code uses a sentinel-backed native C-s " +
-        "stash-clear transaction that is independent of the cursor position and does " +
-        "not interrupt an active turn, then proves the main Composer empty. Each then " +
+        "Composer once with C-u. Claude Code refuses a visible stash before input, then uses one C-s on a " +
+        "freshly empty Composer to check for a hidden stash. Restored content stops task submission " +
+        "and remains for the user; AKK writes no sentinel and deletes no draft. An uncertain probe is not " +
+        "automatically retried. Failure gives manual recovery instructions; no cleanup runs after Enter. Each then " +
         "injects the new request, waits through the paste window, and dispatches " +
         "Enter exactly once. After text injection, no Composer observation may veto " +
         "Enter. AKK tries the managed fast path first; a source-less Codex pane " +
@@ -326,10 +329,14 @@ function terminalActionCatalog() {
             "depends only on the exact live physical terminal/process, a scanned, " +
             "non-blocked approval state, and no proven input-owning questionnaire, " +
             "editor, menu, or read-only viewer. Composer visibility, exactness, and " +
-            "existing draft contents are advisory. Codex clears the current Composer once " +
-            "with C-u; Claude Code uses a sentinel-backed native C-s stash-clear " +
-            "transaction that is independent of the cursor position and does not " +
-            "interrupt an active turn, then proves the main Composer empty. Each injects " +
+            "existing draft contents are advisory for Codex. Claude requires a recognized empty " +
+            "main Composer, no existing stashed draft, a known native footer, and no running or unproven foreground turn; " +
+            "background shells alone do not block it. Codex clears the current Composer once " +
+            "with C-u. Claude refuses a visible stash before input, then uses one C-s on a " +
+            "freshly empty Composer to check for a hidden stash. Restored content stops task " +
+            "submission and remains for the user; AKK writes no sentinel and deletes no draft. " +
+            "An uncertain probe is not automatically retried. Failure gives manual recovery " +
+            "instructions; no cleanup runs after Enter. Each injects " +
             "the request, waits through the paste window, and dispatches Enter exactly " +
             "once without a post-text Composer veto. The managed fast path may require " +
             "exact empty before input. If that managed path cannot deliver before input, " +
@@ -337,9 +344,12 @@ function terminalActionCatalog() {
             "Turn; AKK then best-effort attaches an exact Terminal Watch callback and " +
             "releases stale management. Watch attachment failure never changes a " +
             "successful Send.",
-        terminal_user_explicit_composer_policy:
-          "replace_current_composer_and_submit",
-        // v28 compatibility alias. New consumers use the agent-neutral field.
+        terminal_user_explicit_composer_policy: "per_agent",
+        terminal_user_explicit_composer_policies: {
+          codex: "replace_current_composer_and_submit",
+          claude: "require_empty_composer_and_submit"
+        },
+        // v28 Codex compatibility alias. New consumers use the per-agent policies.
         codex_terminal_user_explicit_composer_policy:
           "replace_current_composer_and_submit",
         required: ["request"],
@@ -382,9 +392,11 @@ function terminalActionCatalog() {
             "source, or replace an eligible status-card/candidate-rollout source. A " +
             "terminal_user_explicit action gives the user's selected exact live physical " +
             "terminal/process priority over broken AKK internal state: Codex clears the " +
-            "current Composer once with C-u; Claude Code uses a sentinel-backed native " +
-            "C-s stash-clear transaction that is independent of the cursor position and " +
-            "does not interrupt an active turn, then proves the main Composer empty. Each " +
+            "current Composer once with C-u. Claude Code requires an empty recognized main Composer and no existing stash; " +
+            "a visible stash refuses before input. One C-s on the freshly empty Composer checks for a hidden stash. " +
+            "Restored content stops task submission and remains for the user; AKK writes no sentinel and deletes no draft. " +
+            "An uncertain probe is not automatically retried. Failure gives manual recovery instructions; " +
+            "no cleanup runs after Enter. Each " +
             "injects the request, waits through the paste window, and dispatches Enter " +
             "exactly once without any post-text Composer veto. The unmanaged path has no " +
             "managed callback Turn; it best-effort attaches an exact Terminal Watch " +

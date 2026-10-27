@@ -362,10 +362,23 @@ export async function privateActionArguments(
   ])).values()];
   if (uniqueCandidates.length !== 1) {
     throw new Error(
-      `the current AKK list does not advertise one exact ${input.tool} action for the requested semantic target`
+      `the current AKK list does not advertise one exact ${input.tool} action for the requested semantic target` +
+        (uniqueCandidates.length === 0 ? claudePhysicalSendFailureDetail(input, terminals) : "")
     );
   }
   return uniqueCandidates[0]!;
+}
+
+/** Explain only the exact selected Claude Send refusal, never unrelated private state. */
+function claudePhysicalSendFailureDetail(
+  input: { tool: string; terminalId?: string }, terminals: Record<string, unknown>[]
+): string {
+  if (input.tool !== "agent_knock_knock_send" || !input.terminalId || terminals.length !== 1 ||
+      terminals[0]?.agent !== "claude") return "";
+  const readiness = terminals[0].physical_send_readiness;
+  if (!isRecord(readiness) || readiness.ready !== false) return "";
+  const message = stringValue(readiness.message)?.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 1_000);
+  return message ? `: ${message}` : "";
 }
 
 export function rememberDisplayedPrivateAuthorityOffers(

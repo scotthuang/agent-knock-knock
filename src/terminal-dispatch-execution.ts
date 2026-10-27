@@ -85,8 +85,9 @@ export type NativeAgentSessionIdentityObservation =
     }
   | { status: "unavailable"; reason: string };
 
-interface ClaudeIdentityRow {
+export interface ClaudeIdentityRow {
   pid?: number;
+  kind?: string;
   sessionId?: string;
   startedAt?: number;
 }
@@ -98,6 +99,8 @@ export interface NativeIdentityResolutionRequest {
   preferredSessionId?: string;
   allowedCompanionIdentity?: CodexPreMaterializationIdentity;
   allowedAdditionalIdentities?: readonly CodexPreMaterializationIdentity[];
+  /** A validated reader snapshot shared by read-only List observations. */
+  claudeAgentRows?: readonly ClaudeIdentityRow[];
 }
 
 type BoundCodexAcceptanceAnchor = Exclude<
@@ -968,7 +971,8 @@ export class TerminalDispatchExecutionService {
       const { agent: _agent, ...resolution } = request;
       return this.#ports.native.resolveCodex(resolution);
     }
-    return resolveClaudeIdentity(request.pid, this.#ports.native.claudeRows());
+    return resolveClaudeIdentity(request.pid,
+      request.claudeAgentRows ?? this.#ports.native.claudeRows());
   }
 
   async observeCurrentNativeIdentity(
@@ -1431,7 +1435,8 @@ function resolveClaudeIdentity(
   pid: number,
   rows: readonly ClaudeIdentityRow[]
 ): TerminalNativeIdentity | undefined {
-  const matching = rows.filter((row) => row.pid === pid);
+  const matching = rows.filter((row) => row.pid === pid &&
+    (!row.kind || row.kind === "interactive"));
   if (matching.length === 0) {
     return undefined;
   }

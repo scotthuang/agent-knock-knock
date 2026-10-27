@@ -60,6 +60,7 @@ import {
   type TerminalDurableActivityState,
   type TerminalNativeIdentityState
 } from "./terminal-agent-bridge.js";
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import { terminalUserExplicitInputOwnerBlocked } from "./terminal-composer-classifier.js";
 import {
   captureCodexHumanStartedActiveTaskAnchor,
@@ -95,6 +96,9 @@ import {
 } from "./terminal-scoped-approval-authority.js";
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
+import type { ClaudeIdentityRow } from "./terminal-dispatch-execution.js";
+import { withClaudeListIdentityRecheck, type TerminalListNativeIdentitySnapshot } from
+  "./terminal-list-native-identity-recheck.js";
 import {
   listActionContracts,
   renderAvailableListActions,
@@ -113,7 +117,7 @@ import {
   type EffectiveTerminalListState,
   type TerminalListPhysicalProcessIncarnation,
   type TerminalListState,
-  type TerminalListTerminalFactPorts,
+  type TerminalListTerminalFactPorts, type TerminalListComposerFacts,
   type TerminalNativeListIdentityFacts
 } from "./terminal-list-facts.js";
 import {
@@ -140,11 +144,9 @@ import {
   cliNowMs,
   cliRuntimeLog as runtimeLog
 } from "./cli-runtime-context.js";
-
 interface JsonObject {
   [key: string]: unknown;
 }
-
 export interface TerminalListCliOptions {
   agent?: string;
   all?: boolean;
@@ -165,7 +167,6 @@ export interface TerminalListCliOptions {
   workspace?: string;
   [option: string]: unknown;
 }
-
 interface TerminalListMonitorReconciliation {
   checked: number;
   launched: number;
@@ -177,14 +178,12 @@ interface TerminalListMonitorReconciliation {
   errors: number;
   items: Array<{ status?: string; [field: string]: unknown }>;
 }
-
 interface TerminalListIdleReconciliation {
   checked: number;
   closed: number;
   skipped: number;
   idle_timeout_minutes: number;
 }
-
 interface TerminalListNativeIdentityRequest {
   options: TerminalListCliOptions;
   agent: ExecutorKind;
@@ -193,6 +192,7 @@ interface TerminalListNativeIdentityRequest {
   preferredSessionId?: string;
   allowedCompanionIdentity?: CodexAllowedCompanionSet["primary"];
   allowedAdditionalIdentities?: CodexAllowedCompanionSet["additional"];
+  claudeAgentRows?: readonly ClaudeIdentityRow[];
 }
 
 export type TerminalListScanEntry = TerminalListInventoryEntry;
@@ -242,6 +242,9 @@ export interface TerminalListReconciliationPorts {
 
 export interface TerminalListDiscoveryPorts {
   localCodexList?(options: TerminalListCliOptions): Promise<Record<string, unknown>>;
+  loadClaudeAgentRows?(options: TerminalListCliOptions,
+    observation: { required: true }): readonly ClaudeIdentityRow[];
+  observeClaudeWindowRole?(options: TerminalListCliOptions, pid: number, cwd?: string): "background_view" | undefined;
   createRuntimeTerminalAgentRegistry(
     options: TerminalListCliOptions
   ): TerminalAgentAdapterRegistry;
@@ -943,13 +946,13 @@ async function buildTerminalListGroup({
         runtime.createTerminalControlProvider(currentOptions),
       createProcessSource: (currentOptions) =>
         runtime.createTerminalProcessSource(currentOptions),
-      projectTerminal: ({ session, activeSessions, options: currentOptions,
-        bridge }) => terminalControlledListEntry(
-        session,
-        activeSessions,
-        currentOptions,
-        bridge
-      ),
+      projectTerminal: withClaudeListIdentityRecheck({
+        loadRows: runtime.loadClaudeAgentRows,
+        observeWindowRole: runtime.observeClaudeWindowRole,
+        observe: runtime.observeCurrentNativeAgentSessionIdentity,
+        project: ({ session, activeSessions, options: currentOptions, bridge }, snapshot) =>
+          terminalControlledListEntry(session, activeSessions, currentOptions, bridge, snapshot)
+      }),
       log: runtimeLog
     }
   });
@@ -971,22 +974,20 @@ async function terminalControlledListEntry(
   session: ActiveTerminalProcess,
   activeSessions: ActiveTerminalProcess[],
   options,
-  bridge: TerminalAgentBridge = terminalListRuntime().createTerminalAgentBridge(options)
+  bridge: TerminalAgentBridge = terminalListRuntime().createTerminalAgentBridge(options),
+  nativeIdentitySnapshot?: TerminalListNativeIdentitySnapshot
 ) {
   const terminalControl = session.terminalControl;
   if (!terminalControl) {
     throw new Error(`process ${session.pid} is not terminal-controlled`);
   }
-  const facts = await collectTerminalFactsForList(
-    session,
-    activeSessions,
-    options,
-    bridge,
-    terminalControl
-  );
+  const facts = await collectTerminalFactsForList(session, activeSessions, options,
+    bridge, terminalControl, nativeIdentitySnapshot);
   const {
     orphanedDispatch,
     nativeIdentityObservation,
+    nativeIdentityRecheck,
+    nativeWindowRole,
     nativeAgentIdentity,
     authorityNativeIdentityObservation,
     authorityNativeAgentIdentity,
@@ -1010,7 +1011,7 @@ async function terminalControlledListEntry(
     compatibilityWarnings
   } = facts.runtime;
   const { automatedInputComposerReady, userExplicitComposerReady,
-    inputOwnerBlocked } = facts.composer;
+    inputOwnerBlocked, claudeUserExplicitReadiness: physicalReadiness } = facts.composer;
   const {
     terminalId,
     childPids,
@@ -1076,6 +1077,8 @@ async function terminalControlledListEntry(
     native_agent_identity_evidence: nativeProcessEvidence,
     native_agent_identity_observation: {
       status: nativeIdentityObservation.status,
+      ...(nativeIdentityRecheck ? { recheck: nativeIdentityRecheck } : {}),
+      ...(nativeWindowRole ? { window_role: nativeWindowRole } : {}),
       ...(nativeIdentityObservation.status === "unavailable"
         ? { reason: nativeIdentityObservation.reason }
         : nativeIdentityObservation.status === "verified_absent"
@@ -1116,8 +1119,11 @@ async function terminalControlledListEntry(
       _claude_managed_send_eligible: commands.send && automatedInputComposerReady && !facts.store.hasOrphanedDispatch
     } : {}),
     _user_explicit_composer_ready: userExplicitComposerReady,
+    ...(physicalReadiness ? { physical_send_readiness: physicalReadiness } : {}),
     _native_identity_authority: {
-      observation: authorityNativeIdentityObservation,
+      observation: { ...authorityNativeIdentityObservation,
+        ...(nativeWindowRole ? { window_role: nativeWindowRole } : {}),
+        ...(nativeIdentityRecheck ? { recheck: nativeIdentityRecheck } : {}) },
       identity: authorityNativeAgentIdentity,
       lifecycle_binding_token: authorityLifecycleBindingToken
     },
@@ -1177,8 +1183,8 @@ async function terminalControlledListEntry(
       inputOwnerBlocked: inputOwnerBlocked ||
         (facts.modelControlResidual?.state === "recoverable" &&
           facts.modelControlResidual.kind === "model_surface"),
-      // Human-explicit Send treats this observation as advisory: an off-screen,
-      // non-empty, or truncated composer must not hide the physical action.
+      // Codex treats Composer proof as advisory; Claude requires a recognized
+      // empty Composer with no active foreground turn before physical input.
       userExplicitComposerReady
       })
       : { eligible: false as const };
@@ -1193,7 +1199,7 @@ async function terminalControlledListEntry(
           },
           missing_required: ["request"],
           scope: "terminal_user_explicit",
-          composer_policy: "replace_current_composer_and_submit"
+          composer_policy: session.agent === "claude" ? "require_empty_composer_and_submit" : "replace_current_composer_and_submit"
         }
       : undefined;
   const modelControlFacts = modelControlPolicyFacts({
@@ -1257,7 +1263,8 @@ async function collectTerminalFactsForList(
   activeSessions: ActiveTerminalProcess[],
   options: TerminalListCliOptions,
   bridge: TerminalAgentBridge,
-  terminalControl: TerminalControlRef
+  terminalControl: TerminalControlRef,
+  nativeIdentitySnapshot?: TerminalListNativeIdentitySnapshot
 ) {
   const terminalId = bridge.terminalConversationId(session);
   const adapter = bridge.registry.require(session.agent);
@@ -1272,7 +1279,8 @@ async function collectTerminalFactsForList(
       terminalControl,
       terminalId,
       options,
-      bridge
+      bridge,
+      nativeIdentitySnapshot
     })
   });
 }
@@ -1283,6 +1291,7 @@ function terminalListFactPortsFor(input: {
   terminalId: string;
   options: TerminalListCliOptions;
   bridge: TerminalAgentBridge;
+  nativeIdentitySnapshot?: TerminalListNativeIdentitySnapshot;
 }): TerminalListTerminalFactPorts {
   const { session, terminalControl, terminalId, options, bridge } = input;
   return {
@@ -1307,7 +1316,8 @@ function terminalListFactPortsFor(input: {
         terminalControl,
         options,
         bridge,
-        observedTerminalId
+        observedTerminalId,
+        input.nativeIdentitySnapshot
       ),
     projectEffectiveState: ({ terminalState, native }) =>
       effectiveTerminalListState({
@@ -1723,7 +1733,8 @@ async function observeTerminalNativeListIdentity(
   terminalControl: TerminalControlRef,
   options: TerminalListCliOptions,
   bridge: TerminalAgentBridge,
-  terminalId: string
+  terminalId: string,
+  nativeIdentitySnapshot?: TerminalListNativeIdentitySnapshot
 ): Promise<TerminalNativeListIdentityFacts> {
   let orphanedDispatch: TerminalDispatchLedgerDocument | undefined;
   try {
@@ -1764,7 +1775,7 @@ async function observeTerminalNativeListIdentity(
   }
   let nativeIdentityObservation: TerminalNativeIdentityObservation;
   try {
-    nativeIdentityObservation =
+    nativeIdentityObservation = nativeIdentitySnapshot?.observation ??
       await terminalListRuntime().observeCurrentNativeAgentSessionIdentity({
         options,
         agent: session.agent,
@@ -1879,6 +1890,8 @@ async function observeTerminalNativeListIdentity(
   return {
     orphanedDispatch,
     nativeIdentityObservation,
+    nativeIdentityRecheck: nativeIdentitySnapshot?.recheck,
+    nativeWindowRole: nativeIdentitySnapshot?.windowRole,
     nativeAgentIdentity,
     authorityNativeIdentityObservation,
     authorityNativeAgentIdentity,
@@ -1899,11 +1912,7 @@ async function observeAutomatedInputComposerReady({
   terminalControl: TerminalControlRef;
   terminalState: Awaited<ReturnType<typeof listStateForTerminal>>;
   options: TerminalListCliOptions; agentVersion?: string;
-}): Promise<{
-  automatedInputComposerReady: boolean;
-  userExplicitComposerReady: boolean;
-  inputOwnerBlocked: boolean;
-}> {
+}): Promise<TerminalListComposerFacts> {
   let ready = terminalListRuntime().nativeInspectionComposerEmpty(
     session.agent,
     terminalState.screen_excerpt
@@ -1911,9 +1920,10 @@ async function observeAutomatedInputComposerReady({
   const userExplicitPromptSafe =
     terminalState.activity_state !== "awaiting_approval" &&
     terminalState.approval_state.blocked !== true;
-  let userExplicitReady = session.agent === "codex"
-    ? userExplicitPromptSafe
-    : ready && userExplicitPromptSafe;
+  const physicalReadiness = session.agent === "claude"
+    ? claudeUserExplicitReadiness(terminalState.screen_excerpt) : undefined;
+  let userExplicitReady = physicalReadiness
+    ? physicalReadiness.ready && userExplicitPromptSafe : userExplicitPromptSafe;
   const inputOwnerBlocked = terminalUserExplicitInputOwnerBlocked(terminalState.screen_excerpt);
   if (
     session.agent !== "codex" ||
@@ -1924,6 +1934,7 @@ async function observeAutomatedInputComposerReady({
     return {
       automatedInputComposerReady: ready,
       userExplicitComposerReady: userExplicitReady,
+      ...(physicalReadiness ? { claudeUserExplicitReadiness: physicalReadiness } : {}),
       inputOwnerBlocked
     };
   }

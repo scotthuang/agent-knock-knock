@@ -4,6 +4,8 @@ AKK controls an already-open Claude Code CLI through its native connection or an
 
 Starting with AKK **0.15.0**, new Claude Code sends automatically prefer a **managed terminal Turn** when AKK verifies a unique controllable tmux/Herdr counterpart for the exact native session and process. The result supplies a `turn_id` for monitoring and supported approvals or question responses; the caller does not select a transport or enable background management. Without that exact terminal, AKK uses the native inbox and returns a `claude-cli-watch:...` receipt. Codex CLI continues to prefer its shared backend. Existing Turns, Watches and send receipts retain their original provider and are never migrated or resent to adopt this policy.
 
+An explicitly selected physical terminal is a separate existing operation. When List offers that terminal's `terminal_user_explicit` Send, call Send with its exact displayed `terminal_id` and request. AKK may enter text and submit Enter even when native conversation identity is unresolved, subject to the current terminal input-safety checks: an empty recognized main Composer, a known native footer, and no running or unproven foreground turn. Background shells alone do not block this physical Send. This does not prove native acceptance or completion and does not add background-worker protocol support. Ordinary managed sends never silently downgrade to physical input after failure, and callers do not pass a new scope or private token.
+
 Live observations include **Claude Code `2.1.295` and `2.1.296` on macOS**, using native peer protocol `1`. These are tested versions, not minimum versions or a promise that every UI variant works. An unlisted, complete `x.y.z` version can use the compatible runtime contracts; absence from the regression matrix alone does not disable an otherwise eligible operation. Discovery checks the running CLI's registry, native session UUID, PID/start time, and socket identity. Unknown identity, protocol or UI structure is not guessed.
 
 AKK uses a small **Python 3 helper on the controller side** to verify macOS Unix-socket peer credentials. Python 3 must be available to AKK. This is not installed into Claude Code and does not change its login, proxy, permissions, or settings. Other operating systems do not yet have this direct adapter; existing supported terminal routes remain available.
@@ -37,9 +39,63 @@ Keep the authenticated Claude Code CLI open and ask your controller to refresh `
 
 > Use AKK to ask Claude Code in my-project to inspect the failing tests. Tell me when it finishes.
 
-Save the task identity returned by Send: `turn_id` for managed terminal delivery, or `watch_id` for native inbox delivery. Monitoring starts automatically; do not add another Watch for that task. Use Status with that exact task identity for follow-up, including managed approvals. Conversation Status reads the latest input and must not replace the original task identity. For a task started manually in the CLI, explicitly ask the controller to Watch it.
+For managed or native inbox delivery, save the task identity returned by Send: `turn_id` for managed terminal delivery, or `watch_id` for native inbox delivery. Monitoring starts automatically; do not add another Watch for that task. Use Status with that exact task identity for follow-up, including managed approvals. An explicitly selected physical Send reports its actual dispatch and observation evidence; without native identity, it cannot promise acceptance or completion monitoring. Conversation Status reads the latest input and must not replace the original task identity. For a task started manually in the CLI, explicitly ask the controller to Watch it.
 
 The usual `CLAUDE_CONFIG_DIR` is respected. For native inbox delivery, AKK does not modify Claude's inbound-message policy: if the session holds or refuses peer messages, the result remains held/refused rather than being bypassed with terminal input. Native busy Send is rejected because Claude can absorb an inbound message into the task already running.
+
+### When List offers different operations
+
+List's per-conversation guidance explains the current usable operations and
+recovery steps. An idle native conversation can accept Send without offering
+Watch because there is no active task to observe. Send creates monitoring for
+its own task. A working or waiting native conversation can offer Watch, whose
+creation still requires an exact active input. Terminal activity observation is
+a different, best-effort operation and may remain available on an unidentified
+terminal.
+
+If a Claude pane lacks verified identity, List requests one additional fresh
+snapshot from the configured reader, shared across unresolved Claude panes in
+that scan. It applies the same interactive-session and exact process, registry
+and configuration-home checks. It never types into the terminal, promotes a
+background agent, or substitutes a same-directory conversation. If the retry
+cannot establish native identity, the row explains the missing proof and the
+operations still offered, even when a more specific diagnostic is unavailable.
+An independently offered physical Send may still accept terminal input. Follow the
+actual action and its stated proof limits rather than interpreting missing
+native identity as a blanket input prohibition.
+
+The live investigation initially looked like a reader omission. The installed
+Claude Code 2.1.295 runtime instead deliberately excludes a foreground registry
+record carrying `parkedJobId` from `agents --json`; `--all` only adds completed
+background jobs and does not remove that exclusion. A foreground window in the
+Agents/background-session interface can display a conversation executed by a
+separate `bg-spare` process. Its own registered session is therefore not proof
+of the identity of the displayed conversation. This finding describes the
+inspected installation, not a universal contract for every Claude release.
+
+For an unresolved Claude terminal, AKK can explain this state using a bounded,
+read-only check of the foreground process's owned registry, exact PID and live
+process start identity. Positive evidence produces background-view guidance.
+When that physical terminal offers Send, explicitly selecting it can enter text
+and submit Enter; the result must still be checked in the window because native
+acceptance and exact task completion are unproven. When Send is not offered,
+continue manually in the current window, or start an ordinary foreground
+conversation without attaching a background conversation, then refresh List.
+Restarting and reopening the same background conversation does not change its
+execution model. This is a display diagnosis only: AKK does not resolve the
+background job or worker, access daemon or claim sockets, add a background
+protocol delivery route, or promise exact background-task completion. The
+background-view marker neither grants physical Send authority nor blocks an
+otherwise valid physical input action.
+
+Missing, unsafe, malformed, stale or unreadable evidence does not become a
+background diagnosis. List retains the generic explanation that the current
+conversation identity could not be confirmed, with the physical input option
+when actually offered, or steps to inspect the pane, continue directly, and
+retry ordinary startup/List refresh where appropriate.
+Restarting remains an attempt, not a guaranteed repair. Background jobs remain
+excluded from AKK's interactive conversation list, so scan counts are not a
+count of every Claude process on the machine.
 
 ### Sender permission class
 

@@ -31,7 +31,6 @@ import {
   detectClaudeTranscriptAcceptance
 } from "../../src/claude-local-transcript-provider.js";
 import {
-  CLAUDE_DRAFT_REPLACEMENT_SENTINEL,
   TerminalUserExplicitClearUncertainError
 } from
   "../../src/terminal-user-explicit-send-clear.js";
@@ -305,385 +304,306 @@ test("explicit Codex Send replaces even when the Composer is off-screen", async 
   }
 });
 
-test("explicit Claude Send replaces empty and nonempty Composer drafts", async (t) => {
+test("explicit Claude Send refuses occupied stashes and probes an empty Composer without writing cleanup text", async (t) => {
   const adapter = createTestClaudeAdapter();
   const request = "the user's newest explicit Claude request";
-  const idleFrame = (draft: string) => [
-    "────────────────────────────────────────────────",
-    `❯ ${draft}`,
-    "────────────────────────────────────────────────",
-    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
-  ].join("\n");
-  const cases = [
-    { name: "empty composer", screen: idleFrame("") },
-    { name: "same visible draft", screen: idleFrame(request) },
-    { name: "different visible draft", screen: idleFrame("an older unrelated draft") },
-    { name: "off-screen composer", screen: "recent Claude output" },
-    {
-      name: "narrow wrapped working footer",
-      screen: [
-        "✻ Working… (8s · thinking)",
-        "────────────────────────────────────────────────",
-        "❯ ",
-        "────────────────────────────────────────────────",
-        "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to",
-        "  interrupt · ← for agents"
-      ].join("\n"),
+  const legacyMarker = " [AKK replacing current draft 12345678-abcd-4abc-9abc-1234567890ab]";
+  type NativeState = { draft: string; cursor?: number; stash?: string; hideStashLabel?: boolean;
+    stashPlacement?: "above" | "trailing"; notificationHint?: string;
+    restoredToast?: boolean; offscreen?: boolean; working?: boolean; userTextAfterEnter?: string;
+    footer?: readonly string[]; beforeComposer?: readonly string[] };
+  type Fault = "probe_not_sent" | "probe_ignored" | "probe_uncertain" | "post_probe_capture";
+  // Native C-s on an empty editor restores a stash or does nothing; on nonempty
+  // text it overwrites the sole slot. Enter restores any remaining stash.
+  class NativeClaudeProvider extends RecordingTerminalProvider {
+    composer: string;
+    cursor: number;
+    stash: string | undefined;
+    submitted: string[] = [];
+    probeKeys = 0;
+    taskInjected = false;
+    fault?: Fault;
+    driftAfterProbe = false;
+    runningAfterProbe = false;
+    constructor(readonly initial: NativeState) {
+      super([PANE]);
+      this.composer = initial.draft;
+      this.cursor = initial.cursor ?? initial.draft.length;
+      this.stash = initial.stash;
+      this.redraw(initial.offscreen);
     }
-  ] as const;
-
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      let nowMs = 0;
-      let replacementTextInjected = false;
-      class BlindReplacementProvider extends RecordingTerminalProvider {
-        override async capture(
-          terminal: TerminalEndpointRef | string,
-          options: {
-            scrollbackLines?: number;
-            socketPath?: string;
-            preserveEscapes?: boolean;
-          } = {}
-        ): Promise<string> {
-          if (replacementTextInjected) {
-            throw new Error("post-request Composer capture is forbidden");
+    redraw(offscreen = false): void {
+      const running = this.initial.working || this.runningAfterProbe && this.probeKeys > 0;
+      // Claude composes one notification row: /clear advice and restore toasts
+      // can precede the stash badge; the badge is not necessarily a whole row.
+      const notificationParts = [this.initial.restoredToast ? "Draft restored" : undefined,
+        this.initial.notificationHint,
+        this.stash === undefined || this.initial.hideStashLabel ? undefined : "› stashed"]
+        .filter((part): part is string => part !== undefined);
+      const notification = notificationParts.length === 0 ? [] : [
+        `                                    ${notificationParts.join(" · ")}`];
+      this.setScreen(PANE.target, offscreen ? "recent Claude output" : [
+        ...(this.initial.beforeComposer ?? []),
+        ...(running ? ["✻ Working… (8s · thinking)"] : []),
+        ...(this.initial.stashPlacement === "trailing" ? [] : notification),
+        "────────────────────────────────────────────────",
+        ...this.composer.split("\n").map((line, index) => `${index === 0 ? "❯ " : "  "}${line}`),
+        "────────────────────────────────────────────────",
+        ...(this.initial.footer ?? ["  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"]),
+        ...(this.initial.stashPlacement === "trailing" ? notification : [])
+      ].join("\n"));
+    }
+    override async capture(terminal: TerminalEndpointRef | string,
+      options: { scrollbackLines?: number; socketPath?: string; preserveEscapes?: boolean } = {}): Promise<string> {
+      assert.equal(this.taskInjected, false, "no Composer observation after request injection or Enter");
+      if (this.fault === "post_probe_capture" && this.probeKeys > 0) throw new Error("screen temporarily unavailable");
+      return super.capture(terminal, options);
+    }
+    override async resolve(terminal: TerminalEndpointRef): Promise<TerminalEndpointRef> {
+      const result = await super.resolve(terminal);
+      return this.driftAfterProbe && this.probeKeys > 0
+        ? { ...result, route: { ...result.route, currentCommand: "nvim task.md" },
+          providerRef: { ...(result.providerRef as Record<string, unknown>), currentCommand: "nvim task.md" } } : result;
+    }
+    override async sendText(terminal: TerminalEndpointRef | string, text: string,
+      options: TerminalProviderTextOptions = {}): Promise<void> {
+      assert.equal(this.submitted.length, 0, "no asynchronous cleanup or mutation after Enter");
+      assert.equal(text, request, "AKK writes only the requested task, never cleanup text into a user's draft slot");
+      this.taskInjected = true;
+      await super.sendText(terminal, text, options);
+      this.composer = this.composer.slice(0, this.cursor) + text + this.composer.slice(this.cursor);
+      this.cursor += text.length;
+      this.redraw();
+    }
+    override async sendKeys(terminal: TerminalEndpointRef | string, keys: readonly string[],
+      options: { socketPath?: string } = {}): Promise<void> {
+      assert.equal(this.submitted.length, 0, "no cleanup keys after Enter may erase new user input");
+      if (keys.includes("C-s") && this.fault === "probe_not_sent") {
+        throw new TerminalControlInputNotSentError("probe key was not delivered");
+      }
+      await super.sendKeys(terminal, keys, options);
+      for (const key of keys) {
+        assert.ok(["C-s", "C-m"].includes(key), `unexpected destructive or interrupting key: ${key}`);
+        if (key === "C-s") {
+          this.probeKeys += 1;
+          if (this.fault === "probe_ignored") continue;
+          if (this.composer.trim()) {
+            this.stash = this.composer;
+            this.composer = "";
+            this.cursor = 0;
+          } else if (this.stash !== undefined) {
+            this.composer = this.stash;
+            this.cursor = this.composer.length;
+            this.stash = undefined;
           }
-          return super.capture(terminal, options);
-        }
-
-        override async sendText(
-          terminal: TerminalEndpointRef | string,
-          text: string,
-          options: TerminalProviderTextOptions = {}
-        ): Promise<void> {
-          if (text === request) replacementTextInjected = true;
-          await super.sendText(terminal, text, options);
-        }
-
-        override async sendKeys(
-          terminal: TerminalEndpointRef | string,
-          keys: readonly string[],
-          options: { socketPath?: string } = {}
-        ): Promise<void> {
-          await super.sendKeys(terminal, keys, options);
-          if (keys.includes("C-s")) this.setScreen(terminal, idleFrame(""));
+        } else {
+          this.submitted.push(this.composer);
+          this.composer = (this.stash ?? "") + (this.initial.userTextAfterEnter ?? "");
+          this.stash = undefined;
+          this.cursor = this.composer.length;
         }
       }
-      const provider = new BlindReplacementProvider([PANE], {
-        [PANE.target]: testCase.screen
-      });
-      const bridge = new TerminalAgentBridge({
-        registry: createTerminalAgentAdapterRegistry([adapter]),
-        terminalProvider: provider,
-        nowMs: () => nowMs,
-        async sleep(milliseconds) {
-          nowMs += milliseconds;
-        }
-      });
-      const reservations: Array<{ target: string; text: string }> = [];
-
-      const result = await bridge.sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        {
-          beforeMutationReservation: ({ terminalControl, text }) => {
-            reservations.push({ target: terminalControl.target, text });
-          }
-        }
-      );
-
-      assert.deepEqual(reservations, [{ target: PANE.target, text: request }]);
-      assert.deepEqual(result, {
-        stage: "enter_dispatched",
-        terminalControl: result.terminalControl,
-        disposition: "replaced_current_composer",
-        clearCount: 1,
-        textInjectionCount: 1,
-        enterCount: 1
-      });
-      assert.deepEqual(
-        provider.operations.flatMap((operation) =>
-          operation.kind === "capture"
-            ? []
-            : operation.kind === "text"
-              ? [operation.text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL
-                ? "sentinel"
-                : "text"]
-              : [`keys:${operation.keys.join(",")}`]
-        ),
-        ["sentinel", "keys:C-s", "text", "keys:C-m"]
-      );
-      assert.equal(
-        provider.textDeliveryOptions.some((options) => options.bracketedPaste),
-        false,
-        "Claude keeps its existing text-delivery policy"
-      );
-      assert.equal(
-        provider.operations.filter((operation) => operation.kind === "capture")
-          .length,
-        3,
-        "two pre-mutation scans plus the stash-clear proof are allowed"
-      );
-    });
+      this.redraw();
+      if (keys.includes("C-s") && this.fault === "probe_uncertain") throw new Error("transport disconnected after key delivery");
+    }
+    userClearsVisibleDraft(): void {
+      this.composer = "";
+      this.cursor = 0;
+      this.redraw();
+    }
   }
-
-  await t.test("working Claude uses a cursor-independent native stash clear", async () => {
+  const fixture = (state: NativeState) => {
     let nowMs = 0;
-    class SettlingStashProvider extends RecordingTerminalProvider {
-      override async sendKeys(
-        terminal: TerminalEndpointRef | string,
-        keys: readonly string[],
-        options: { socketPath?: string } = {}
-      ): Promise<void> {
-        await super.sendKeys(terminal, keys, options);
-        if (keys.includes("C-s")) this.setScreen(terminal, idleFrame(""));
-      }
-    }
-    const provider = new SettlingStashProvider([PANE], {
-      [PANE.target]: [
-        "❯ an existing request",
-        "✻ Working… (8s · thinking)",
-        "────────────────────────────────────────────────",
-        "❯ an older queued draft",
-        "────────────────────────────────────────────────",
-        "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents"
-      ].join("\n")
-    });
-    const bridge = new TerminalAgentBridge({
-      registry: createTerminalAgentAdapterRegistry([adapter]),
-      terminalProvider: provider,
-      nowMs: () => nowMs,
-      async sleep(milliseconds) {
-        nowMs += milliseconds;
-      }
-    });
-    await bridge.sendUserExplicit(
-      "claude",
-      terminalControl(adapter),
-      request,
-      { beforeMutationReservation() {} }
-    );
-    const keyOperations = provider.operations.filter(
-      (operation) => operation.kind === "keys"
-    );
-    assert.equal(keyOperations.length, 2);
-    assert.deepEqual(
-      keyOperations[0]?.kind === "keys" ? keyOperations[0].keys : [],
-      ["C-s"]
-    );
-    assert.deepEqual(
-      keyOperations[1]?.kind === "keys" ? keyOperations[1].keys : [],
-      ["C-m"]
-    );
-    assert.deepEqual(
-      provider.operations.filter((operation) => operation.kind === "text")
-        .map((operation) => operation.kind === "text" ? operation.text : ""),
-      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, request]
-    );
+    const provider = new NativeClaudeProvider(state);
+    const bridge = new TerminalAgentBridge({ registry: createTerminalAgentAdapterRegistry([adapter]),
+      terminalProvider: provider, nowMs: () => nowMs, async sleep(ms) { nowMs += ms; } });
+    const reservations: Array<{ target: string; text: string }> = [];
+    return { provider, reservations, run: (afterReservation = () => {}) => bridge.sendUserExplicit("claude", terminalControl(adapter), request,
+      { beforeMutationReservation({ terminalControl, text }) {
+        reservations.push({ target: terminalControl.target, text }); afterReservation();
+      } }) };
+  };
+  const dynamicFooter = "  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage          Debug";
+  const multiline = "first line\nsecond line\nthird line\nfourth line";
+  const clearHint = "new task? /clear to save 337.6k tokens";
+  const cases: Array<{ name: string; state: NativeState; fault?: Fault }> = [
+    { name: "empty composer", state: { draft: "" } },
+    { name: "native /clear advice without a stash remains sendable", state: { draft: "", notificationHint: clearHint } },
+    { name: "manual mode", state: { draft: "", footer: ["  ⏸ manual mode on"] } },
+    { name: "historical badge above a newer normal reply", state: { draft: "",
+      beforeComposer: ["                                    › stashed", "", "⏺ The current task is complete.", ""] } },
+    { name: "background shell and Debug footer", state: { draft: "", footer: [dynamicFooter],
+      beforeComposer: ["✻ Sautéed for 16s · done 1:35", ""] } },
+    { name: "completed turn with /clear advice and lingering interrupt hint", state: { draft: "", footer: [dynamicFooter],
+      notificationHint: clearHint, beforeComposer: ["✻ Sautéed for 16s · done 1:35", ""] } },
+    { name: "wrapped background-shell footer", state: { draft: "", beforeComposer: ["✻ Brewed for 43s · done 1:37", ""],
+      footer: ["  ⏵⏵ auto mode on · 2 shells · esc to interrupt · ← for agents", "  · ↓ to manage          Debug"] } },
+    { name: "post-Enter user input remains untouched", state: { draft: "", userTextAfterEnter: "new human draft" } },
+    { name: "ignored empty-editor probe cannot create a marker", state: { draft: "" }, fault: "probe_ignored" }
+  ];
+  for (const { name, state, fault } of cases) await t.test(name, async () => {
+    const { provider, reservations, run } = fixture(state);
+    provider.fault = fault;
+    const result = await run();
+    assert.deepEqual(reservations, [{ target: PANE.target, text: request }]);
+    assert.equal(result.stage, "enter_dispatched");
+    assert.equal(result.disposition, "replaced_current_composer");
+    assert.equal(result.clearCount, 1);
+    assert.equal(result.textInjectionCount, 1);
+    assert.equal(result.enterCount, 1);
+    assert.deepEqual(provider.submitted, [request], "only the exact requested task is submitted");
+    assert.equal(provider.composer, state.userTextAfterEnter ?? "", "no cleanup marker returns after submission");
+    assert.equal(provider.stash, undefined);
+    assert.equal(provider.probeKeys, 1, "only a non-destructive empty-editor restore probe precedes the request");
+    assert.equal(provider.textDeliveryOptions.some(options => options.bracketedPaste), false);
   });
 
-  await t.test("a proven unsent stash sentinel remains retry-safe", async () => {
-    class SentinelNotSentProvider extends RecordingTerminalProvider {
-      override async sendText(
-        _terminal: TerminalEndpointRef | string,
-        text: string
-      ): Promise<void> {
-        assert.equal(text, CLAUDE_DRAFT_REPLACEMENT_SENTINEL);
-        throw new TerminalControlInputNotSentError("sentinel was not delivered");
-      }
-    }
-    const provider = new SentinelNotSentProvider([PANE], {
-      [PANE.target]: "Claude Composer is outside the captured viewport"
+  const blocked: Array<{ name: string; state: NativeState; reason: RegExp }> = [
+    { name: "empty composer with an old stash above the input border", state: { draft: "", stash: "old hidden user draft" }, reason: /stash/iu },
+    { name: "real /clear advice with an inline stash above the input border", state: { draft: "", stash: "STASH6-PROTECT-MARKER-abc123", notificationHint: clearHint }, reason: /stash/iu },
+    { name: "short /clear advice with an inline stash", state: { draft: "", stash: multiline, notificationHint: "/clear to save 1k tokens" }, reason: /stash/iu },
+    { name: "Draft restored and /clear advice before an occupied stash", state: { draft: "", stash: multiline, restoredToast: true, notificationHint: clearHint }, reason: /stash/iu },
+    { name: "trailing /clear advice with an inline stash", state: { draft: "", stash: "trailing notification draft", stashPlacement: "trailing", notificationHint: clearHint }, reason: /stash/iu },
+    { name: "trailing Draft restored and /clear advice with an inline stash", state: { draft: "", stash: multiline, stashPlacement: "trailing", restoredToast: true, notificationHint: clearHint }, reason: /stash/iu },
+    { name: "trailing stash badge", state: { draft: "", stash: "draft from a trailing badge", stashPlacement: "trailing" }, reason: /stash/iu },
+    { name: "Draft restored toast with a newly occupied slot", state: { draft: "", stash: multiline, restoredToast: true }, reason: /stash/iu },
+    { name: "wrapped footer with a right-aligned stash", state: { draft: "", stash: "older hidden stash", stashPlacement: "trailing",
+      beforeComposer: ["✻ Brewed for 43s · done 1:37", ""],
+      footer: ["  ⏵⏵ auto mode on · 2 shells · esc to interrupt · ← for agents", "  · ↓ to manage          Debug"] }, reason: /stash/iu },
+    { name: "visible legacy AKK marker", state: { draft: legacyMarker }, reason: /AKK/iu },
+    { name: "same visible draft", state: { draft: request }, reason: /(?:empty|draft)/iu },
+    { name: "different visible draft", state: { draft: "an older unrelated draft" }, reason: /(?:empty|draft)/iu },
+    { name: "off-screen composer", state: { draft: "unseen old draft", offscreen: true }, reason: /Composer/iu },
+    { name: "foreground turn despite empty prompt and background shell", state: { draft: "", working: true,
+      footer: [dynamicFooter] }, reason: /(?:foreground|running|working)/iu },
+    { name: "foreground spinner with /clear advice still owns the turn", state: { draft: "", working: true,
+      notificationHint: clearHint, footer: [dynamicFooter], beforeComposer: ["✻ Sautéed for 16s · done 1:35"] },
+      reason: /(?:foreground|running|working)/iu },
+    { name: "unknown notification after completion cannot prove a lingering interrupt hint safe", state: { draft: "",
+      notificationHint: `${clearHint} unexpected overlay`, footer: [dynamicFooter],
+      beforeComposer: ["✻ Sautéed for 16s · done 1:35"] }, reason: /(?:foreground|running|working)/iu },
+    { name: "foreground turn with wrapped current-work tip", state: { draft: "", footer: [dynamicFooter],
+      beforeComposer: ["✻ Brewed for 43s · done 1:37", "", "✽ Flibbertigibbeting… (9m 26s · ↓ 5.7k tokens)",
+        "  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work", ""] },
+      reason: /(?:foreground|running|working)/iu },
+    { name: "middle-dot foreground spinner", state: { draft: "", footer: [dynamicFooter],
+      beforeComposer: ["· Thinking… (8s · ↓ 123 tokens)"] }, reason: /(?:foreground|running|working)/iu },
+    { name: "interrupt hint without positive foreground completion", state: { draft: "", footer: [dynamicFooter] },
+      reason: /(?:foreground|running|working|ended|finish)/iu },
+    ...[0, 11, multiline.length].map(cursor => ({ name: `multiline draft cursor ${cursor}`,
+      state: { draft: multiline, cursor, stash: "pre-existing hidden stash" }, reason: /(?:empty|draft)/iu })),
+    { name: "500-line draft remains user-owned", state: { draft: "line\n".repeat(500), cursor: 0 }, reason: /(?:empty|draft)/iu },
+    { name: "unknown footer prefix", state: { draft: "", beforeComposer: ["✻ Sautéed for 16s · done 1:35"], footer: [dynamicFooter.replace("auto mode on", "auto mode on unexpected text")] },
+      reason: /footer/iu },
+    { name: "unknown footer middle", state: { draft: "", beforeComposer: ["✻ Sautéed for 16s · done 1:35"], footer: [dynamicFooter.replace("1 shell", "1 shell · unfamiliar shortcut")] },
+      reason: /footer/iu },
+    { name: "unknown footer suffix", state: { draft: "", beforeComposer: ["✻ Sautéed for 16s · done 1:35"], footer: [dynamicFooter + " unexpected overlay"] }, reason: /footer/iu }
+  ];
+  for (const { name, state, reason } of blocked) await t.test(`${name} blocks without touching input`, async () => {
+    const { provider, reservations, run } = fixture(state);
+    await assert.rejects(run(), (error: unknown) => {
+      assert.ok(error instanceof TerminalInputNotStartedError);
+      assert.match(error.message, reason);
+      return true;
     });
-    const bridge = createBridge(adapter, provider);
-    await assert.rejects(
-      bridge.sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        { beforeMutationReservation() {} }
-      ),
-      TerminalInputNotStartedError
-    );
-    assert.equal(
-      provider.operations.some((operation) => operation.kind !== "capture"),
-      false
-    );
+    assert.deepEqual(reservations, [], "initial safety failure precedes the mutation reservation");
+    assert.equal(provider.operations.some(operation => operation.kind !== "capture"), false);
+    assert.equal(provider.composer, state.draft, "the user's existing draft remains byte-for-byte intact");
+    assert.equal(provider.stash, state.stash, "AKK must not overwrite or consume a visibly occupied stash");
+    assert.deepEqual(provider.submitted, []);
   });
-
-  await t.test("a failed stash key after its sentinel is uncertain", async () => {
-    class StashNotSentProvider extends RecordingTerminalProvider {
-      override async sendKeys(
-        terminal: TerminalEndpointRef | string,
-        keys: readonly string[],
-        options: { socketPath?: string } = {}
-      ): Promise<void> {
-        await super.sendKeys(terminal, keys, options);
-        if (keys.includes("C-s")) {
-          throw new TerminalControlInputNotSentError("stash key was not delivered");
-        }
-      }
-    }
-    const provider = new StashNotSentProvider([PANE], {
-      [PANE.target]: "Claude Composer is outside the captured viewport"
-    });
-    const bridge = createBridge(adapter, provider);
-    await assert.rejects(
-      bridge.sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        { beforeMutationReservation() {} }
-      ),
-      TerminalUserExplicitClearUncertainError
-    );
-    assert.deepEqual(
-      provider.operations.flatMap((operation) =>
-        operation.kind === "capture"
-          ? []
-          : operation.kind === "text"
-            ? [operation.text]
-            : [operation.keys.join(",")]
-      ),
-      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
-    );
+  for (const location of ["draft", "stash"] as const) await t.test(`${location} arriving during reservation blocks before the probe`, async () => {
+    const { provider, run } = fixture({ draft: "" });
+    await assert.rejects(run(() => {
+      if (location === "draft") provider.composer = "new human draft";
+      else provider.stash = "new human stash";
+      provider.redraw();
+    }), TerminalInputNotStartedError);
+    assert.equal(provider.operations.some(operation => operation.kind !== "capture"), false);
+    assert.equal(location === "draft" ? provider.composer : provider.stash, `new human ${location}`);
   });
-
-  await t.test("foreground editor drift after the sentinel never receives the stash key", async () => {
-    class PreClearOwnerDriftProvider extends RecordingTerminalProvider {
-      private sentinelInjected = false;
-      override async resolve(
-        terminal: TerminalEndpointRef
-      ): Promise<TerminalEndpointRef> {
-        const resolved = await super.resolve(terminal);
-        return this.sentinelInjected
-          ? {
-              ...resolved,
-              route: { ...resolved.route, currentCommand: "nvim task.md" },
-              providerRef: {
-                ...(resolved.providerRef as Record<string, unknown>),
-                currentCommand: "nvim task.md"
-              }
-            }
-          : resolved;
-      }
-      override async sendText(
-        terminal: TerminalEndpointRef | string,
-        text: string,
-        options: TerminalProviderTextOptions = {}
-      ): Promise<void> {
-        await super.sendText(terminal, text, options);
-        if (text === CLAUDE_DRAFT_REPLACEMENT_SENTINEL) {
-          this.sentinelInjected = true;
-        }
-      }
-    }
-    const provider = new PreClearOwnerDriftProvider([PANE], {
-      [PANE.target]: idleFrame("an older unrelated draft")
-    });
-    await assert.rejects(
-      createBridge(adapter, provider).sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        { beforeMutationReservation() {} }
-      ),
-      TerminalUserExplicitClearUncertainError
-    );
-    assert.deepEqual(
-      provider.operations.flatMap((operation) =>
-        operation.kind === "capture"
-          ? []
-          : operation.kind === "text"
-            ? [operation.text]
-            : [operation.keys.join(",")]
-      ),
-      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL]
-    );
+  await t.test("refused user stash can be restored byte-for-byte and retried after user cleanup", async () => {
+    const original = "用户暂存草稿  α\nsecond line\n  trailing spaces  ";
+    const { provider, run } = fixture({ draft: "", stash: original });
+    await assert.rejects(run(), /stash/iu);
+    assert.equal(provider.stash, original);
+    await provider.sendKeys(PANE.target, ["C-s"]);
+    assert.equal(provider.composer, original);
+    assert.equal(provider.stash, undefined);
+    await assert.rejects(run(), /draft/iu);
+    provider.userClearsVisibleDraft();
+    assert.equal((await run()).stage, "enter_dispatched");
+    assert.deepEqual(provider.submitted, [request]);
   });
-
-  await t.test("an unconsumed stash key never injects the request", async () => {
-    const provider = new RecordingTerminalProvider([PANE], {
-      [PANE.target]: idleFrame("an older unrelated draft")
+  await t.test("hidden stash is restored without erasing user text or submitting a task", async () => {
+    const original = "  hidden user text\n下一行  ";
+    const { provider, run } = fixture({ draft: "", stash: original, hideStashLabel: true });
+    await assert.rejects(run(), (error: unknown) => {
+      assert.ok(error instanceof TerminalUserExplicitClearUncertainError);
+      assert.match(error.message, /(?:draft|restor)/iu);
+      return true;
     });
-    const bridge = createBridge(adapter, provider);
-    await assert.rejects(
-      bridge.sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        { beforeMutationReservation() {} }
-      ),
-      TerminalUserExplicitClearUncertainError
-    );
-    assert.deepEqual(
-      provider.operations.flatMap((operation) =>
-        operation.kind === "capture"
-          ? []
-          : operation.kind === "text"
-            ? [operation.text]
-            : [operation.keys.join(",")]
-      ),
-      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
-    );
+    assert.equal(provider.composer, original);
+    assert.equal(provider.stash, undefined, "the user's payload is visible, not deleted");
+    assert.equal(provider.taskInjected, false);
+    assert.deepEqual(provider.submitted, []);
+    assert.deepEqual(provider.operations.filter(operation => operation.kind !== "capture")
+      .map(operation => operation.kind === "keys" ? operation.keys : []), [["C-s"]]);
   });
-
-  await t.test("foreground editor drift after clear never injects the request", async () => {
-    class PostClearOwnerDriftProvider extends RecordingTerminalProvider {
-      private afterClear = false;
-      private postClearResolutions = 0;
-      override async resolve(
-        terminal: TerminalEndpointRef
-      ): Promise<TerminalEndpointRef> {
-        const resolved = await super.resolve(terminal);
-        if (!this.afterClear) return resolved;
-        this.postClearResolutions += 1;
-        return this.postClearResolutions < 3
-          ? resolved
-          : {
-              ...resolved,
-              route: { ...resolved.route, currentCommand: "nvim task.md" },
-              providerRef: {
-                ...(resolved.providerRef as Record<string, unknown>),
-                currentCommand: "nvim task.md"
-              }
-            };
-      }
-      override async sendKeys(
-        terminal: TerminalEndpointRef | string,
-        keys: readonly string[],
-        options: { socketPath?: string } = {}
-      ): Promise<void> {
-        await super.sendKeys(terminal, keys, options);
-        if (keys.includes("C-s")) {
-          this.afterClear = true;
-          this.setScreen(terminal, idleFrame(""));
-        }
-      }
-    }
-    const provider = new PostClearOwnerDriftProvider([PANE], {
-      [PANE.target]: idleFrame("an older unrelated draft")
+  await t.test("legacy AKK stash failure explains manual recovery without claiming ownership of hidden text", async () => {
+    const { provider, run } = fixture({ draft: "", stash: legacyMarker });
+    await assert.rejects(run(), (error: unknown) => {
+      assert.ok(error instanceof TerminalInputNotStartedError);
+      assert.match(error.message, /Ctrl\+S|C-s/iu);
+      assert.match(error.message, /AKK/iu);
+      assert.match(error.message, /(?:if|may|cannot|unknown)/iu, "hidden contents cannot be identified from the label alone");
+      return true;
     });
-    await assert.rejects(
-      createBridge(adapter, provider).sendUserExplicit(
-        "claude",
-        terminalControl(adapter),
-        request,
-        { beforeMutationReservation() {} }
-      ),
-      TerminalUserExplicitClearUncertainError
-    );
-    assert.deepEqual(
-      provider.operations.flatMap((operation) =>
-        operation.kind === "capture"
-          ? []
-          : operation.kind === "text"
-            ? [operation.text]
-            : [operation.keys.join(",")]
-      ),
-      [CLAUDE_DRAFT_REPLACEMENT_SENTINEL, "C-s"]
-    );
+    assert.equal(provider.stash, legacyMarker);
+    await provider.sendKeys(PANE.target, ["C-s"]);
+    await assert.rejects(run(), /AKK/iu);
+    assert.equal(provider.composer, legacyMarker);
+    provider.userClearsVisibleDraft();
+    assert.equal((await run()).stage, "enter_dispatched");
+    assert.equal(provider.composer, "");
+  });
+  await t.test("a proven unsent restore probe is retry-safe", async () => {
+    const { provider, run } = fixture({ draft: "" });
+    provider.fault = "probe_not_sent";
+    await assert.rejects(run(), TerminalInputNotStartedError);
+    assert.equal(provider.operations.some(operation => operation.kind !== "capture"), false);
+    provider.fault = undefined;
+    assert.equal((await run()).stage, "enter_dispatched");
+  });
+  for (const fault of ["probe_uncertain", "post_probe_capture"] as const) await t.test(`${fault} has no marker residue and can recover`, async () => {
+    const { provider, run } = fixture({ draft: "" });
+    provider.fault = fault;
+    await assert.rejects(run(), (error: unknown) => {
+      assert.ok(error instanceof TerminalUserExplicitClearUncertainError);
+      assert.equal(error.code, "AKK_TERMINAL_USER_EXPLICIT_CLEAR_UNCERTAIN");
+      assert.equal(error.stage, "composer_clear_uncertain");
+      assert.equal(error.doNotRetry, true);
+      assert.match(error.message, /(?:inspect|check|restore|retry|window)/iu, "failures explain what the user should do");
+      return true;
+    });
+    assert.equal(provider.taskInjected, false);
+    assert.deepEqual(provider.submitted, []);
+    assert.equal(provider.composer, "");
+    assert.equal(provider.stash, undefined);
+    provider.fault = undefined;
+    assert.equal((await run()).stage, "enter_dispatched");
+    assert.deepEqual(provider.submitted, [request], "manual recovery never replays a submitted task");
+  });
+  for (const drift of ["runningAfterProbe", "driftAfterProbe"] as const) await t.test(`${drift} blocks further task input`, async () => {
+    const { provider, run } = fixture({ draft: "", footer: [dynamicFooter],
+      beforeComposer: ["✻ Sautéed for 16s · done 1:35", ""] });
+    provider[drift] = true;
+    await assert.rejects(run(), TerminalUserExplicitClearUncertainError);
+    assert.equal(provider.taskInjected, false);
+    assert.deepEqual(provider.submitted, []);
+    assert.equal(provider.probeKeys, 1);
+    assert.equal(provider.operations.some(operation => operation.kind === "keys" && operation.keys.some(key =>
+      ["C-m", "C-u", "C-k", "Escape", "C-c"].includes(key))), false);
   });
 });
 

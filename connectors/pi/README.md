@@ -12,13 +12,17 @@ socket.
 
 ## Status and compatibility
 
-This connector pins AKK **0.16.0**, including CLI direct connections, Codex
-Desktop, and Recovery. Its generated Skill and registered tools are verified
+This checkout's unpublished local preview **0.1.0-poc.9.list-guidance.6** pins
+AKK **0.16.1-list-guidance.6**, including CLI direct connections, Codex
+Desktop, Recovery, state-derived List guidance and a bounded Claude identity
+recheck. The preview is built and installed from local tarballs, not from npm.
+Its generated Skill and registered tools are verified
 against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
 operation-specific limits. Updating AKK core elsewhere does not update this
-connector's pinned dependency. Connector `0.1.0-poc.8` pins core `0.16.0`
-and uses the `next` dist-tag.
+connector's pinned dependency. The published connector `0.1.0-poc.8` pins core
+`0.16.0` and uses the `next` dist-tag. The npm installation instructions below
+refer to published packages, not this local preview.
 
 This is a POC prerelease distributed on npm as
 `@scotthuang/agent-knock-knock-pi`. Prereleases use the `next` dist-tag;
@@ -34,10 +38,11 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.0`, pinned by this connector's package and lockfile. Running
-  `npm ci` in `connectors/pi` installs that exact AKK runtime; a different
-  version at the repository root is not substituted automatically. Before core
-  publication, test its candidate tarball in isolation under the
+- AKK `0.16.1-list-guidance.6`, pinned by this checkout's package and lockfile;
+  the published connector pins `0.16.0`. A different version at the repository
+  root is not substituted automatically. The unpublished preview requires its
+  local core tarball; do not expect a registry-only install to resolve it. Before
+  core publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
 - macOS or Linux. The POC requires a POSIX Unix socket and does not support
   Windows named pipes.
@@ -86,8 +91,8 @@ pi install npm:@scotthuang/agent-knock-knock-pi@next
 pi list
 ```
 
-Using `next` follows compatible Pi connector prereleases. To pin this exact
-build, install
+Using `next` follows compatible Pi connector prereleases. To pin the published
+`0.16.0` core connector, install
 `npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.8`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 

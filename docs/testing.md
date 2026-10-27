@@ -216,10 +216,7 @@ IDs/generations, composer digests, draft text, or handoff-only live-native-UUID
 fences. Questionnaire response uses a fresh same-controller Status projection,
 one opaque interaction ID, semantic answer IDs or bounded text, and a durable
 one-shot reservation; changed, manual-required, secret, or uncertain state stays
-fail-closed. Codex and Claude Code `terminal_user_explicit` each prove one
-clear/inject/paste-wait/Enter sequence even when the Composer is invisible,
-truncated, unstable, or nonempty, with no post-text Composer veto. Codex uses
-`C-u`; Claude Code uses a sentinel-backed native `C-s` stash-clear transaction that is independent of the cursor position and does not interrupt an active turn, then proves the main Composer empty. Native inspection and
+fail-closed. Codex `terminal_user_explicit` proves one clear/inject/paste-wait/Enter sequence even when the Composer is invisible, truncated, unstable, or nonempty, with no post-text Composer veto. Codex uses `C-u`. Claude requires a recognized empty main Composer, no existing stash, a known footer and a quiescent foreground turn. Its single `C-s` probe on that empty Composer may restore a hidden draft; restored content refuses submission and remains for the user. Visible stash refusal precedes all input, and neither sentinel insertion nor draft deletion is performed. An uncertain probe is not automatically retried. Native inspection and
 lifecycle input remain exact-empty-only; managed delivery may require exact
 empty before input, but either agent's user-explicit Enter is not post-text
 gated. Once clear or request input may have occurred, uncertainty forbids an

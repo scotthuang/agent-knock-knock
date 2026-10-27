@@ -538,25 +538,12 @@ test("terminal-user-explicit Send depends only on fresh physical prompt authorit
   );
   assert.deepEqual(
     decideTerminalUserExplicitSendAuthority({
-      ...common,
-      agent: "claude",
-      userExplicitComposerReady: false
+      ...common, agent: "claude", userExplicitComposerReady: false
     }),
-    {
-      eligible: true,
-      terminalId,
-      expectedTerminalToken: unmanagedTerminalBindingToken({
-        terminalId,
-        terminalControl,
-        agent: "claude",
-        pid: 4_100,
-        workspace: terminalControl.currentPath ?? "",
-        processUuid: "process-pid:4100:birth:fixture-birth",
-        processBirth: "fixture-birth"
-      })
-    },
-    "Claude user-explicit Send must not depend on visible composer proof"
+    { eligible: false },
+    "Claude physical Send requires its current empty-Composer and foreground proof"
   );
+
   for (const unavailable of [
     { exactTerminalRow: false },
     { processState: "exited" },

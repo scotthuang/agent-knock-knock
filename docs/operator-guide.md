@@ -36,6 +36,67 @@ fields in List does not mean Send had no monitoring. See
 [List and Watch inventory](list-output.md) for the 24-hour query window,
 48-hour eligible-history retention and separate Desktop catalog cursor.
 
+## What can I do with this conversation?
+
+Read the guidance beside each conversation. It explains what works now, what
+is preventing other operations, and the next step. The controller should give
+this explanation in your language instead of asking you to interpret internal
+error codes. It changes when the conversation's state changes.
+
+| What List shows | What to do |
+| --- | --- |
+| Can send and watch | Send a new task when offered, or ask AKK to watch the task already running. |
+| Can send, but no active task to watch | Send your task. Monitoring starts with that Send; keep its returned task reference. An idle conversation is usable. |
+| Can send to a window whose native conversation is unverified | Select that exact terminal's offered Send. AKK can enter text and submit Enter, but you must inspect the result in the window because native acceptance and completion are unproven. |
+| Window is in the background-session interface | Use its physical Send if offered and inspect the result there. If Send is unavailable, continue manually or open an ordinary foreground Claude conversation and refresh List. |
+| Can only inspect or watch the terminal and cannot identify the Claude conversation | AKK has retried identification without typing into the terminal. Use the original terminal to finish or safely stop any work, then follow the recovery steps below. |
+| Needs approval or management recovery | Open Status for that exact conversation or task and follow its currently offered response or recovery action. |
+| Details omitted from this List page | Open Status for that row. Missing details do not mean the conversation lacks those features. |
+
+For a sendable background window, the instruction means:
+
+> 可以向此窗口发送任务。AKK 会输入文字并提交，但目前无法可靠确认后台任务的接受和完成状态；请在窗口中查看执行结果。
+
+Choose the exact terminal entry and its offered Send action. This is ordinary
+terminal input, not a direct background-worker connection, and it does not
+promise a task-completion callback. An existing managed task that failed is not
+automatically retried through this route. If input might already have happened,
+inspect the original result before considering another send.
+
+If the window is showing a background conversation and physical Send is not
+offered, you can keep working in the current window manually. An ordinary
+foreground Claude conversation can instead provide native task identity and
+monitoring when those operations are offered. Reopening the same background
+conversation after restarting will not add that proof. Neither option converts
+the existing background conversation or transfers its work. In the inspected
+Claude Code 2.1.295 installation,
+`tclaude attach --help` documents `Ctrl+Z` as returning to the shell while the
+background session keeps running; check the installed command's help before
+applying that shortcut to another runtime or interface.
+
+If Claude remains unidentified and List cannot confirm that more specific
+background-view explanation:
+
+1. Open the named pane in Herdr or tmux and check what is running there. You can
+   continue using Claude directly. If its current physical Send action is
+   offered, you can also select that terminal for input while inspecting the
+   result manually.
+2. After finishing or safely stopping any current work, exit Claude with `/exit`
+   and relaunch it with your usual command in the same project directory. If
+   resuming history opens a background conversation, use the guidance above
+   instead of repeatedly restarting.
+3. Refresh AKK List and select the newly identified conversation. Do not resend a
+   task whose earlier delivery is uncertain; inspect its saved task reference.
+4. If the row still cannot receive work, keep using that terminal directly and
+   report the discovery limitation. A missing or failed diagnostic check does
+   not prove a background conversation or a reader bug. Relaunching can refresh
+   registration, but cannot guarantee a repair.
+
+You do not need to restart the controller Host for this recovery attempt. A
+terminal Watch can report terminal activity while identity is unresolved; it
+cannot promise exact task completion. A count of related managed Sessions is
+history, not proof that this newly discovered conversation is currently bound.
+
 ## Command reference
 
 Direct slash commands are available in every first-party Host integration:
@@ -170,21 +231,32 @@ input-owning questionnaire, editor, menu, or read-only viewer. Broken AKK Turn,
 Session, transfer, transition, ledger, or Store state cannot veto the user's
 explicit Send within the same Store authority. A conflicting or unfinished
 cross-Store authority transfer still blocks input, including physical fallback.
-Neither can parsed working activity, an existing draft, or
-ordinary Composer visibility, stability, or exactness. Codex physical fallback
-sends `C-u` once. Claude Code physical fallback uses a sentinel-backed native
-`C-s` stash-clear transaction that is independent of the cursor position and
-does not interrupt an active turn, then proves the main Composer empty. Each
+For Codex, neither can parsed working activity, an existing draft, or
+ordinary Composer visibility, stability, or exactness. Claude physical Send
+requires an empty recognized main Composer, no existing stashed draft, a known native footer, and no running
+or unproven foreground turn; background shells alone do not block it. Codex physical fallback
+sends `C-u` once. Claude Code refuses an existing stashed draft before input. On a freshly empty main Composer it uses one `C-s` to check for a hidden stash; restored content stops task submission and remains for the user. It writes no sentinel and deletes no draft. Each
 then injects the new request,
 waits through the paste window, and dispatches Enter exactly once. After text
 injection, Composer observation cannot veto Enter. Unreviewed Codex fullscreen
 frontends additionally require a recognizable styled Composer before clearing
 and a fresh empty Composer afterward, before any task text is sent.
 
-AKK first takes the managed path where its stronger pre-input requirements
-hold. Otherwise it may deliver unmanaged work once and best-effort attaches a
-Terminal Watch that provides the completion callback. Exact preparation failure falls back to a request-correlated terminal-activity
-Watch when the physical identity and observation path remain valid. Its callback
+Claude physical-input preparation finishes before task text or Enter. A visible `› stashed` indicator refuses the attempt before any terminal input. When no stash is shown, AKK rechecks the empty main Composer and uses `C-s` once to restore any hidden stash. If content appears, it stops and leaves that content in the input box for the user; it does not re-stash or delete it. If the probe or final empty check is uncertain, it stops without task text or Enter and does not retry the key. This replaces the former sentinel transaction: no new marker is written and no editing keys delete a draft. There is no Composer observation or cleanup after task text or Enter. Ordinary managed Sends, Codex clearing and independent Watch monitoring are unchanged. This is refusal with manual recovery, not a guarantee of protecting drafts against simultaneous human input; avoid typing in the pane during an attempt. Screen capture and key delivery are not an atomic keyboard lock. A transport acknowledgement cannot prove that Claude processed `Ctrl+S`; ignored keys or cropped native indicators can leave stash occupancy unproven. AKK does not overwrite that unknown slot with a marker.
+
+If List or Send reports a stashed draft, open that exact window and wait for the foreground turn to finish. Preserve any visible draft first. With the main input box empty, press `Ctrl+S` once to restore the stash, then save, send, or clear it yourself before refreshing List. AKK cannot identify hidden content just from the stash label. If restoration reveals `[AKK replacing current draft ...]`, it may be residue from an older failed AKK cleanup: remove only that marker after checking the text, preserve any other content, and do not press Enter on the marker. `Draft restored` is a transient restore notification; an accompanying `› stashed` still reports an occupied slot and remains a refusal condition. Do not repeatedly toggle `Ctrl+S` or retry an uncertain AKK attempt automatically.
+
+Within an explicitly selected physical-input operation, AKK can use managed
+delivery where its stronger pre-input requirements hold. Otherwise that
+operation may deliver unmanaged input once and best-effort attach the strongest
+safe Terminal Watch available. A verified exact-task Watch can provide a
+completion callback; that proof is not supplied by a physical dispatch receipt.
+An ordinary Claude managed Send does not change to physical input after failure.
+Read the actual receipt: absent native identity
+means acceptance and completion remain unproven, including for a window showing
+a background conversation. Exact preparation failure may leave a
+request-correlated terminal-activity Watch when the physical identity and
+observation path remain valid. Its callback
 reports stable idle with best-effort confidence, never exact task success.
 Watch persistence failure never vetoes, revokes, or retries a successful
 Send. Uncertain native probe input or unsafe input surfaces stop before task

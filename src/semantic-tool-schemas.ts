@@ -225,15 +225,19 @@ export const sendParameters = {
       description:
         "Exact full terminal_id from the current terminal-scoped send action. New ordinary Claude sends use managed terminal delivery; " +
           "a Store or ownership failure cannot silently become unmanaged work. The following physical fallback rules describe " +
-          "retained legacy routes/receipts and other explicitly advertised terminal_user_explicit paths, not that Claude default. Codex " +
+          "retained legacy routes/receipts and other explicitly advertised terminal_user_explicit paths, not that Claude default. " +
+          "A listed physical Send can submit through an interactive window even when its native session is unresolved or it displays a background session; " +
+          "this does not prove background-task acceptance or completion. Codex " +
           "and Claude Code terminal_user_explicit identify one exact live physical " +
           "terminal/process with a scanned, non-blocked approval state and no proven " +
-          "input-owning questionnaire, editor, menu, or read-only viewer. Composer " +
+          "input-owning questionnaire, editor, menu, or read-only viewer. For Codex, Composer " +
           "visibility, stability, exactness, existing draft contents, and parsed " +
-          "working activity are not eligibility vetoes. Codex sends C-u once; Claude " +
-          "Code uses a sentinel-backed native C-s stash-clear transaction that is " +
-          "independent of the cursor position and does not interrupt an active turn, " +
-          "then proves the main Composer empty. Each then injects this request, waits " +
+          "working activity are not eligibility vetoes. Claude requires an empty recognized main Composer, " +
+          "no existing stashed draft, a known native footer, and no running or unproven foreground turn; background shells alone do not block Send. " +
+          "Codex sends C-u once. Claude refuses a visible stash before input, then uses one C-s on a freshly empty Composer " +
+          "to check for a hidden stash. Restored content stops task submission and remains for the user; AKK writes no sentinel " +
+          "and deletes no draft. An uncertain probe is not automatically retried. Failure gives manual recovery instructions; " +
+          "no cleanup runs after Enter. Each then injects this request, waits " +
           "through the paste window, and dispatches Enter exactly once without a " +
           "post-text Composer veto. Broken AKK state cannot veto the user; unmanaged " +
           "delivery has no managed callback Turn, but AKK best-effort attaches an exact " +

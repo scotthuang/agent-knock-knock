@@ -35,13 +35,13 @@ test("all pinned AKK schemas pass the shared supported DSH validator", async () 
       () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
       /capability handshake/u,
     );
-    // Contract for core 0.16.0 pinned in this connector's lockfile.
+    // Contract for core 0.16.1-list-guidance.6 pinned in this connector's lockfile.
     // Store recovery changes the tool schemas and private action authority;
     // the catalog retains 27 tool names.
     assert.equal(adapter.tools.length, 27);
     assert.equal(
       catalogDigest(adapter),
-      "cf1425b44416ef37d5961a4f4fde0105adcd57c449122dd60eff878d64927a35"
+      "0b58e89a82511b6b04d777c0c764384fb29582cc50e1fd075f84bf36b295a0f9"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

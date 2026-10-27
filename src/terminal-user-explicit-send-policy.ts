@@ -56,6 +56,7 @@ export function decideTerminalUserExplicitSendEligibility(
     facts.approvalBlocked ||
     facts.interactionActive ||
     facts.inputOwnerBlocked ||
+    facts.agent === "claude" && !facts.userExplicitComposerReady ||
     !facts.agent ||
     !Number.isSafeInteger(facts.pid) ||
     Number(facts.pid) <= 1 ||

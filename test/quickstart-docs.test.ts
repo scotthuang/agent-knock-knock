@@ -281,7 +281,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   assert.match(operatorContract, /v31 `action_contracts`/u);
   assert.match(
     quickstart,
-    /terminal_user_explicit_composer_policy=replace_current_composer_and_submit[\s\S]*Codex-named field remains a compatibility alias/u
+    /terminal_user_explicit_composer_policy=per_agent[\s\S]*Codex-named field remains a compatibility alias/u
   );
   assert.match(
     skill,
@@ -293,13 +293,34 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   );
   assert.match(
     operatorContract,
-    /Composer visibility, stability, or exactness[\s\S]*Codex physical fallback[\s\S]*`C-u`[\s\S]*Claude Code physical fallback[\s\S]*sentinel-backed native `C-s`[\s\S]*cursor position[\s\S]*proves? the main Composer empty[\s\S]*paste window[\s\S]*Enter exactly once/u
+    /Composer visibility, stability, or exactness[\s\S]*Codex physical fallback[\s\S]*`C-u`[\s\S]*Claude Code refuses an existing stashed draft before input[\s\S]*one `C-s`[\s\S]*restored content stops task submission[\s\S]*paste window[\s\S]*Enter exactly once/u
   );
   assert.match(operatorContract, /Composer observation cannot veto Enter/u);
-  for (const document of [quickstart, skill]) {
+  for (const document of [operatorContract, quickstart, skill]) {
+    assert.match(document.replace(/\s+/gu, " "),
+      /Claude.*empty recognized main Composer.*known native footer.*no running or unproven foreground turn/u);
+    assert.match(document, /background shells alone do not block/iu);
+  }
+  for (const document of [
+    operatorContract,
+    quickstart.replace(/\s+/gu, " "),
+    skill.replace(/\s+/gu, " ")
+  ]) {
     assert.match(
       document,
-      /Codex and Claude Code `terminal_user_explicit`[\s\S]*(?:`replace_current_composer_and_submit`|terminal_user_explicit_composer_policy=replace_current_composer_and_submit)/u
+      /preparation finishes before task text or Enter[\s\S]*visible `› stashed`[\s\S]*before any terminal input[\s\S]*`C-s` once[\s\S]*leaves that content in the input box[\s\S]*does not re-stash or delete it/u
+    );
+    assert.match(
+      document,
+      /uncertain[\s\S]*stops without task text or Enter[\s\S]*does not retry the key[\s\S]*no new marker is written[\s\S]*no Composer observation or cleanup after task text or Enter/u
+    );
+  }
+  for (const document of [quickstart, skill]) {
+    assert.match(document, /replace_current_composer_and_submit/u);
+    assert.match(document, /require_empty_composer_and_submit/u);
+    assert.match(
+      document,
+      /Codex and Claude Code `terminal_user_explicit`/u
     );
     assert.match(
       document,
@@ -307,13 +328,25 @@ test("operator guide and bundled skill keep advanced commands in their workflows
     );
     assert.match(
       document,
-      /Claude Code[^.\n]*sentinel-backed native `C-s`[^.\n]*main Composer empty/u
+      /Claude Code refuses an existing stashed draft before input[\s\S]*restored content stops task submission and remains for the user/u
     );
     assert.match(document, /Enter exactly once/u);
   }
   assert.match(
     operatorContract,
-    /unmanaged work[\s\S]*best-effort attaches a Terminal Watch[\s\S]*completion callback[\s\S]*failure[^.]*never vetoes/u
+    /explicitly selected physical-input operation[\s\S]*unmanaged input once and best-effort attach[\s\S]*Terminal Watch available/u
+  );
+  assert.match(
+    operatorContract,
+    /verified exact-task Watch can provide a completion callback[\s\S]*absent native identity means acceptance and completion remain unproven/u
+  );
+  assert.match(
+    operatorContract,
+    /callback reports stable idle with best-effort confidence, never exact task success/u
+  );
+  assert.match(
+    operatorContract,
+    /Watch persistence failure never vetoes, revokes, or retries a successful Send/u
   );
   assert.match(
     skill,

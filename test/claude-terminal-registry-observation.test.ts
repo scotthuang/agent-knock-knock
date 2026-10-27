@@ -5,7 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, u
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { observeClaudeTerminalRegistry, type ClaudeTerminalRegistryRow } from "../src/claude-terminal-registry-observation.js";
+import { observeClaudeTerminalRegistry, observeClaudeTerminalWindow, type ClaudeTerminalRegistryRow } from "../src/claude-terminal-registry-observation.js";
 
 async function fixture() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "akk-terminal-registry-")));
@@ -97,5 +97,37 @@ test("unsafe, redirected and oversized records never become trusted registry ver
     assert.deepEqual(f.read(), { state: "invalid", reason: "unsafe_metadata" });
     unlinkSync(f.file); writeFileSync(f.file, " ".repeat(64 * 1024 + 1), { mode: 0o600 });
     assert.deepEqual(f.read(), { state: "invalid", reason: "invalid_registry" });
+  } finally { await f.cleanup(); }
+});
+
+test("background-view evidence belongs only to this owned live foreground process and grants no native identity", async () => {
+  const f = await fixture();
+  const read = () => observeClaudeTerminalWindow({ configDir: f.configDir, pid: f.pid, cwd: f.root });
+  try {
+    assert.deepEqual(read(), { state: "verified", role: "ordinary" });
+    f.registry.parkedJobId = "private-background-job"; f.save();
+    assert.deepEqual(read(), { state: "verified", role: "background_view" });
+    const original = { ...f.registry };
+    for (const change of [{ parkedJobId: "" }, { parkedJobId: " " }, { parkedJobId: null }, { parkedJobId: "bad\nvalue" },
+      { parkedJobId: "x".repeat(129) }, { pid: f.pid + 1 }, { kind: "bg" }, { cwd: os.tmpdir() },
+      { pidDomain: "other-platform" }, { procStart: "Mon Jan 1 00:00:00 2001" }]) {
+      for (const key of Object.keys(f.registry)) delete f.registry[key];
+      Object.assign(f.registry, original, change); f.save();
+      const observed = read();
+      assert.equal(observed.state, "invalid", JSON.stringify(change));
+      if ("procStart" in change) assert.deepEqual(observed, { state: "invalid", reason: "process_changed" });
+    }
+    Object.assign(f.registry, original); delete f.registry.pidDomain; f.save();
+    chmodSync(f.file, 0o666);
+    assert.deepEqual(read(), { state: "invalid", reason: "unsafe_metadata" });
+    chmodSync(f.file, 0o600); unlinkSync(f.file);
+    assert.deepEqual(read(), { state: "absent" });
+    writeFileSync(f.file, "{broken", { mode: 0o600 });
+    assert.deepEqual(read(), { state: "invalid", reason: "invalid_registry" });
+    unlinkSync(f.file); const target = path.join(f.root, "parked.json");
+    writeFileSync(target, JSON.stringify(original), { mode: 0o600 }); symlinkSync(target, f.file);
+    assert.deepEqual(read(), { state: "invalid", reason: "unsafe_metadata" });
+    assert.deepEqual(observeClaudeTerminalWindow({ configDir: f.configDir, pid: f.pid }),
+      { state: "invalid", reason: "invalid_identity" });
   } finally { await f.cleanup(); }
 });
