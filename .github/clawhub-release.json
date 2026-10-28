@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "ac05b2efec3605e1d6618ada24621dc10b20976e",
-  "asset": "scotthuang-agent-knock-knock-0.16.5.tgz",
-  "sha256": "584eed2155c64d561bc094518fa0f30c3a901ccf6cf82f1300e65bc243e188da",
-  "bytes": 3933002,
-  "changelog": "Fix Claude List observation diagnostics: distinguish explicitly skipped scans (screen_not_scanned) from failed or missing captures (screen_unavailable), with actionable rescan or access recovery guidance. Preserve missing-evidence Send refusal, Composer, draft, stash, foreground-work and exact-target safeguards. Coordinate Pi 0.1.0-poc.13 and DSH 0.1.0-rc.16, each pinning core 0.16.5 on next; unchanged Host version ranges and public contracts. Full release gate: 3851 core tests passed, connector gates and isolated OpenClaw 2026.9.1 loading passed. No new live-model or external-channel delivery claim."
+  "commit": "30b4f5201788271f141069a88e9a0295a36a55ff",
+  "asset": "scotthuang-agent-knock-knock-0.16.6.tgz",
+  "sha256": "3a6d7237d9327e4e5e5488e6413a0a8dd8d50b08eb5474199e694ac9540218bc",
+  "bytes": 3939866,
+  "changelog": "Align Claude List offers with fresh managed-Send transcript admission and exact idle lifecycle evidence. Safely reattach a conclusively inactive prior Session for Claude New thread/Clear, preserving history and binding generations. Validate original tokens before recovery and refreshed thread/process identity after it; retain locks, pending-Turn/transition, revision/CAS, cross-Store, input and no-silent-fallback guards. Coordinate Pi 0.1.0-poc.14 and DSH 0.1.0-rc.17 on next, both pinning core 0.16.6. Full release gate: 3866 core tests, connector gates, isolated OpenClaw 2026.9.1 loading and ClawHub validation passed. No new destructive live lifecycle or external-channel delivery claim."
 }
