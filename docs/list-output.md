@@ -90,6 +90,18 @@ controls or an unrecognized input box stop automatic input and explain what
 AKK could not verify. These explanations take precedence over native-identity
 uncertainty. Codex readiness and managed Send rules are unchanged.
 
+Missing screen evidence is separate from an unsafe or unrecognized Composer.
+When List uses `noApprovalScan: true` (CLI `--no-approval-scan`), it skips pane
+reading, including input-readiness checks. Claude physical readiness reports
+`screen_not_scanned`; call List again with `noApprovalScan: false` or omit the
+option to obtain current action offers. If pane capture fails or returns no
+screen excerpt, readiness reports `screen_unavailable`; inspect Status for the
+capture error, restore terminal-provider access, then refresh List. Neither
+case proves that a draft, menu or malformed Composer exists. Send remains
+unavailable until the existing input checks pass. These reasons and their
+guidance are additive diagnostics, with no action-contract, projection or
+Store-protocol version change.
+
 To use an offered physical Send, select its displayed `terminal_id` and the
 existing Send tool's semantic inputs. No new public scope or token parameter
 is required. An ordinary managed Send does not silently switch to this route

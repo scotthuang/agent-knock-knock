@@ -148,7 +148,13 @@ function explainBlockedSend(row: Row, usage: ConversationUsage): void {
 function explainPhysicalReadiness(row: Row, usage: ConversationUsage): boolean {
   const readiness = recordValue(row.physical_send_readiness);
   if (row.agent !== "claude" || readiness?.ready !== false) return false;
-  if (readiness.reason === "foreground_running") {
+  if (readiness.reason === "screen_not_scanned") {
+    usage.limitations.push("AKK did not scan this window, so it cannot verify that input is safe.");
+    usage.next_steps.push("Call List again with noApprovalScan:false, or omit that option (CLI: omit --no-approval-scan). Check the refreshed Send action before sending.");
+  } else if (readiness.reason === "screen_unavailable") {
+    usage.limitations.push("AKK could not read this window, so it cannot verify that input is safe.");
+    usage.next_steps.push("Open Status to inspect the capture error; restore terminal-provider access, then refresh List with pane scanning enabled.");
+  } else if (readiness.reason === "foreground_running") {
     usage.limitations.push("Claude is still executing its current turn; AKK will not inject another task into it.");
     usage.next_steps.push("Wait for Claude's current turn to finish, then refresh List. Background shells alone do not block Send.");
   } else if (readiness.reason === "foreground_unproven") {
