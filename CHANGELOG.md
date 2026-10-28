@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.5 / Pi 0.1.0-poc.13 / DeepSeek Harness 0.1.0-rc.16 — 2026-10-28
+
+- Distinguish Claude List scans that were explicitly skipped (`screen_not_scanned`) from captures that failed or returned no screen (`screen_unavailable`). Do not misdiagnose either case as an unrecognized Composer; provide the applicable rescan or capture recovery guidance.
+- Preserve existing Composer, draft, stash, foreground-work and exact input-authority checks. Missing screen evidence still disables Send; a successful fresh scan can restore the existing action offer.
+- Retain action contract **35**, compact List **v4**, Store writer protocol **11**, Watch schema **3**, and existing Codex and managed-Send behavior.
+- Release Pi **0.1.0-poc.13** and DeepSeek Harness **0.1.0-rc.16**, both pinning core **0.16.5** with synchronized Skills. Core remains on `latest`; connectors remain prereleases on `next`, with unchanged Host version ranges.
+
 ## 0.16.4 / Pi 0.1.0-poc.12 / DeepSeek Harness 0.1.0-rc.15 — 2026-10-28
 
 - Adapt the reviewed macOS Codex CLI/app-server **0.165.0** pair for native status, models, permissions and question controls. Keep direct-backend operations contract-probed and distinguish the verified frontend version from the backend version; mixed older frontends do not inherit new terminal-write authority.

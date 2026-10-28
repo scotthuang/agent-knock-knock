@@ -13,10 +13,12 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.15** pins AKK **0.16.4** in its package and lockfile,
+Connector **0.1.0-rc.16** pins AKK **0.16.5** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
-Codex version discovery, with the 0.165.0 adaptation. It exposes that runtime's 27 semantic tools, including Codex CLI backend and
-Desktop operations when the selected conversation advertises them. `list`
+Codex version discovery, with the 0.165.0 adaptation and accurate Claude
+pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
+including Codex CLI backend and Desktop operations when the selected
+conversation advertises them. `list`
 returns current discoverable conversations; `watches` separately returns recent
 monitoring records (24 hours by default), plus active or unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
@@ -80,7 +82,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.15`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.16`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -390,7 +392,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.15
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.16
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -418,7 +420,7 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.4`; building the current repository
+tests against its pinned AKK runtime `0.16.5`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
 [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
@@ -428,6 +430,17 @@ dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.16`** pins AKK **`0.16.5`** and its synchronized Skill.
+It carries [PR #475](https://github.com/scotthuang/agent-knock-knock/pull/475):
+Claude List now distinguishes an explicitly skipped pane scan
+(`screen_not_scanned`) from unavailable capture evidence (`screen_unavailable`),
+instead of incorrectly reporting an unrecognized Composer. The result explains
+how to refresh the observation; missing evidence still cannot authorize Send.
+Actual Composer, draft, stash, foreground-work and exact-target checks remain
+unchanged, as do Host version ranges and callback/restart ownership. This
+coordinated dependency refresh adds no new DSH live-model or external-channel
+delivery claim and remains on npm `next`.
 
 Connector **`0.1.0-rc.15`** pins AKK **`0.16.4`** and its synchronized Skill.
 It carries the [Codex CLI 0.165.0 compatibility update](../../docs/codex-0.165.0-compatibility.md):
@@ -538,7 +551,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.15` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.16` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -583,7 +596,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.15
+npm run release:check -- --publish --confirm-version 0.1.0-rc.16
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
