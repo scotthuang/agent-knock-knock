@@ -12,7 +12,7 @@
     {
       "name": "@scotthuang/agent-knock-knock-deepseek-harness",
       "title": "Agent Knock Knock (AKK)",
-      "description": "Native Agent Knock Knock connector for DeepSeek Harness",
+      "description": "Delegate from DeepSeek Harness Web to existing Codex CLI, Codex Desktop and Claude Code sessions with progress and completion callbacks.",
       "author": "scotthuang",
       "homepage": "https://github.com/scotthuang/agent-knock-knock/tree/main/connectors/deepseek-harness#readme",
       "repository": {
@@ -20,12 +20,21 @@
         "directory": "connectors/deepseek-harness"
       },
       "metadata": {
-        "keywords": []
+        "keywords": [
+          "agent-knock-knock",
+          "agent-orchestration",
+          "claude-code",
+          "codex",
+          "deepseek",
+          "deepseek-harness",
+          "dsh-plugin",
+          "local-first"
+        ]
       },
       "versions": [
         {
-          "version": "0.1.0-rc.17",
-          "publishTimestamp": 1793195105,
+          "version": "0.1.0-rc.18",
+          "publishTimestamp": 1793209819,
           "source": {
             "type": "npm",
             "registry": "https://registry.npmjs.org"
