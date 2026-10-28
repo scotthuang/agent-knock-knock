@@ -113,6 +113,7 @@ import {
 } from "./terminal-list-inventory.js";
 import {
   claudePhysicalSendReadinessFromListState,
+  claudeListAdmissionProjection,
   collectTerminalListTerminalFacts,
   type EffectiveTerminalListState,
   type TerminalListPhysicalProcessIncarnation,
@@ -1115,9 +1116,7 @@ async function terminalControlledListEntry(
     // service strips this field after gating every automated-input action that
     // can follow a human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
-    ...(session.agent === "claude" ? {
-      _claude_managed_send_eligible: commands.send && automatedInputComposerReady && !facts.store.hasOrphanedDispatch
-    } : {}),
+    ...claudeListAdmissionProjection(session.agent, facts, commands.send),
     _user_explicit_composer_ready: userExplicitComposerReady,
     ...(physicalReadiness ? { physical_send_readiness: physicalReadiness } : {}),
     _native_identity_authority: {
@@ -1888,6 +1887,7 @@ async function observeTerminalNativeListIdentity(
     }
   }
   return {
+    claudeAdmission: nativeIdentitySnapshot?.admission,
     orphanedDispatch,
     nativeIdentityObservation,
     nativeIdentityRecheck: nativeIdentitySnapshot?.recheck,

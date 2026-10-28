@@ -1687,7 +1687,7 @@ async function reattachManagedSessionForNativeIdentity(
   ) {
     throw new Error(
       `managed Session ${existing.session_id} cannot be rebound from ` +
-      `${existing.status} state for native thread ${nativeThreadId}`
+      `${existing.status} state for native thread ${nativeThreadId}; open Status, resolve the Session state, then refresh List. No terminal input was sent.`
     );
   }
   ports.authority.assertManagedSessionCanStartTurn(
@@ -1709,8 +1709,11 @@ async function reattachManagedSessionForNativeIdentity(
     managedSessionBindingToken(fresh) !== managedSessionBindingToken(existing)
   ) {
     throw new Error(
-      `managed Session ${existing.session_id} changed before raw reattach`
+      `managed Session ${existing.session_id} changed before raw reattach; refresh List and retry. No terminal input was sent.`
     );
+  }
+  if (ports.authority.hasUnresolvedNativeTransition(input.storeDir, fresh)) {
+    throw new Error(`managed Session ${fresh.session_id} has an unresolved native transition; open Status and complete the offered lifecycle recovery, then refresh List. No terminal input was sent.`);
   }
   const previousPid = fresh.binding!.native_process.pid;
   if (
@@ -1722,7 +1725,7 @@ async function reattachManagedSessionForNativeIdentity(
     })
   ) {
     throw new Error(
-      `managed Session ${fresh.session_id} is still bound to process ${previousPid}`
+      `managed Session ${fresh.session_id} is still bound to process ${previousPid}; verify its state in Status and wait for it to exit, then refresh List. No terminal input was sent.`
     );
   }
 

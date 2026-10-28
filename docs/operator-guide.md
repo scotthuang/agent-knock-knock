@@ -97,6 +97,32 @@ terminal Watch can report terminal activity while identity is unresolved; it
 cannot promise exact task completion. A count of related managed Sessions is
 history, not proof that this newly discovered conversation is currently bound.
 
+Claude can resume the same native thread after its process exits. An unchanged
+thread UUID is expected in that case; the process PID and startup identity must
+still be verified afresh. New thread uses the same safe Session reattachment as
+Send when the prior process is conclusively gone or the same PID has a proven
+new incarnation. AKK preserves the Session history and advances its binding
+generation under the terminal and Store locks, rather than deleting the claim.
+This recovery does not require a manual reconciliation for an otherwise healthy
+Session. Active or unverifiable owners, unfinished Turns or thread transitions,
+and cross-Store authority conflicts still prevent automatic recovery.
+
+An idle-looking Claude window alone does not prove managed control is ready.
+List applies each operation's existing reader and idle checks for the current
+process; managed Send also needs a safe transcript boundary
+for acceptance and completion monitoring. When one of these checks fails, List
+explains the missing evidence and does not offer that managed operation. Wait
+for current work to finish and refresh List for reader-state failures; inspect
+Status and the transcript diagnostic for file-access or incomplete-write
+failures. Do not weaken transcript permissions or delete history to force a
+Send. An independently offered physical terminal Send remains a separate,
+explicit choice and cannot promise native task acceptance or completion.
+
+List is an observation, not a reservation. Execution repeats the checks before
+input, so a process, thread, file or prompt that changes after listing can still
+cause a refusal. Refresh List after resolving the reported condition; never
+automatically retry a task whose earlier delivery is uncertain.
+
 ## Command reference
 
 Direct slash commands are available in every first-party Host integration:

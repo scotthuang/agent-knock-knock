@@ -2,6 +2,8 @@ import type { ActiveTerminalProcess } from "./terminal-agent-adapter.js";
 import type { TerminalNativeIdentityObservation } from "./terminal-binding-authority.js";
 import type { ClaudeIdentityRow } from "./terminal-dispatch-execution.js";
 import type { TerminalListInventoryOptions, TerminalListInventoryPorts } from "./terminal-list-inventory.js";
+import { observeClaudeTerminalAdmission, type ClaudeTerminalAdmission } from "./claude-terminal-admission.js";
+import { expandHome } from "./cli-command-runtime.js";
 
 export interface TerminalListIdentityRecheck {
   attempted: true;
@@ -12,6 +14,7 @@ export interface TerminalListNativeIdentitySnapshot {
   observation: TerminalNativeIdentityObservation;
   recheck?: TerminalListIdentityRecheck;
   windowRole?: "background_view";
+  admission?: ClaudeTerminalAdmission;
 }
 
 /** Scope reader snapshots to one List invocation, including exact-terminal List. */
@@ -26,9 +29,11 @@ export function withClaudeListIdentityRecheck<Options extends TerminalListInvent
   let pending: Promise<Map<number, TerminalListNativeIdentitySnapshot>> | undefined;
   const loadRows = input.loadRows;
   return async request => {
+    const configuredHome = (request.options as { claudeHome?: unknown }).claudeHome;
     const snapshots = request.session.agent === "claude" && loadRows
       ? await (pending ??= observeClaudeListIdentitySnapshots({
           sessions: request.selectedSessions,
+          claudeHome: typeof configuredHome === "string" ? expandHome(configuredHome) : undefined,
           loadRows: () => loadRows(request.options, { required: true }),
           observeWindowRole: session => input.observeWindowRole?.(request.options, session.pid,
             session.cwd ?? session.terminalControl?.currentPath),
@@ -44,6 +49,7 @@ export function withClaudeListIdentityRecheck<Options extends TerminalListInvent
 /** One fresh retry is shared by all unresolved Claude PIDs in this physical scan. */
 export async function observeClaudeListIdentitySnapshots(input: {
   sessions: readonly ActiveTerminalProcess[];
+  claudeHome?: string;
   loadRows(): readonly ClaudeIdentityRow[];
   observeWindowRole?(session: ActiveTerminalProcess): "background_view" | undefined;
   observe(session: ActiveTerminalProcess, rows: readonly ClaudeIdentityRow[]):
@@ -67,6 +73,11 @@ export async function observeClaudeListIdentitySnapshots(input: {
       try {
         const observation = await input.observe(session, rows);
         result.set(session.pid, { observation,
+          admission: observeClaudeTerminalAdmission({ pid: session.pid,
+            cwd: session.cwd ?? session.terminalControl?.currentPath,
+            sessionId: observation.status === "resolved" ? observation.identity.sessionId : undefined,
+            processStartedAt: observation.status === "resolved" ? observation.identity.processStartedAt : undefined,
+            agentRows: rows, claudeHome: input.claudeHome }),
           ...(retry ? { recheck: { attempted: true,
             status: observation.status === "resolved" ? "resolved" : "unresolved"
           } as const } : {}) });

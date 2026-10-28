@@ -34,6 +34,7 @@ import type {
   NativeThreadVerificationRequest
 } from "./native-thread-transition-settlement-service.js";
 import { nonBlankString } from "./value-guards.js";
+import { claudeLifecycleReadiness } from "./claude-terminal-admission.js";
 
 export {
   nativeThreadIdentityFence,
@@ -182,11 +183,6 @@ function assertVerifiedClaudeBeforeObservation(
   ports: NativeThreadVerificationAdapterPorts
 ): void {
   if (terminal.agent !== "claude") return;
-  if (!terminal.terminalControl.currentPath) {
-    throw new Error(
-      "Claude lifecycle control requires an exact terminal working directory"
-    );
-  }
   const observed = terminal.adapter.observeThreadLifecycle?.({
     operation: request.operation,
     phase: "before",
@@ -195,19 +191,9 @@ function assertVerifiedClaudeBeforeObservation(
     cwd: terminal.terminalControl.currentPath,
     agentRows: ports.loadClaudeAgentRows()
   });
-  if (
-    observed?.status !== "observed" ||
-    !isExactNativeThreadId(request.beforeIdentity?.sessionId) ||
-    observed.nativeThreadId !== request.beforeIdentity.sessionId.toLowerCase() ||
-    observed.idle !== true
-  ) {
-    throw new Error(
-      "Claude lifecycle control requires one exact idle interactive agents row " +
-      `for the current process incarnation${
-        observed?.reason ? `: ${observed.reason}` : ""
-      }`
-    );
-  }
+  const readiness = claudeLifecycleReadiness({ cwd: terminal.terminalControl.currentPath,
+    expectedNativeThreadId: request.beforeIdentity?.sessionId, observation: observed });
+  if (!readiness.ready) throw new Error(readiness.message);
 }
 
 export async function probeCodexCurrentThread(

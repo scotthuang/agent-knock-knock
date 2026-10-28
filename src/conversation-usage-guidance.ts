@@ -77,6 +77,7 @@ function conversationUsage(row: Row): ConversationUsage {
     : watch ? "You can observe this conversation; task sending is unavailable."
     : "Task sending is unavailable; check the recovery steps below.",
   available: usableOperations(row), limitations: [], next_steps: [] };
+  explainClaudeLifecycleReadiness(row, usage);
   if (explicitClaudeInput(row)) {
     usage.summary = "可以向此窗口发送任务。AKK 会输入文字并提交，但目前无法可靠确认后台任务的接受和完成状态；请在窗口中查看执行结果。";
     usage.limitations.push("Physical input confirms text submission and Enter dispatch, not native task acceptance or completion.");
@@ -128,6 +129,7 @@ function explainBlockedSend(row: Row, usage: ConversationUsage): void {
     return;
   }
   if (needsAnswer(row)) return explainPendingAnswer(row, usage);
+  if (explainClaudeManagedSendReadiness(row, usage)) return;
   if (explainPhysicalReadiness(row, usage)) return;
   if (unresolvedIdentity(row)) return explainIdentity(row, usage);
   if (["working", "busy", "active", "running"].includes(String(row.activity_state))) {
@@ -179,11 +181,31 @@ function explainPhysicalReadiness(row: Row, usage: ConversationUsage): boolean {
   return true;
 }
 
+function explainClaudeManagedSendReadiness(row: Row, usage: ConversationUsage): boolean {
+  const readiness = recordValue(row.managed_send_readiness);
+  if (row.agent !== "claude" || readiness?.ready !== false) return false;
+  usage.limitations.push("AKK cannot currently verify managed completion tracking for this Claude session.");
+  usage.next_steps.push(typeof readiness.message === "string" ? readiness.message
+    : "Check Status and the Claude reader, then refresh List and retry.");
+  usage.next_steps.push("If an explicit terminal Send action is offered, you may select that terminal yourself and inspect the result in its window; managed Send will not switch to that route automatically.");
+  return true;
+}
+
+function explainClaudeLifecycleReadiness(row: Row, usage: ConversationUsage): void {
+  row = withExactManagementFacts(row);
+  const readiness = recordValue(row.thread_lifecycle_readiness);
+  if (row.agent !== "claude" || offered(row, "new_thread") || readiness?.ready !== false) return;
+  usage.limitations.push("Starting or switching Claude threads is unavailable because the current idle process could not be verified.");
+  usage.next_steps.push(typeof readiness.message === "string" ? readiness.message
+    : "Check Status and the Claude reader, wait for Claude to finish, then refresh List before changing threads.");
+}
+
 function withExactManagementFacts(row: Row): Row {
   const controls = Array.isArray(row.terminal_controls) ? row.terminal_controls : row.control_records;
   const control = Array.isArray(controls) && controls.length === 1 ? recordValue(controls[0]) : undefined;
   if (!control) return row;
-  return { ...Object.fromEntries(["management_state", "management_conflict", "management_unavailable", "native_store_authority", "physical_send_readiness"]
+  return { ...Object.fromEntries(["management_state", "management_conflict", "management_unavailable", "native_store_authority", "physical_send_readiness",
+    "managed_send_readiness", "thread_lifecycle_readiness"]
     .filter(name => control[name] !== undefined).map(name => [name, control[name]])), ...row };
 }
 

@@ -220,7 +220,8 @@ export async function assertNativeThreadHasExclusiveOwnership(
   if (conflicts.length > 0) {
     throw new Error(
       `native thread ${nativeThreadId} is already claimed by managed Session ` +
-      conflicts.map((session) => session.session_id).join(", ")
+      conflicts.map((session) => session.session_id).join(", ") +
+      "; open Status for the listed Session, complete any offered recovery, then refresh List"
     );
   }
 }

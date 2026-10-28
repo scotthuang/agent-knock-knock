@@ -246,6 +246,7 @@ function facade(input: {
         return input.currentSession;
       },
       materializeSession: unexpected,
+      reattachSession: async () => unexpected(),
       refineSession: unexpected,
       logicalIdentity: ({ observedIdentity }) => {
         events.push("identity:logical");

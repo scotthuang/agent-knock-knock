@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -9,6 +11,7 @@ import {
 } from "../src/terminal-command-dispatch-preparation.js";
 import type { TerminalAgentBridge } from
   "../src/terminal-agent-bridge.js";
+import type { ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
 import {
@@ -45,6 +48,7 @@ async function runFixture(input: {
   bridgeEnabled?: boolean;
   agentVersion?: string;
   trace?: string[];
+  claude?: { cwd: string; home: string; sessionId: string; startedAt: number; rows(): ClaudeAgentRow[] };
 } = {}): Promise<{ result?: PreparedTerminalControlSend; trace: string[] }> {
   const trace = input.trace ?? [];
   const storeDir = path.resolve("/private/tmp/akk-dispatch-preparation-store");
@@ -53,9 +57,9 @@ async function runFixture(input: {
       userRequest: "hello",
       sessionId: "session-1",
       turnId: "turn-1",
-      executorKind: "codex",
-      executorSession: "codex",
-      workspace: "/private/tmp",
+      executorKind: input.claude ? "claude" : "codex",
+      executorSession: input.claude?.sessionId ?? "codex",
+      workspace: input.claude?.cwd ?? "/private/tmp",
       now: new Date("2026-09-15T00:00:00.000Z")
     }),
     native_session_takeover: {
@@ -93,7 +97,8 @@ async function runFixture(input: {
     },
     resolveCurrentNativeIdentity: async () => {
       trace.push("native-identity");
-      return undefined;
+      return input.claude ? { sessionId: input.claude.sessionId, processStartedAt: input.claude.startedAt,
+        evidence: "claude_agents_exact_pid" } : undefined;
     },
     assertTurnIdentity: () => trace.push("turn-identity"),
     captureCodexAcceptanceAnchor: () => {
@@ -129,7 +134,7 @@ async function runFixture(input: {
       remember: () => undefined,
       assertCurrent: () => trace.push("foreground-proof")
     },
-    loadClaudeAgentRows: () => [],
+    loadClaudeAgentRows: () => input.claude?.rows() ?? [],
     loadDispatchLedger: () => {
       trace.push("load-ledger");
       return undefined;
@@ -155,7 +160,8 @@ async function runFixture(input: {
       trace.push("runtime");
       return {
         pid: 42,
-        cwd: "/private/tmp",
+        cwd: input.claude?.cwd ?? "/private/tmp",
+        ...(input.claude ? { sessionId: input.claude.sessionId, nativeProcessStartedAt: input.claude.startedAt } : {}),
         ...(input.agentVersion ? { agentVersion: input.agentVersion } : {})
       };
     },
@@ -188,7 +194,7 @@ async function runFixture(input: {
   }, async (scopes, lockedResources) => {
     const request: TerminalControlSendRequest = {
       transaction: { scopes, resources: lockedResources },
-      options: {},
+      options: input.claude ? { claudeHome: input.claude.home } : {},
       conversation,
       nextConversation: conversation,
       executor: conversation.executor,
@@ -230,6 +236,35 @@ test("dispatch preparation preserves the verified-idle error boundary", async ()
     runFixture({ assertSafe: () => { throw new Error("fixture blocked"); } }),
     /refusing to send to Codex without a verified idle terminal: fixture blocked/u
   );
+});
+
+test("Claude dispatch rechecks current reader and transcript admission with actionable failures", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-dispatch-admission-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cwd = path.join(root, "workspace"), home = path.join(root, ".claude");
+  fs.mkdirSync(cwd);
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const directory = path.join(home, "projects", cwd.replace(/[^A-Za-z0-9]/gu, "-"));
+  fs.mkdirSync(directory, { recursive: true });
+  const transcript = path.join(directory, `${sessionId}.jsonl`);
+  const history = JSON.stringify({ type: "user", sessionId, cwd, uuid: "old-input", parentUuid: null }) + "\n";
+  fs.writeFileSync(transcript, history, { mode: 0o600 });
+  const startedAt = Date.parse("2026-09-15T00:00:00Z");
+  let rows: ClaudeAgentRow[] = [{ pid: 42, kind: "interactive", sessionId, cwd, configDir: home, startedAt, status: "idle" }];
+  const claude = { cwd, home, sessionId, startedAt, rows: () => rows };
+  const initial = await runFixture({ claude, bridgeEnabled: true });
+  assert.equal(initial.result?.claudeTranscriptAnchor?.offset_bytes, Buffer.byteLength(history));
+  rows = [{ ...rows[0], status: "working" }];
+  await assert.rejects(runFixture({ claude, bridgeEnabled: true }), /wait.*refresh|refresh.*retry/iu,
+    "reader state must be checked again instead of trusting the earlier idle observation");
+  rows = [{ ...rows[0], status: "idle" }];
+  fs.writeFileSync(transcript, history.trimEnd());
+  await assert.rejects(runFixture({ claude, bridgeEnabled: true }), /transcript.*(?:wait|refresh|retry)/iu,
+    "an unsafe file boundary must identify a recovery action before input");
+  fs.writeFileSync(transcript, history + JSON.stringify({ type: "system", sessionId }) + "\n");
+  const recovered = await runFixture({ claude, bridgeEnabled: true });
+  assert.equal(recovered.result?.claudeTranscriptAnchor?.offset_bytes, fs.statSync(transcript).size,
+    "execution captures a fresh boundary rather than retaining the earlier observation");
 });
 
 test("managed Send rejects known paginated Codex history before UI preparation", async () => {

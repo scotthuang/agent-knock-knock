@@ -21,14 +21,21 @@ import { StaticTerminalControlProvider } from
 import { createProductionTerminalAgentRegistry } from
   "../src/terminal-agent-registry.js";
 import { createConversation, type Conversation } from "../src/protocol.js";
-import { saveManagedSession } from "../src/session-store.js";
-import { terminalBindingFrom } from "../src/managed-session.js";
+import { listNativeThreadTransitions, loadManagedSession, saveManagedSession } from "../src/session-store.js";
+import { terminalBindingFrom, type ManagedSessionState } from "../src/managed-session.js";
+import { createNativeThreadLifecycleCliAdapter } from "../src/native-thread-lifecycle-cli-adapter.js";
+import { createNativeThreadTransitionApplication } from "../src/native-thread-transition-application.js";
+import { canonicalMutationResource } from "../src/mutation-transaction.js";
+import { withStoreWriterLeaseAsync } from "../src/store.js";
+import type { TerminalNativeIdentity } from "../src/terminal-binding-authority.js";
+import type { TerminalAgentBridge, ResolvedTerminalConversation } from "../src/terminal-agent-bridge.js";
+import type { TerminalRuntimeCliAdapter } from "../src/terminal-runtime-cli-adapter.js";
 import { fingerprint } from "../src/terminal-submission-facts.js";
 import { terminalBridgeRequestFingerprint } from
   "../src/terminal-dispatch-receipt.js";
 import type { TerminalControlRef } from
   "../src/terminal-agent-adapter.js";
-import { associateTerminalEndpointEvidence, terminalControlEvidence } from
+import { associateTerminalEndpointEvidence, terminalControlEvidence, terminalRuntimeResourceKey } from
   "../src/terminal-control-ref.js";
 import { terminalPreSendRuntime } from
   "../src/terminal-command-send-preflight.js";
@@ -1015,4 +1022,260 @@ test("the data-only identity service has no infrastructure authority", () => {
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
+});
+
+type ClaudeRestartCase = "dead" | "reused_pid" | "live" | "unknown" | "missing_identity" |
+  "source_transition" | "source_transition_race" | "source_turn" | "foreign_store" | "revision_race";
+
+function claudeRestartFixture(root: string, scenario: ClaudeRestartCase = "dead") {
+  const events: string[] = [];
+  const oldPid = scenario === "reused_pid" ? 202 : 101;
+  const currentPid = 202;
+  const startedAt = 1_793_185_422_337;
+  const nativeThreadId = "11111111-1111-4111-8111-111111111111";
+  const control: TerminalControlRef = {
+    kind: "tmux", target: "restart:0.0", session: "restart", window: 0, pane: 0,
+    panePid: 100, currentPath: root, currentCommand: "claude",
+    capabilities: ["screen_status", "send_keys", "durable_completion"]
+  };
+  const agentAdapter = createProductionTerminalAgentRegistry().require("claude");
+  const current: ResolvedTerminalConversation = {
+    conversationId: `terminal:v2:tmux:claude:restart:0.0:${currentPid}`,
+    agent: "claude", pid: currentPid, legacy: false, terminalControl: control, adapter: agentAdapter
+  };
+  const identity: TerminalNativeIdentity = {
+    sessionId: nativeThreadId, processStartedAt: startedAt,
+    ...(scenario === "missing_identity" ? {} : { processUuid: `claude-pid:${currentPid}:started:${startedAt}` }),
+    evidence: "claude_agents_exact_pid"
+  };
+  let currentIdentity = identity;
+  const outputs: Array<Record<string, unknown>> = [];
+  saveManagedSession(root, {
+    schema: "agent-knock-knock/session", version: 1, session_id: "session-restarted-claude",
+    agent: "claude", workspace: root, status: "bound",
+    binding: terminalBindingFrom({
+      terminalId: `terminal:v2:tmux:claude:restart:0.0:${oldPid}`,
+      terminalControl: control, pid: oldPid, nativeThreadId,
+      processUuid: `claude-pid:${oldPid}:started:1793180000000`,
+      evidence: "claude_agents_exact_pid", generation: 1,
+      now: new Date("2026-10-28T10:53:44.791Z")
+    }),
+    lineage: { created_by: "attach" }, created_at: "2026-10-28T10:53:44.791Z",
+    updated_at: "2026-10-28T10:53:44.791Z"
+  }, { expectedRevision: null });
+  const original = loadManagedSession(root, "session-restarted-claude");
+  const assertStore = () => {
+    events.push("store-authority");
+    if (scenario === "foreign_store") throw new Error("native Store authority conflict; no input sent");
+  };
+  let lifecycle: ReturnType<typeof createNativeThreadLifecycleCliAdapter>;
+  let transitionPending = scenario === "source_transition";
+  const authority = adapter({
+    cwd: () => root,
+    now: () => new Date("2026-10-28T11:10:00.000Z"),
+    isProcessAlive: () => {
+      if (scenario === "unknown") throw new Error("owner process observation unavailable");
+      return scenario === "live" || oldPid === currentPid;
+    }
+  }, (ports) => {
+    ports.store.storeDir = () => root;
+    ports.authority.assertManagedSessionCanStartTurn = () => {
+      events.push("source-turn-check");
+      if (scenario === "source_turn") throw new Error("Session has an unresolved Turn; inspect Status");
+    };
+    ports.authority.hasUnresolvedNativeTransition = () => transitionPending;
+    ports.authority.assertNativeThreadHasExclusiveOwnership = async request => {
+      events.push("exclusive");
+      await lifecycle.assertExclusive(request);
+      if (scenario === "source_transition_race") transitionPending = true;
+      if (scenario === "revision_race") saveManagedSession(root, {
+        ...loadManagedSession(root, original.session_id), updated_at: "2026-10-28T11:09:59.000Z"
+      }, { expectedRevision: original.revision! });
+    };
+  });
+  const rows = () => [{
+    pid: currentPid, cwd: root, sessionId: currentIdentity.sessionId, startedAt,
+    kind: "interactive", status: "idle"
+  }];
+  const bridge = {
+    resolveConversationId: async () => current,
+    resolveStoredTerminal: async () => current,
+    status: async () => {
+      events.push("idle-screen");
+      return {
+        reachable: true, activity_state: "idle", activity_reason: "current idle Composer",
+        approval_state: { scanned: true, blocked: false, approvable: false },
+        screen: { excerpt: `${"─".repeat(60)}\n❯\n${"─".repeat(60)}\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents` }
+      };
+    },
+    send: async (_agent: unknown, _control: unknown, command: string) => {
+      events.push("terminal-input");
+      assert.equal(command, "/clear");
+      const source = loadManagedSession(root, original.session_id);
+      assert.equal(source.status, "transitioning");
+      assert.equal(source.binding?.generation, 2, "recover the old process before terminal input");
+      currentIdentity = { ...identity, sessionId: "22222222-2222-4222-8222-222222222222" };
+    }
+  } as unknown as TerminalAgentBridge;
+  const runtime = {
+    createBridge: () => bridge,
+    createAgentRegistry: () => createProductionTerminalAgentRegistry(),
+    agentVersionForRunningProcess: () => "2.1.295",
+    loadClaudeAgentRows: () => rows()
+  } as unknown as TerminalRuntimeCliAdapter;
+  lifecycle = createNativeThreadLifecycleCliAdapter({
+    runtime: { forOptions: () => runtime, sleep: async () => undefined },
+    identity: {
+      resolveCurrent: async () => currentIdentity,
+      managedContext: () => ({ companions: { additional: [] } }),
+      boundSession: input => authority.boundManagedSessionForTerminal(input),
+      materializeSession: input => authority.materializeCurrentManagedSession(input),
+      refineSession: input => input.session,
+      logicalIdentity: input => authority.logicalIdentityForManagedSession(input),
+      companionSet: () => ({ additional: [] }),
+      processIncarnation: () => { throw new Error("unexpected Codex identity fallback"); },
+      physicalProcessIncarnation: () => { throw new Error("unexpected physical identity fallback"); },
+      runtimeForLiveIdentity: input => authority.terminalRuntimeForLiveIdentity(input),
+      ownerIsInactive: input => authority.managedSessionOwnerIsConclusivelyInactive(input),
+      assertCodexComposerReady: async () => { throw new Error("unexpected Codex Composer check"); },
+      ...{
+        reattachSession: async (input: Parameters<typeof authority.reattachManagedSessionForNativeIdentity>[0]) => {
+          events.push("reattach");
+          return authority.reattachManagedSessionForNativeIdentity(input);
+        }
+      }
+    },
+    state: {
+      storeDir: () => root, inspectStore: () => ({ writable: true }), runtimeDir: () => path.join(root, "runtime"),
+      acquireTerminal: () => () => undefined, loadLedger: () => undefined,
+      managedTurns: () => [], terminalBlockingTurns: () => [],
+      hasUnresolvedTransition: () => transitionPending,
+      dispatchOwnership: () => ({ state: "none" }), assertNativeThreadStoreAuthority: assertStore,
+      orphanedForRecovery: () => undefined
+    },
+    output: { cwd: () => root, print: () => undefined }
+  });
+  const unexpected = (): never => { throw new Error("unexpected lifecycle mutation"); };
+  const application = createNativeThreadTransitionApplication({
+    runtime: {
+      now: () => new Date("2026-10-28T11:10:00.000Z"), nowMs: () => 1_793_185_800_000,
+      pid: () => process.pid, cwd: () => root, sleep: async () => undefined,
+      env: () => undefined, exit: unexpected,
+      log: () => undefined, print: value => outputs.push(value as Record<string, unknown>), summarizeError: error => ({ length: String(error).length })
+    },
+    lifecycle: {
+      facade: lifecycle, runtime: () => runtime, resolveIdentity: async () => currentIdentity,
+      runtimeForIdentity: input => authority.terminalRuntimeForLiveIdentity(input),
+      exactIdentity: (terminal, value) => authority.exactLifecycleProcessIdentity(terminal, value),
+      assertComposerReady: async () => undefined
+    },
+    state: {
+      storeDir: () => root, runtimeDir: () => path.join(root, "runtime"), loadLedger: () => undefined,
+      reconcilePrepared: (_control, ledger) => ledger, reconcileIncarnation: (_control, ledger) => ledger,
+      recordMatchesControl: () => false,
+      lifecycleLedger: { save: () => events.push("prepared-ledger") } as never,
+      ordinaryOwnerStatus: () => undefined, blockingTurns: () => [], managedTurns: () => [],
+      hasUnresolvedTransition: () => transitionPending, dispatchOwnership: () => ({ state: "none" })
+    },
+    authority: {
+      sessionClaimsTerminal: (session, terminal) => authority.managedSessionClaimsResolvedTerminal(session, terminal),
+      conflictKind: input => authority.managedBindingConflictKindForResolvedTerminal(input),
+      ownerIsInactive: input => authority.managedSessionOwnerIsConclusivelyInactive(input as never),
+      observeExternal: unexpected, recoverDeferred: async () => undefined,
+      knownRoots: () => ({ additional: [] }), codexProcessBirth: unexpected,
+      processAlive: () => false, workspaceMatches: (left, right) => left === right
+    },
+    mutation: {
+      locks: () => ({
+        resources: {
+          terminal: canonicalMutationResource(terminalRuntimeResourceKey(control), control),
+          storeWriter: canonicalMutationResource(root, root)
+        },
+        acquireTerminal: () => { events.push("terminal-lock"); return () => events.push("unlock"); },
+        withStoreWriter: operation => withStoreWriterLeaseAsync(root, operation)
+      }),
+      authenticate: () => ({ terminalControl: control, storeDir: root }),
+      loadSession: (_scopes, _resources, id) => loadManagedSession(root, id),
+      saveSession: (_scopes, _resources, state, options) => saveManagedSession(root, state, options)
+    }
+  });
+  return { root, events, outputs, original, current, identity, authority, lifecycle, application };
+}
+
+for (const scenario of ["dead", "reused_pid"] as const) {
+  test(`Claude new_thread recovers a ${scenario} process claim and commits using the original List token`, async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-restart-lifecycle-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const fixture = claudeRestartFixture(root, scenario);
+    const listed = await fixture.lifecycle.currentSnapshot({}, fixture.current);
+    assert.equal(listed.session, undefined, "an old process is not the current bound Session");
+    await fixture.application.runNewThread({
+      terminal: fixture.current.conversationId, expectedBindingToken: listed.bindingToken, storeDir: root
+    });
+    const rebound = loadManagedSession(root, fixture.original.session_id);
+    assert.equal(rebound.session_id, fixture.original.session_id);
+    assert.equal(rebound.revision, 4, "reattach, transition, then detach the preserved source");
+    assert.equal(rebound.status, "detached");
+    assert.equal(rebound.binding?.generation, 2);
+    assert.equal(rebound.binding?.native_process.pid, fixture.current.pid);
+    assert.equal(rebound.binding?.native_process.process_uuid, fixture.identity.processUuid);
+    assert.equal(rebound.binding?.native_thread_id, fixture.identity.sessionId);
+    const transitions = listNativeThreadTransitions(root);
+    assert.equal(transitions.length, 1);
+    assert.equal(transitions[0].status, "committed");
+    assert.equal(transitions[0].source_session_id, fixture.original.session_id);
+    assert.equal(transitions[0].source_expected_revision, 2);
+    assert.ok(fixture.events.indexOf("idle-screen") < fixture.events.indexOf("reattach"));
+    assert.equal(fixture.events.filter(event => event === "terminal-input").length, 1);
+    assert.equal(fixture.outputs.at(-1)?.status, "committed");
+    assert.equal(fixture.outputs.at(-1)?.previous_session_id, fixture.original.session_id);
+    const refreshed = await fixture.lifecycle.currentSnapshot({}, fixture.current);
+    assert.equal(refreshed.bindingTokens.includes(listed.bindingToken), false,
+      "the old unmanaged token is not a persistent alias for the rebound Session");
+  });
+}
+
+for (const [scenario, error] of [
+  ["live", /still bound|live or unverifiable/u],
+  ["unknown", /owner process observation unavailable/u],
+  ["missing_identity", /process incarnation|generation/u],
+  ["source_transition", /unresolved.*transition|lifecycle recovery/u],
+  ["source_transition_race", /unresolved.*transition|lifecycle recovery/u],
+  ["source_turn", /unresolved Turn/u],
+  ["foreign_store", /Store authority conflict/u],
+  ["revision_race", /changed before raw reattach/u]
+] as const) {
+  test(`Claude restart recovery preserves ${scenario} authority without writing terminal input`, async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-restart-fence-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const fixture = claudeRestartFixture(root, scenario);
+    if (scenario === "missing_identity") {
+      const listed = await fixture.lifecycle.currentSnapshot({}, fixture.current);
+      await assert.rejects(fixture.application.runNewThread({
+        terminal: fixture.current.conversationId, expectedBindingToken: listed.bindingToken, storeDir: root
+      }), error);
+      assert.equal(fixture.events.includes("reattach"), false);
+    } else {
+      await assert.rejects(fixture.authority.reattachManagedSessionForNativeIdentity({
+        options: { storeDir: root }, terminal: fixture.current, identity: fixture.identity, storeDir: root
+      }), error);
+    }
+    const preserved = loadManagedSession(root, fixture.original.session_id);
+    assert.deepEqual(preserved.binding, fixture.original.binding);
+    assert.equal(preserved.revision, scenario === "revision_race" ? 2 : 1);
+    assert.equal(fixture.events.includes("terminal-input"), false);
+    assert.equal(listNativeThreadTransitions(root).length, 0);
+  });
+}
+
+test("Claude lifecycle rejects a stale displayed token before rebinding an exited owner", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-restart-token-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fixture = claudeRestartFixture(root);
+  await assert.rejects(fixture.application.runNewThread({
+    terminal: fixture.current.conversationId, expectedBindingToken: "stale-token", storeDir: root
+  }), /binding changed after it was listed/u);
+  assert.deepEqual(loadManagedSession(root, fixture.original.session_id), fixture.original);
+  assert.equal(fixture.events.includes("reattach"), false);
+  assert.equal(fixture.events.includes("terminal-input"), false);
 });

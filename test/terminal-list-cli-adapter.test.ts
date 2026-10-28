@@ -1,6 +1,8 @@
-import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
+import { createClaudeTerminalAgentAdapter, type ClaudeAgentRow } from "../src/claude-terminal-agent-adapter.js";
 import { createClaudeNativeConversationId } from "../src/claude-native-identity.js";
 import { exactClaudeTerminal } from "../src/claude-conversation-routing-identity.js";
+import { withClaudeSendRouteProjection } from "../src/conversation-list.js";
+import { withClaudeManagedSendAuthority } from "../src/claude-managed-send-route.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -2619,6 +2621,57 @@ test("Claude List distinguishes missing screen observations from unsafe Composer
   }
 });
 
+test("Claude List shares lifecycle and managed monitor admission while retaining explicit physical Send", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-list-admission-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "completed");
+  const configDir = path.join(root, ".claude");
+  const sessionId = "019f0000-0000-7000-8000-000000000777";
+  const directory = path.join(configDir, "projects", workspace.replace(/[^A-Za-z0-9]/gu, "-"));
+  fs.mkdirSync(directory, { recursive: true });
+  const transcript = path.join(directory, `${sessionId}.jsonl`);
+  const history = JSON.stringify({ type: "user", uuid: "historical-input", parentUuid: null,
+    sessionId, cwd: workspace, message: { role: "user", content: "Historical task" } }) + "\n";
+  fs.writeFileSync(transcript, history, { mode: 0o600 });
+  const row: ClaudeAgentRow = { pid: 4242, kind: "interactive", sessionId, cwd: workspace,
+    configDir, startedAt: Date.parse("2026-10-11T01:00:00Z"), status: "idle" };
+  let rows: readonly ClaudeAgentRow[] = [row];
+  const screen = ["✻ Brewed for 7m 17s · done 13:15", "─".repeat(80), "❯", "─".repeat(80),
+    "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"].join("\n");
+  const fixture = await createCodexRolloutListFixture(root, "completed", false, {}, "human-only", true,
+    false, screen, { agent: "claude", agentVersion: "2.1.295", claudeReader: () => rows });
+  const nativeId = createClaudeNativeConversationId({ configDir, sessionId, pid: 4242,
+    processStart: "Sun Oct 11 01:00:00 2026" });
+  const scenarios: Array<{ name: string; status?: string; missing?: boolean; partial?: boolean; legacyKind?: boolean;
+    mode?: number; newThread: boolean; managedSend: boolean }> = [
+    { name: "idle reader and private transcript", status: "idle", newThread: true, managedSend: true },
+    { name: "reader busy despite idle-looking screen", status: "working", newThread: false, managedSend: false },
+    { name: "reader row temporarily absent", missing: true, newThread: false, managedSend: false },
+    { name: "legacy reader omits kind", legacyKind: true, status: "idle", newThread: false, managedSend: true },
+    { name: "partial transcript boundary", partial: true, status: "idle", newThread: true, managedSend: false },
+    ...(process.platform === "win32" ? [] : [{ name: "non-private transcript", mode: 0o644, status: "idle", newThread: true, managedSend: false }]),
+    { name: "reader and transcript recovered", status: "idle", newThread: true, managedSend: true }
+  ];
+  for (const scenario of scenarios) {
+    rows = scenario.missing ? [] : [{ ...row, status: scenario.status, ...(scenario.legacyKind ? { kind: undefined } : {}) }];
+    fs.chmodSync(transcript, scenario.mode ?? 0o600);
+    fs.writeFileSync(transcript, scenario.partial ? history.trimEnd() : history);
+    const observed = await fixture.facade.observeExactTerminal({ options: { storeDir: fixture.storeDir }, terminalId: fixture.terminalId });
+    assert.equal(observed.state, "available", scenario.name);
+    if (observed.state !== "available") continue;
+    assert.equal(Boolean((observed.terminal.available_actions as Record<string, unknown>).new_thread), scenario.newThread, scenario.name);
+    const native = withClaudeSendRouteProjection({ source: "claude_cli", agent: "claude", id: nativeId,
+      capabilities: { send: true }, available_actions: { send: true } },
+      [withClaudeManagedSendAuthority(observed.rawTerminal, observed.terminal, true)]);
+    assert.equal((native.capabilities as Record<string, unknown>).send, scenario.managedSend,
+      `${scenario.name}: ${String(native.send_blocked_reason ?? "ready")}`);
+    assert.equal(Boolean((native.available_actions as Record<string, unknown>).send), scenario.managedSend, scenario.name);
+    const physical = (observed.terminal.available_actions as Record<string, any>).send;
+    assert.equal(physical?.scope, "terminal_user_explicit", `${scenario.name}: user-selected physical input remains independent`);
+    assert.equal(physical?.arguments?.selector, fixture.terminalId);
+  }
+});
+
 async function createCodexRolloutListFixture(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
@@ -2968,11 +3021,22 @@ async function createCodexRolloutListFixture(
   const unusedGate = deferredGate();
   unusedGate.release();
   const base = facadeDependencies("A", [], unusedGate, unusedGate);
+  const claudeHome = path.join(root, ".claude");
+  if (agent === "claude") {
+    const project = path.join(claudeHome, "projects", workspace.replace(/[^A-Za-z0-9]/gu, "-"));
+    fs.mkdirSync(project, { recursive: true });
+    const transcript = path.join(project, `${nativeThreadId}.jsonl`);
+    if (!fs.existsSync(transcript)) fs.writeFileSync(transcript, "", { mode: 0o600 });
+  }
+  const claudeReader = fixtureOptions.claudeReader ?? (agent === "claude" ? () => [{
+    pid: 4242, kind: "interactive", sessionId: nativeThreadId, startedAt: date.getTime(),
+    status: "idle", cwd: workspace, configDir: fs.realpathSync(claudeHome)
+  }] : undefined);
   const rememberedExpectedTerminalSelectors: Array<string | undefined> = [];
   const dependencies: TerminalListCliDependencies = {
     ...base,
     discovery: {
-      ...(fixtureOptions.claudeReader ? { loadClaudeAgentRows: fixtureOptions.claudeReader } : {}),
+      ...(claudeReader ? { loadClaudeAgentRows: claudeReader } : {}),
       ...(fixtureOptions.claudeWindowRole ? { observeClaudeWindowRole: fixtureOptions.claudeWindowRole } : {}),
       createRuntimeTerminalAgentRegistry: () => registry,
       createTerminalControlProvider: () => provider,
@@ -3048,6 +3112,7 @@ async function createCodexRolloutListFixture(
           status: "resolved",
           identity: {
             sessionId: nativeThreadId,
+            ...(agent === "claude" ? { processStartedAt: date.getTime() } : {}),
             processUuid,
             ...(agent === "claude" ? {} : { processBirth }),
             ...(nativeIdentityHasRollout
