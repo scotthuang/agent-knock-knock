@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.4",
+  "version": "0.16.5",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "32565e8af6cb088c58fdf8a199f0f58c89503c91",
-  "asset": "scotthuang-agent-knock-knock-0.16.4.tgz",
-  "sha256": "5a114c6b5954d6b18339efa3d99fafaec198e414daa99a4caadebb7fb4f9644b",
-  "bytes": 3931574,
-  "changelog": "Adapt Codex CLI/app-server 0.165.0: verified Terra model label and native permission overlay; manual Folder access blocking; separate frontend/backend versions and revalidate exact process/thread/home before routed input. Preserve current-call status identity safely, 800-code-point public progress, 720-minute monitoring, Store ownership and notification deduplication. Isolated native tasks, approval/question, local callbacks and real TUI parser replay verified; no new Desktop or external-channel delivery claim. Coordinate Pi 0.1.0-poc.12 and DSH 0.1.0-rc.15, both pinning core 0.16.4 on next."
+  "commit": "ac05b2efec3605e1d6618ada24621dc10b20976e",
+  "asset": "scotthuang-agent-knock-knock-0.16.5.tgz",
+  "sha256": "584eed2155c64d561bc094518fa0f30c3a901ccf6cf82f1300e65bc243e188da",
+  "bytes": 3933002,
+  "changelog": "Fix Claude List observation diagnostics: distinguish explicitly skipped scans (screen_not_scanned) from failed or missing captures (screen_unavailable), with actionable rescan or access recovery guidance. Preserve missing-evidence Send refusal, Composer, draft, stash, foreground-work and exact-target safeguards. Coordinate Pi 0.1.0-poc.13 and DSH 0.1.0-rc.16, each pinning core 0.16.5 on next; unchanged Host version ranges and public contracts. Full release gate: 3851 core tests passed, connector gates and isolated OpenClaw 2026.9.1 loading passed. No new live-model or external-channel delivery claim."
 }
