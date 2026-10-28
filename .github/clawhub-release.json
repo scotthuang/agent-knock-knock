@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.3",
+  "version": "0.16.4",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "07a679904459fae474caa9fad6e35292b57f302c",
-  "asset": "scotthuang-agent-knock-knock-0.16.3.tgz",
-  "sha256": "e0e8195918d049a48e48ce094e02bf191ce931c57b23e65c0ee70ca35009e515",
-  "bytes": 3922935,
-  "changelog": "Resolve the actual running Codex native executable behind npm launchers with process and mapped-file evidence. Recover supported DSH Web callbacks across restarts within the original Profile/Store and persistent Session, using current trusted helper/socket/token and durable prepared/accepted receipts. Keep command identity separate from recovered callback aliases. Require explicit verified adoption for pre-fix Watch routes; older Hosts remain live-only. Preserve original task, route, deadline and deduplication boundaries; do not reset permanent/uncertain delivery or claim a latency fix. Coordinate Pi 0.1.0-poc.11 and DSH 0.1.0-rc.14 with exact core0.16.3 pins on next. Action contract35, List4, Watch3, Store writer11."
+  "commit": "32565e8af6cb088c58fdf8a199f0f58c89503c91",
+  "asset": "scotthuang-agent-knock-knock-0.16.4.tgz",
+  "sha256": "5a114c6b5954d6b18339efa3d99fafaec198e414daa99a4caadebb7fb4f9644b",
+  "bytes": 3931574,
+  "changelog": "Adapt Codex CLI/app-server 0.165.0: verified Terra model label and native permission overlay; manual Folder access blocking; separate frontend/backend versions and revalidate exact process/thread/home before routed input. Preserve current-call status identity safely, 800-code-point public progress, 720-minute monitoring, Store ownership and notification deduplication. Isolated native tasks, approval/question, local callbacks and real TUI parser replay verified; no new Desktop or external-channel delivery claim. Coordinate Pi 0.1.0-poc.12 and DSH 0.1.0-rc.15, both pinning core 0.16.4 on next."
 }
