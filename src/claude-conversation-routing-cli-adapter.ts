@@ -143,7 +143,8 @@ async function selectClaudeSendRoute(context: ClaudeRouteContext): Promise<Conve
   const terminals = await ports.terminals(options, native ? undefined : target);
   if (native) {
     const selection = claudeManagedSendRoute(target, terminals);
-    if (selection.kind === "blocked") throw new Error(`Claude managed Send blocked: ${selection.reason}; no input was sent`);
+    if (selection.kind === "blocked") throw claudeManagedSendRefusal(selection.reason,
+      terminals.filter(row => exactClaudeTerminal(target, row)));
     if (selection.kind === "managed") return managedTerminalChoice(selection.terminal);
     await runtime.inspect(parseClaudeNativeConversationId(target));
     return { route: "native", targetId: target };
@@ -157,8 +158,15 @@ async function selectClaudeSendRoute(context: ClaudeRouteContext): Promise<Conve
     return { route: "terminal", targetId: target };
   }
   const reason = claudeManagedTerminalSendBlockReason(exact[0]);
-  if (reason) throw new Error(`Claude managed Send blocked: ${reason}; no input was sent`);
+  if (reason) throw claudeManagedSendRefusal(reason, exact);
   return managedTerminalChoice(exact[0]);
+}
+
+function claudeManagedSendRefusal(reason: string, terminals: readonly Record<string, unknown>[]): Error {
+  const readiness = terminals.length === 1 ? recordValue(terminals[0].managed_send_readiness) : undefined;
+  const recovery = readiness?.ready === false && readiness.reason === reason ? nonBlankString(readiness.message) : undefined;
+  return new Error(`Claude managed Send blocked: ${reason}. ${recovery ??
+    "Refresh List and check Status for this window before retrying; no input was sent."}`);
 }
 
 function managedTerminalChoice(terminal: Record<string, unknown>): ConversationRouteChoice {

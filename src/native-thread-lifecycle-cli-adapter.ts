@@ -131,6 +131,7 @@ export interface CodexForegroundIdentificationProof {
 }
 
 export interface NativeThreadLifecycleCliFacade extends TerminalNativeControlCliBoundary {
+  reattachSession: CreateNativeThreadLifecycleCliAdapterInput["identity"]["reattachSession"];
   queryPorts(options: NativeLifecycleCliOptions): NativeThreadLifecycleQueryPorts;
   assertExclusive(input: NativeThreadOwnershipRequest): Promise<void>;
   currentSnapshot(
@@ -203,6 +204,7 @@ export function createNativeThreadLifecycleCliAdapter(
     }
   });
   return Object.freeze({
+    reattachSession: (input) => ports.identity.reattachSession(input),
     resolveLifecycleTerminal: (options) => app.resolveLifecycleTerminal(options),
     queryPorts: (options) => app.queryPorts(options),
     assertExclusive: (input) => app.assertExclusive(input),

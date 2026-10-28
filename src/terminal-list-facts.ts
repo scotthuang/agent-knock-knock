@@ -29,6 +29,7 @@ import type {
 import type { TerminalDispatchLedgerDocument } from
   "./terminal-dispatch-ledger-codec.js";
 import type { TerminalListIdentityRecheck } from "./terminal-list-native-identity-recheck.js";
+import type { ClaudeTerminalAdmission } from "./claude-terminal-admission.js";
 
 export interface TerminalListState {
   readonly approval_state: TerminalBridgeStatus["approval_state"] & {
@@ -51,6 +52,7 @@ export interface EffectiveTerminalListState extends TerminalListState {
 }
 
 export interface TerminalNativeListIdentityFacts {
+  readonly claudeAdmission?: ClaudeTerminalAdmission;
   readonly orphanedDispatch?: TerminalDispatchLedgerDocument;
   readonly nativeIdentityObservation: TerminalNativeIdentityObservation;
   readonly nativeIdentityRecheck?: TerminalListIdentityRecheck;
@@ -86,6 +88,19 @@ export function claudePhysicalSendReadinessFromListState(
     message: "AKK could not read this window. Open Status to inspect the capture error, restore terminal-provider access, then refresh List with pane scanning enabled."
   };
   return claudeUserExplicitReadiness(state.screen_excerpt);
+}
+
+/** Diagnostics do not carry the private transcript anchor or grant a physical fallback. */
+export function claudeListAdmissionProjection(agent: string, facts: TerminalListTerminalFacts, send: boolean) {
+  if (agent !== "claude") return {};
+  const missing = { ready: false, reason: "claude_reader_unavailable",
+    message: "AKK could not verify the current Claude process through its reader. Check Status and the configured Claude reader, then refresh List and retry." };
+  return {
+    managed_send_readiness: facts.native.claudeAdmission?.managedSend ?? missing,
+    thread_lifecycle_readiness: facts.native.claudeAdmission?.lifecycle ?? missing,
+    _claude_managed_send_eligible: send && facts.composer.automatedInputComposerReady &&
+      !facts.store.hasOrphanedDispatch && facts.native.claudeAdmission?.managedSend.ready === true
+  };
 }
 
 export interface TerminalListPhysicalProcessIncarnation {

@@ -679,6 +679,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-terminal-admission.ts",
+      "owner": "terminal-dispatch-core"
+    },
+    {
       "path": "src/claude-terminal-agent-adapter.ts",
       "owner": "terminal-agent-core"
     },

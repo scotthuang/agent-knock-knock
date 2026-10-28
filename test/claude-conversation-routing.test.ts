@@ -224,9 +224,12 @@ test("a physical token cannot bypass managed eligibility through a native Claude
     { conversation: terminalId },
     { conversation: terminalId, expectedTerminalToken: "existing-authority", routingDiscoveredTerminalAuthority: true }]) {
     const f = fixture(t);
-    f.terminals([{ ...terminal, _claude_managed_send_eligible: false }]);
+    f.terminals([{ ...terminal, _claude_managed_send_eligible: false, managed_send_readiness: {
+      ready: false, reason: "claude_completion_monitor_unavailable",
+      message: "Check the Claude reader, then refresh List and retry. No task text was sent."
+    } }]);
     await assert.rejects(f.run("send", { ...options, message: "task", messageId: "no-bypass" }),
-      /Claude managed Send blocked/u);
+      /Claude managed Send blocked: claude_completion_monitor_unavailable.*Check the Claude reader.*refresh List and retry/u);
     assert.equal(f.calls.length, 0);
   }
 });

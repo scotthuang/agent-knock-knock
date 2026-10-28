@@ -83,6 +83,12 @@ export interface NativeLifecycleIdentityPorts {
     terminal: ResolvedTerminalConversation;
     identity?: TerminalNativeIdentity;
   }): ManagedSessionState | undefined;
+  reattachSession(input: {
+    options: NativeLifecycleCliOptions;
+    terminal: ResolvedTerminalConversation;
+    identity: TerminalNativeIdentity;
+    storeDir: string;
+  }): Promise<ManagedSessionState | undefined>;
   refineSession(input: {
     storeDir: string;
     session: ManagedSessionState;

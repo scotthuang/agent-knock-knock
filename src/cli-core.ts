@@ -1024,8 +1024,8 @@ const nativeThreadLifecycleQueryFacade = createNativeThreadLifecycleCliAdapter({
       terminalIdentityAuthority.codexManagedIdentityResolutionContext(input),
     boundSession: (input) =>
       terminalIdentityAuthority.boundManagedSessionForTerminal(input),
-    materializeSession: (input) =>
-      terminalIdentityAuthority.materializeCurrentManagedSession(input),
+    materializeSession: materializeCurrentManagedSession,
+    reattachSession: reattachManagedSessionForNativeIdentity,
     refineSession: (input) =>
       terminalAcceptanceCliFacade.refineSessionIdentity(input),
     logicalIdentity: (input) =>

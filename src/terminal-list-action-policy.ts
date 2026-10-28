@@ -131,12 +131,7 @@ function decideTerminalListCommands(input: {
     status: true as const,
     cancel: control.capabilities.includes("terminal_cancel"),
     close: facts.store.hasOrphanedDispatch,
-    new_thread: lifecycle.status === "supported" &&
-      lifecycle.newThread === true &&
-      input.codexLifecycleIncarnationAvailable &&
-      !facts.store.terminalHasBlockingTurn &&
-      idleAndNotBlocked &&
-      facts.composer.automatedInputComposerReady,
+    new_thread: newThreadAllowed(input, idleAndNotBlocked),
     list_resumable_threads: lifecycle.status === "supported" &&
       lifecycle.resumeExact === true &&
       input.codexLifecycleIncarnationAvailable,
@@ -157,6 +152,19 @@ function decideTerminalListCommands(input: {
         )
       )
   });
+}
+
+function newThreadAllowed(input: {
+  subject: TerminalListActionSubject;
+  facts: TerminalListTerminalFacts;
+  codexLifecycleIncarnationAvailable: boolean;
+}, idleAndNotBlocked: boolean): boolean {
+  const { subject, facts } = input;
+  const lifecycle = facts.runtime.lifecycleCapability;
+  return lifecycle.status === "supported" && lifecycle.newThread === true &&
+    (subject.agent !== "claude" || facts.native.claudeAdmission?.lifecycle.ready === true) &&
+    input.codexLifecycleIncarnationAvailable && !facts.store.terminalHasBlockingTurn &&
+    idleAndNotBlocked && facts.composer.automatedInputComposerReady;
 }
 
 export function modelControlPolicyFacts(input: {

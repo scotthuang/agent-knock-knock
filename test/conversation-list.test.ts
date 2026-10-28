@@ -761,6 +761,36 @@ test("Claude terminal-only List retains verified explicit physical Send independ
   assert.equal(physicalSend.arguments.expected_terminal_token, "physical-authority", "Private offers remain intact for execution");
 });
 
+test("Claude admission diagnostics explain native Send and thread controls without blocking explicit physical input", () => {
+  const { physical, backend } = claudePair();
+  const readiness = { ready: false, reason: "claude_completion_monitor_unavailable",
+    message: "Wait for Claude to finish, check Status and the reader, then refresh List and retry.",
+    anchor: { relative_path: "private-transcript-path", device: "private-device" } };
+  const blocked = { ...physical, _claude_managed_send_eligible: false,
+    managed_send_readiness: readiness, thread_lifecycle_readiness: readiness };
+  const listed = unifiedConversationList({ terminals: [blocked], store: { writable: true },
+    claude_cli_sessions: [backend] }, [blocked], {}, { diagnostics: true });
+  const native = listed.conversations.find(row => row.conversation_id === backend.id)!;
+  assert.equal((native.capabilities as Record<string, unknown>).send, false);
+  assert.equal((native.available_actions as Record<string, unknown>).send, undefined);
+  assert.equal(native.send_blocked_reason, readiness.reason);
+  assert.match(JSON.stringify(native.usage), /managed completion tracking.*refresh List/u);
+  const standalone = unifiedConversationList({ terminals: [blocked], store: { writable: true } },
+    [blocked], {}, { diagnostics: true }).conversations[0];
+  assert.equal((standalone.capabilities as Record<string, unknown>).send, true);
+  assert.equal((standalone.available_actions as Record<string, any>).send.scope, "terminal_user_explicit");
+  assert.match(JSON.stringify(standalone.usage), /Starting or switching Claude threads.*refresh List/u);
+  const compact = compactAkkListModelProjection(listed) as Record<string, any>;
+  assert.match(JSON.stringify(compact), /managed_send_readiness/);
+  assert.doesNotMatch(JSON.stringify(compact), /private-transcript-path|private-device|"anchor"/u);
+  const ordinary = compactAkkListModelProjection(unifiedConversationList({ terminals: [blocked],
+    store: { writable: true }, claude_cli_sessions: [backend] }, [blocked])) as Record<string, any>;
+  const ordinaryNative = ordinary.conversations.find((row: Record<string, unknown>) => row.conversation_id === backend.id);
+  assert.equal(ordinaryNative.managed_send_readiness.ready, false);
+  assert.equal(ordinaryNative.thread_lifecycle_readiness.reason, readiness.reason);
+  assert.doesNotMatch(JSON.stringify(ordinaryNative), /private-transcript-path|private-device|"anchor"/u);
+});
+
 test("Claude physical readiness explains draft and foreground blockers before missing native identity", () => {
   const reasons = [
     ["screen_not_scanned", /did not scan/u, /noApprovalScan.*false/u],

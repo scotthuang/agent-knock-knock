@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
 import type {
   TerminalNativeIdentityFence,
   TerminalRuntimeIdentity,
@@ -574,4 +575,25 @@ test("preparation without revalidation invokes its plan and status synchronously
     "status:invoke",
     "ready:assert"
   ]);
+});
+
+test("Claude lifecycle admission retains exact process-start fencing before thread input", async () => {
+  for (const startedAt of [1234, 4321, undefined]) {
+    const events: string[] = [];
+    const rows = [{ pid: 777, kind: "interactive", sessionId: BEFORE_THREAD,
+      startedAt, cwd: TERMINAL_CONTROL.currentPath, status: "idle" }];
+    const terminal = { conversationId: "terminal:v2:claude-fence", agent: "claude", pid: 777,
+      legacy: false, terminalControl: { ...TERMINAL_CONTROL, capabilities: [...TERMINAL_CONTROL.capabilities], currentCommand: "claude" },
+      adapter: createClaudeTerminalAgentAdapter() } as ResolvedTerminalConversation;
+    const bridge = { status: async () => { events.push("status"); return idleStatus("idle"); } } as unknown as TerminalAgentBridge;
+    const pending = prepareNativeThreadVerification({
+      operation: { kind: "new_thread" }, expectedBindingToken: "binding", bindingTokens: ["binding"],
+      capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
+      beforeIdentity: { sessionId: BEFORE_THREAD, processStartedAt: 1234, evidence: "claude_agents_exact_pid" }
+    }, terminal, { ...basePorts(bridge, events), loadClaudeAgentRows: () => rows,
+      plan: () => NEW_THREAD_PLAN, assertReady: () => {}, finalizeIdentity: identity => identity });
+    if (startedAt === 1234) assert.equal((await pending).beforeIdentity.sessionId, BEFORE_THREAD);
+    else await assert.rejects(pending, /current idle Claude session.*refresh List and retry/u);
+    assert.deepEqual(events, ["bridge:create", "status"], "preparation observes but never sends transition input");
+  }
 });

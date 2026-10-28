@@ -5,10 +5,10 @@ import { codexUnsupportedDurableHistoryWarning } from
   "./codex-lifecycle-compatibility.js";
 
 import {
-  captureClaudeTranscriptAnchor,
   defaultClaudeHome,
   type ClaudeTranscriptAnchor
 } from "./claude-local-transcript-provider.js";
+import { captureClaudeManagedSendAdmission } from "./claude-terminal-admission.js";
 import type { ClaudeAgentRow } from "./claude-terminal-agent-adapter.js";
 import {
   type Conversation
@@ -397,25 +397,23 @@ export async function prepareTerminalControlSend(
           candidateSetAnchor
         });
       } else {
-        claudeTranscriptAnchor = captureClaudeTranscriptAnchor({
+        const admission = captureClaudeManagedSendAdmission({
           sessionId: preSendRuntime.sessionId,
           cwd: preSendRuntime.cwd,
           pid: preSendRuntime.pid,
           claudeHome,
           agentRows: ports.loadClaudeAgentRows(options)
         });
-        if (!claudeTranscriptAnchor) {
-          throw new Error(
-            "the completion monitor could not bind an owner-private Claude transcript boundary"
-          );
-        }
+        if (!admission.readiness.ready) throw new Error(admission.readiness.message);
+        claudeTranscriptAnchor = admission.anchor!;
         claudeHome = claudeTranscriptAnchor.config_dir ??
           path.resolve(claudeHome ?? defaultClaudeHome());
       }
     }
   } catch (error) {
     throw new Error(
-      `refusing to send to ${executor.display_name} without a verified idle terminal: ${
+      `${executor.kind === "claude" ? "refusing managed Claude Send before terminal input"
+        : `refusing to send to ${executor.display_name} without a verified idle terminal`}: ${
         error instanceof Error ? error.message : String(error)
       }`
     );

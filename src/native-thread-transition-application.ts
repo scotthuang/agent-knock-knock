@@ -103,6 +103,7 @@ import type {
   NativeThreadLifecycleLedgerCliAdapter
 } from "./native-thread-lifecycle-ledger-cli-adapter.js";
 import type {
+  NativeLifecycleSnapshot,
   NativeThreadLifecycleCliFacade,
   NativeThreadOwnershipRequest
 } from "./native-thread-lifecycle-cli-adapter.js";
@@ -154,7 +155,7 @@ export interface NativeThreadTransitionRuntimePorts {
 export interface NativeThreadTransitionLifecyclePorts {
   facade: Pick<NativeThreadLifecycleCliFacade,
     "resolveLifecycleTerminal" | "queryPorts" | "assertExclusive" |
-    "currentSnapshot" | "lifecycleBindingTokens" | "agentAdapter" |
+    "currentSnapshot" | "reattachSession" | "lifecycleBindingTokens" | "agentAdapter" |
     "assertSameInspectionTerminal">;
   runtime(options: NativeThreadTransitionCliOptions): TerminalRuntimeCliAdapter;
   resolveIdentity(input: {
@@ -1506,6 +1507,26 @@ function nativeThreadTransitionSettlementPorts(
   };
 }
 
+/** Called only after validating the original List token and current idle/input proof. */
+async function recoverClaudeLifecycleSource(
+  bindings: NativeThreadTransitionBindings,
+  input: { options: NativeThreadTransitionCliOptions; terminal: ResolvedTerminalConversation;
+    storeDir: string; snapshot: NativeLifecycleSnapshot; beforeIdentity: NativeAgentSessionIdentity }
+): Promise<NativeLifecycleSnapshot> {
+  const { options, terminal, storeDir, snapshot, beforeIdentity } = input;
+  // Reuse Send's CAS reattach without retaining the unmanaged token as an alias.
+  if (!snapshot.session) await bindings.nativeThreadLifecycleFacade.reattachSession({
+    options, terminal, identity: beforeIdentity, storeDir
+  });
+  const refreshed = await bindings.currentLifecycleSnapshot(options, terminal, { materialize: true });
+  if (refreshed.runtimeIdentity?.sessionId !== beforeIdentity.sessionId ||
+      refreshed.runtimeIdentity.processUuid !== beforeIdentity.processUuid ||
+      refreshed.runtimeIdentity.processStartedAt !== beforeIdentity.processStartedAt) {
+    throw new Error("Claude changed thread or process while recovering its old binding; no terminal input was sent. Refresh List and retry.");
+  }
+  return refreshed;
+}
+
 async function runNativeThreadTransition(
   bindings: NativeThreadTransitionBindings,
   commands: NativeThreadTransitionCommandApplication,
@@ -1566,10 +1587,11 @@ async function runNativeThreadTransition(
           loadTerminalBridgeDispatchLedger(terminal.terminalControl)
         );
       }
-      const snapshot = await currentLifecycleSnapshot(
+      const recoverClaudeRestart = terminal.agent === "claude" && operation.kind === "new_thread";
+      let snapshot = await currentLifecycleSnapshot(
         options,
         terminal,
-        { materialize: true }
+        { materialize: !recoverClaudeRestart }
       );
       const expectedToken = required(
         stringValue(options.expectedBindingToken),
@@ -1625,6 +1647,12 @@ async function runNativeThreadTransition(
         beforeIdentity,
         beforeRuntime
       } = preparedVerification;
+
+      if (recoverClaudeRestart) {
+        snapshot = await recoverClaudeLifecycleSource(bindings, {
+          options, terminal, storeDir, snapshot, beforeIdentity
+        });
+      }
 
       const restorableOriginCandidateToken =
         operation.kind === "new_thread" &&

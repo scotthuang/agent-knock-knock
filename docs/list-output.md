@@ -44,6 +44,25 @@ Watch, with the exact active input revalidated when observation starts. A
 terminal-only Watch can observe terminal activity; it does not establish an
 exact native task or prove that task succeeded.
 
+For Claude, an idle screen does not by itself authorize managed Send or New
+thread. Each action offer uses that operation's current reader identity
+and idle checks from execution; managed Send additionally checks that a safe
+transcript boundary can be captured. A missing, busy or mismatched reader row,
+or an unsafe transcript boundary, removes the affected managed action and
+provides a recovery explanation. The independent physical Send action retains
+its own input checks. No managed operation silently falls back to physical
+input. `managed_send_readiness` and `thread_lifecycle_readiness` report the
+affected check and next steps without exposing private transcript anchors.
+Execution obtains fresh evidence again, because state can change after the
+list observation.
+
+A resumed Claude thread may retain its UUID while running in a new process.
+New thread can safely reattach an existing Session belonging to a conclusively
+inactive process before starting its transition. This preserves history and
+increments the binding generation; it does not ignore native-thread claims or
+relax Store authority. List remains read-only, and unknown process ownership
+or unresolved work still prevents automatic reattachment.
+
 For an unresolved Claude terminal identity, List makes one additional fresh
 reader check, shared across the unresolved Claude terminals in that scan. It
 does not send terminal input or trust a registry file alone. If native identity

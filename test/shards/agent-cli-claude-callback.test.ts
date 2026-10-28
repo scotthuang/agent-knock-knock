@@ -1664,7 +1664,7 @@ test("hookless Claude send is refused when no transcript boundary can be bound",
     assert.notEqual(sent.status, 0);
     assert.match(
       sent.stderr,
-      /could not bind an owner-private Claude transcript boundary/u
+      /cannot verify this Claude session.*refresh List and retry/u
     );
     assert.equal(
       readJsonLines(tmuxCallsPath).some((call) =>

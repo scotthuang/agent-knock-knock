@@ -47,6 +47,8 @@ export function claudeManagedTerminalSendBlockReason(row: Row): string | undefin
     || !nonBlankString(row.native_agent_session_id)) return "terminal_identity_unresolved";
   const approval = recordValue(row.approval_state);
   if (row.activity_state !== "idle" || approval?.scanned !== true || approval.blocked !== false) return "terminal_busy_or_blocked";
+  const readiness = recordValue(row.managed_send_readiness);
+  if (readiness?.ready === false && nonBlankString(readiness.reason)) return String(readiness.reason);
   if (row._claude_managed_send_eligible !== true) return "terminal_managed_send_unavailable";
   const send = recordValue(recordValue(row.available_actions)?.send);
   const args = recordValue(send?.arguments);

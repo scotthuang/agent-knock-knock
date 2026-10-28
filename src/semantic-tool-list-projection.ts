@@ -188,7 +188,8 @@ function isScopedConversationAction(agent: unknown, name: string, action: Record
 /** Keep actionable managed records without presenting another endpoint as a conversation. */
 function compactConversationControlRecord(control: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {};
-  for (const field of ["managed", "management_conflict", "management_unavailable", "native_store_authority", "handoff_decision", "blocking_turns"]) {
+  for (const field of ["managed", "management_conflict", "management_unavailable", "native_store_authority", "handoff_decision", "blocking_turns",
+    "managed_send_readiness", "thread_lifecycle_readiness"]) {
     if (control[field] !== undefined) output[field] = control[field];
   }
   return output;
@@ -227,6 +228,9 @@ function compactAkkListTerminal(
 
   compactAkkListNested(output, "physical_send_readiness", terminal.physical_send_readiness,
     ["ready", "reason", "message"]);
+  for (const name of ["managed_send_readiness", "thread_lifecycle_readiness"]) {
+    compactAkkListNested(output, name, terminal[name], ["ready", "reason", "message"]);
+  }
   compactAkkListNested(output, "terminal_control", terminal.terminal_control,
     ["kind", "target"]);
   compactAkkListNested(output, "approval_state", terminal.approval_state, [
