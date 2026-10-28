@@ -12,11 +12,11 @@ socket.
 
 ## Status and compatibility
 
-Connector **0.1.0-poc.12** pins AKK **0.16.4**, including CLI direct
+Connector **0.1.0-poc.13** pins AKK **0.16.5**, including CLI direct
 connections, Codex Desktop, Recovery, state-derived List guidance and verified
-running-process Codex version discovery, with the 0.165.0 adaptation. Its generated Skill and registered
-tools are verified
-against that exact core package at startup. See the [root compatibility
+running-process Codex version discovery, with the 0.165.0 adaptation and accurate
+Claude pane-observation diagnostics. Its generated Skill and registered tools
+are verified against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
 operation-specific limits. Updating AKK core elsewhere does not update this
 connector's pinned dependency. This prerelease uses the `next` dist-tag.
@@ -35,7 +35,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.4`, pinned by this connector's package and lockfile. A different
+- AKK `0.16.5`, pinned by this connector's package and lockfile. A different
   version at the repository root is not substituted automatically. Before core
   publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
@@ -87,8 +87,8 @@ pi list
 ```
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
-core `0.16.4` connector, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.12`; exact versions are pinned
+core `0.16.5` connector, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.13`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -453,7 +453,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.12
+npm run release:check -- --publish --confirm-version 0.1.0-poc.13
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -502,6 +502,17 @@ established conversation; diagnostic List retains their exact IDs. This is
 a presentation change, not evidence that a candidate is disconnected, and it
 does not change Send routing or callback ownership. Sole empty conversations
 and exact frontend associations remain visible.
+
+Connector **`0.1.0-poc.13`** pins AKK **`0.16.5`** and its synchronized Skill.
+It carries [PR #475](https://github.com/scotthuang/agent-knock-knock/pull/475):
+Claude List now distinguishes an explicitly skipped pane scan
+(`screen_not_scanned`) from unavailable capture evidence (`screen_unavailable`),
+instead of incorrectly reporting an unrecognized Composer. The result explains
+how to refresh the observation; missing evidence still cannot authorize Send.
+Actual Composer, draft, stash, foreground-work and exact-target checks remain
+unchanged, as do Host version ranges and callback/restart ownership. This
+coordinated dependency refresh adds no new Pi live-model or external-channel
+delivery claim and remains on npm `next`.
 
 Connector **`0.1.0-poc.12`** pins AKK **`0.16.4`** and its synchronized Skill.
 It carries the [Codex CLI 0.165.0 compatibility update](../../docs/codex-0.165.0-compatibility.md):
@@ -576,8 +587,8 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.12` is an npm prerelease distributed through the `next` dist-tag;
-its publication is coordinated with core `0.16.4` and the DSH connector.
+`0.1.0-poc.13` is an npm prerelease distributed through the `next` dist-tag;
+its publication is coordinated with core `0.16.5` and the DSH connector.
 ClawHub publication remains a separate channel.
 
 ## Deliberate POC limits

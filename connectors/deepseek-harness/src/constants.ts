@@ -1,7 +1,7 @@
 export const CONNECTOR_NAME = "agent-knock-knock-deepseek-harness";
 export const CONNECTOR_PACKAGE =
   "@scotthuang/agent-knock-knock-deepseek-harness";
-export const CONNECTOR_VERSION = "0.1.0-rc.15";
+export const CONNECTOR_VERSION = "0.1.0-rc.16";
 
 export const DSH_LAUNCHER_PACKAGE = "@deepseek-ai/dsh";
 export const SUPPORTED_DSH_VERSIONS = Object.freeze([

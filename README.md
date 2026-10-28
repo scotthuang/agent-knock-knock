@@ -206,8 +206,8 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Claude Code direct connection | macOS, compatible native peer protocol `1`, and Python 3 available to AKK. Live observations include `2.1.295` and `2.1.296`; these are not minimum versions. Standard `claude` and configured wrappers use the same adapter. See the [direct guide](docs/claude-cli-direct.md) for task and interaction boundaries. |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0`, `0.162.1`, `0.164.0` and `0.165.0`; Claude fixtures include `2.1.285`, with live observations on `2.1.295`/`2.1.296`. An otherwise eligible, complete `x.y.z` Claude version may attempt supported controls through runtime validation even without an exact regression profile. Actual identity, protocol and UI evidence determine availability; unknown dialogs are not guessed. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
-| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.12` (`next`), pinned AKK `0.16.4` |
-| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.15` (`next`), pinned AKK `0.16.4`. See its guide for previous RC, alpha and legacy coverage. |
+| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.13` (`next`), pinned AKK `0.16.5` |
+| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.16` (`next`), pinned AKK `0.16.5`. See its guide for previous RC, alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr versions are observations, not an allowlist: discovery verifies live identity and read capabilities, while input requires a matching CLI schema declaration or verified baseline behavior. An untested server without input evidence exposes only verified read capabilities. Desktop controls validate the live native contract. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.
