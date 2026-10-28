@@ -60,7 +60,6 @@ import {
   type TerminalDurableActivityState,
   type TerminalNativeIdentityState
 } from "./terminal-agent-bridge.js";
-import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import { terminalUserExplicitInputOwnerBlocked } from "./terminal-composer-classifier.js";
 import {
   captureCodexHumanStartedActiveTaskAnchor,
@@ -113,6 +112,7 @@ import {
   type TerminalListInventoryScan
 } from "./terminal-list-inventory.js";
 import {
+  claudePhysicalSendReadinessFromListState,
   collectTerminalListTerminalFacts,
   type EffectiveTerminalListState,
   type TerminalListPhysicalProcessIncarnation,
@@ -1921,7 +1921,7 @@ async function observeAutomatedInputComposerReady({
     terminalState.activity_state !== "awaiting_approval" &&
     terminalState.approval_state.blocked !== true;
   const physicalReadiness = session.agent === "claude"
-    ? claudeUserExplicitReadiness(terminalState.screen_excerpt) : undefined;
+    ? claudePhysicalSendReadinessFromListState(terminalState, options) : undefined;
   let userExplicitReady = physicalReadiness
     ? physicalReadiness.ready && userExplicitPromptSafe : userExplicitPromptSafe;
   const inputOwnerBlocked = terminalUserExplicitInputOwnerBlocked(terminalState.screen_excerpt);

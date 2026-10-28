@@ -2,7 +2,7 @@ import { exactClaudeComposerFrame, stripTerminalEscapeSequences } from "./termin
 
 export interface ClaudeUserExplicitReadiness {
   readonly ready: boolean;
-  readonly reason?: "foreground_running" | "foreground_unproven" | "composer_not_empty" |
+  readonly reason?: "screen_not_scanned" | "screen_unavailable" | "foreground_running" | "foreground_unproven" | "composer_not_empty" |
     "composer_unrecognized" | "footer_unrecognized" | "stash_not_empty" | "cleanup_marker_present";
   readonly message?: string;
 }

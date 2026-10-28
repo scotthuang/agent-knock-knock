@@ -320,7 +320,7 @@ export const listParameters = {
     },
     noApprovalScan: {
       type: "boolean",
-      description: "When true, list live terminals without scanning their panes for approval prompts."
+      description: "When true, skip pane reading, including approval, activity and input-readiness checks; actions that require those checks (including Claude terminal Send) may be unavailable. Omit this option or set false when listing terminals to send work."
     },
     terminalDebug: {
       type: "boolean",

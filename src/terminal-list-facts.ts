@@ -1,4 +1,4 @@
-import type { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import type { CodexOpenRootRolloutInventory } from
   "./agent-session-provider.js";
 import { isExactNativeThreadId } from "./managed-session.js";
@@ -71,6 +71,21 @@ export interface TerminalListComposerFacts {
   readonly claudeUserExplicitReadiness?: ReturnType<typeof claudeUserExplicitReadiness>;
   /** Positive evidence that a non-Composer UI surface owns terminal input. */
   readonly inputOwnerBlocked: boolean;
+}
+
+/** A skipped or failed capture says nothing about the contents of the Composer. */
+export function claudePhysicalSendReadinessFromListState(
+  state: TerminalListState, options: { noApprovalScan?: boolean }
+): ReturnType<typeof claudeUserExplicitReadiness> {
+  if (options.noApprovalScan) return {
+    ready: false, reason: "screen_not_scanned",
+    message: "AKK did not scan this window because noApprovalScan is enabled. Call List again with noApprovalScan:false (CLI: omit --no-approval-scan) to check input readiness."
+  };
+  if (typeof state.screen_excerpt !== "string") return {
+    ready: false, reason: "screen_unavailable",
+    message: "AKK could not read this window. Open Status to inspect the capture error, restore terminal-provider access, then refresh List with pane scanning enabled."
+  };
+  return claudeUserExplicitReadiness(state.screen_excerpt);
 }
 
 export interface TerminalListPhysicalProcessIncarnation {

@@ -659,6 +659,8 @@ test("Claude terminal-only List retains verified explicit physical Send independ
 
 test("Claude physical readiness explains draft and foreground blockers before missing native identity", () => {
   const reasons = [
+    ["screen_not_scanned", /did not scan/u, /noApprovalScan.*false/u],
+    ["screen_unavailable", /could not read/u, /Status.*capture error/u],
     ["composer_not_empty", /unsent draft/u, /Send, save, or clear/u],
     ["foreground_running", /still executing its current turn/u, /Wait.*finish/u],
     ["foreground_unproven", /cannot verify.*foreground turn has finished/u, /Wait.*done/u],

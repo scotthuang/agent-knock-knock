@@ -2560,6 +2560,65 @@ test("Claude managed Send eligibility uses the observed empty composer and remai
   }
 });
 
+test("Claude List distinguishes missing screen observations from unsafe Composer frames and recovers on refresh", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-list-screen-evidence-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const completeScreen = [
+    ...Array.from({ length: 90 }, (_, index) => `Historical output ${index}: ${"x".repeat(80)}`),
+    "✻ Brewed for 7m 17s · done 13:15",
+    "new task? /clear to save 208.8k tokens",
+    "─".repeat(100),
+    "❯",
+    "─".repeat(100),
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+  ].join("\n");
+  assert.ok(completeScreen.length > 4000);
+  const excerpt = createClaudeTerminalAgentAdapter().inspectScreen({ screen: completeScreen }).screenExcerpt;
+  assert.ok(excerpt.length <= 4000 && excerpt.length < completeScreen.length);
+  assert.ok(excerpt.includes("\n❯\n"), "real Claude excerpt retains the multiline main Composer at the tail");
+  let screen: string | undefined = completeScreen;
+  let statusError: Error | undefined;
+  const fixture = await createCodexRolloutListFixture(root, "completed", false,
+    {}, "human-only", true, false, completeScreen, {
+      agent: "claude", agentVersion: "2.1.295", nativeIdentityObservation: "verified_absent",
+      statusScreen: () => screen, statusError: () => statusError
+    });
+  const cases: Array<{ name: string; screen?: string; error?: Error; noApprovalScan?: boolean; reason?: string }> = [
+    { name: "scan explicitly disabled", screen: completeScreen, noApprovalScan: true, reason: "screen_not_scanned" },
+    { name: "capture fails", error: new Error("terminal capture unavailable"), reason: "screen_unavailable" },
+    { name: "capture has no excerpt", reason: "screen_unavailable" },
+    { name: "observed incomplete frame", screen: "❯\n", reason: "composer_unrecognized" },
+    { name: "observed user draft", screen: completeScreen.replace("\n❯\n", "\n❯ preserve my draft\n"), reason: "composer_not_empty" },
+    { name: "fresh complete screen", screen: completeScreen }
+  ];
+  for (const scenario of cases) {
+    screen = scenario.screen;
+    statusError = scenario.error;
+    const previousStatusCalls = fixture.observationCounts.status;
+    const observed = await fixture.facade.observeExactTerminal({
+      options: { storeDir: fixture.storeDir, noApprovalScan: scenario.noApprovalScan },
+      terminalId: fixture.terminalId
+    });
+    assert.equal(observed.state, "available", scenario.name);
+    if (observed.state !== "available") continue;
+    assert.equal(fixture.observationCounts.status - previousStatusCalls,
+      scenario.noApprovalScan ? 0 : 1, `${scenario.name}: disabled scanning never captures the pane`);
+    const readiness = observed.terminal.physical_send_readiness as Record<string, unknown>;
+    const actions = observed.terminal.available_actions as Record<string, any>;
+    assert.equal(readiness.ready, scenario.reason === undefined, scenario.name);
+    assert.equal(readiness.reason, scenario.reason, scenario.name);
+    if (scenario.reason) {
+      assert.equal(actions.send, undefined, `${scenario.name}: absent or unsafe evidence cannot authorize physical Send`);
+      if (scenario.reason === "screen_not_scanned") assert.match(String(readiness.message), /noApprovalScan|no-approval-scan/u);
+      if (scenario.reason === "screen_unavailable") assert.match(String(readiness.message), /Status/u);
+    } else {
+      assert.equal(actions.send?.scope, "terminal_user_explicit", "refresh restores the same pane's physical Send entry");
+      assert.equal(actions.send?.arguments?.selector, fixture.terminalId);
+      assert.equal(typeof actions.send?.arguments?.expected_terminal_token, "string");
+    }
+  }
+});
+
 async function createCodexRolloutListFixture(
   root: string,
   outcome: "pending" | "completed" | "aborted" | "malformed" | "partial",
@@ -2582,6 +2641,8 @@ async function createCodexRolloutListFixture(
     modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
     claudeReader?: () => readonly ClaudeIdentityRow[];
     claudeWindowRole?: () => "background_view" | undefined;
+    statusScreen?: () => string | undefined;
+    statusError?: () => Error | undefined;
   } = {}
 ) {
   const agent = fixtureOptions.agent ?? "codex";
@@ -2854,6 +2915,9 @@ async function createCodexRolloutListFixture(
       : `terminal:v2:tmux:${agent}:durable:0.0:${value.pid}`,
     status: async () => {
       observationCounts.status += 1;
+      const statusError = fixtureOptions.statusError?.();
+      if (statusError) throw statusError;
+      const screen = fixtureOptions.statusScreen ? fixtureOptions.statusScreen() : composerScreen;
       return {
         approval_state: {
           scanned: true,
@@ -2867,7 +2931,8 @@ async function createCodexRolloutListFixture(
           : fixtureOptions.screenActivityState === "unknown"
             ? "historical viewport does not prove current terminal activity"
             : "idle-looking fixture screen",
-        screen: { excerpt: composerScreen }
+        screen: { excerpt: screen === undefined ? undefined : fixtureOptions.statusScreen
+          ? codexAdapter.inspectScreen({ screen }).screenExcerpt : screen }
       };
     },
     inspectModelControlResidual: async () => {
