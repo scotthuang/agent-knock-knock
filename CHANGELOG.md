@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.6 / Pi 0.1.0-poc.14 / DeepSeek Harness 0.1.0-rc.17 — 2026-10-28
+
+- Align Claude List offers with managed Send and native thread-lifecycle admission. Check the applicable transcript-boundary and exact idle-reader requirements, retain bounded readiness diagnostics in compact List, and provide actionable recovery guidance. Execution still captures fresh evidence; List observations do not grant cached input authority.
+- Reuse safe Session reattachment for Claude New thread, including Clear’s existing new-thread operation, after a conclusively inactive prior process. Validate the original displayed token and pre-input state under the terminal/Store locks, preserve Session history, advance the binding generation, then refresh and compare native-thread and process-incarnation identity.
+- Refuse reattachment when a source transition journal is unresolved, including one appearing during asynchronous ownership verification. Preserve live/unknown-owner, pending-Turn, cross-Store, revision/CAS, approval and draft safeguards; managed operations never silently fall back to physical input. A resumed native thread UUID is distinct from process incarnation and may legitimately remain unchanged.
+- Retain public parameters, action contract **35**, compact List **v4**, Watch schema **3** and Store writer protocol **11**. This release adds no new live destructive-lifecycle or external-channel delivery claim.
+- Release Pi **0.1.0-poc.14** and DeepSeek Harness **0.1.0-rc.17**, both pinning core **0.16.6** with synchronized Skills. Core remains on `latest`; connectors remain prereleases on `next`, with unchanged Host version ranges.
+
 ## 0.16.5 / Pi 0.1.0-poc.13 / DeepSeek Harness 0.1.0-rc.16 — 2026-10-28
 
 - Distinguish Claude List scans that were explicitly skipped (`screen_not_scanned`) from captures that failed or returned no screen (`screen_unavailable`). Do not misdiagnose either case as an unrecognized Composer; provide the applicable rescan or capture recovery guidance.

@@ -35,7 +35,7 @@ test("all pinned AKK schemas pass the shared supported DSH validator", async () 
       () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
       /capability handshake/u,
     );
-    // Contract for core 0.16.5 pinned in this connector's lockfile.
+    // Contract for core 0.16.6 pinned in this connector's lockfile.
     // List guidance and Claude physical-input descriptions evolve with this core;
     // the catalog retains 27 tool names.
     assert.equal(adapter.tools.length, 27);
