@@ -133,7 +133,8 @@ test("model-control registry is the canonical verified profile catalog", () => {
         ["0.159.3", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01593],
         ["0.160.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01600],
         ["0.162.1", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01621],
-        ["0.164.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01640]
+        ["0.164.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01640],
+        ["0.165.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01650]
       ] as const).map(([agentVersion, behaviorProfile]) => ({
         agent: "codex",
         agentVersion,

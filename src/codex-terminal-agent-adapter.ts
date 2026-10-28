@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { codexFolderTrustPromptVisible } from "./codex-folder-trust-surface.js";
 import { captureCodexFullscreenComposerFrame } from
   "./codex-fullscreen-composer-proof.js";
 import {
@@ -1057,6 +1058,13 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
 }
 
 export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDetection {
+  if (codexFolderTrustPromptVisible(screen)) {
+    return {
+      approvable: false,
+      reason: "Codex folder access requires a direct user decision in the original terminal; AKK cannot grant saved folder trust",
+      promptKind: "folder_trust"
+    };
+  }
   const userVerification = codexUserVerificationSurface(screen);
   if (userVerification !== undefined) {
     return {
@@ -1135,7 +1143,8 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
 }
 
 export function isCodexApprovalPromptVisible(screen: string): boolean {
-  return codexUserVerificationSurface(screen) !== undefined ||
+  return codexFolderTrustPromptVisible(screen) ||
+    codexUserVerificationSurface(screen) !== undefined ||
     codexApprovalPromptRegion(screen).visible;
 }
 
@@ -1147,7 +1156,9 @@ export function detectCodexActivityState(
   if (approval.approvable || isCodexApprovalPromptVisible(screen)) {
     return {
       state: "awaiting_approval",
-      reason: "current Codex approval prompt is visible"
+      reason: approval.promptKind === "folder_trust"
+        ? "current Codex folder access dialog requires a direct user decision"
+        : "current Codex approval prompt is visible"
     };
   }
 

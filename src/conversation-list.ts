@@ -6,12 +6,16 @@ import { presentConversationList, type ConversationListPresentationOptions } fro
 import { withConversationUsage } from "./conversation-usage-guidance.js";
 import { recordValue } from "./value-guards.js";
 import { withNativeStoreAuthorityConflict } from "./native-store-authority-projection.js";
+import { codexFolderTrustBlocked } from "./codex-folder-trust-surface.js";
 
 type Row = Record<string, unknown>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter(item => recordValue(item)) : [];
 const terminalOnlyActions = new Set(["native_inspect", "model_options", "set_model", "cancel", "new_thread", "clear_thread",
   "resume_thread", "list_resumable_threads", "identify_foreground", "repair_model_control", "reconcile_binding", "transfer_store_authority", "close"]);
 const claudeSpecialActions = new Set(["approve", "respond", "respond_interaction", "permission_options", "set_permissions"]);
+const folderTrustInputActions = new Set(["send", "approve", "respond", "respond_interaction", "interaction_respond",
+  "set_permissions", "model_options", "set_model", "cancel", "new_thread", "clear_thread", "resume_thread",
+  "list_resumable_threads", "identify_foreground", "repair_model_control", "retry_submission"]);
 
 export function isTerminalSpecificConversationAction(agent: unknown, name: string): boolean {
   return terminalOnlyActions.has(name) || agent === "claude" && claudeSpecialActions.has(name);
@@ -62,18 +66,27 @@ function standaloneConversation(terminal: Row, physical?: Row): Row {
   const blocked = claude && !physicalSend ? readiness?.ready === false && typeof readiness.reason === "string"
     ? `terminal_${readiness.reason}` : claudeManagedTerminalSendBlockReason(sendFacts) : undefined;
   const { send_blocked_reason: _terminalBlocked, ...unblockedTerminal } = terminal;
-  return { ...(physicalSend ? unblockedTerminal : terminal), conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
+  const conversation = { ...(physicalSend ? unblockedTerminal : terminal), conversation_id: terminal.id, title: terminal.workspace ?? terminal.cwd ?? terminal.id,
     route_preference: codex ? "codex_backend" : claude && !physicalSend ? "managed_terminal" : "terminal",
     route_status: codex ? "identity_unresolved" : "terminal_only", available_actions: standaloneActions(terminal, physicalSend, blocked),
     ...(claude ? { capabilities: { ...recordValue(terminal.capabilities), send: !blocked } } : {}),
     ...(blocked ? { send_blocked_reason: blocked } : {}) };
+  return folderTrustTerminalControls(conversation);
 }
 
 /** A single proven terminal may offer its own special controls; its exact action targets stay unchanged. */
 export function withExactTerminalActions(native: Row): Row {
   if (!["codex_cli", "claude_cli"].includes(String(native.source))) return native;
-  const controls = rows(native.terminal_controls);
-  if (controls.length !== 1) return withExactStoreAuthority(native, controls);
+  const controls = rows(native.terminal_controls).map(folderTrustTerminalControls);
+  native = { ...native, terminal_controls: controls };
+  if (native.source === "codex_cli") {
+    // A backend's own version and a saved thread's cliVersion are not the
+    // currently attached frontend executable version.
+    if (controls.length === 1 && typeof controls[0].agent_version === "string") {
+      native = { ...native, agent_version: controls[0].agent_version };
+    }
+  }
+  if (controls.length !== 1) return withExactControlRestrictions(native, controls);
   const actions = { ...recordValue(native.available_actions) };
   const capabilities = { ...recordValue(native.capabilities) };
   for (const [name, action] of Object.entries(recordValue(controls[0].available_actions) ?? {})) {
@@ -85,11 +98,56 @@ export function withExactTerminalActions(native: Row): Row {
   }
   if (native.source === "claude_cli") Object.assign(capabilities, claudeNativeControlCapabilities(actions, controls[0]));
   const actionable = capabilities.interaction_respond === true || capabilities.approve === true;
-  return withExactStoreAuthority({ ...native, available_actions: actions, capabilities,
+  return withExactControlRestrictions({ ...native, available_actions: actions, capabilities,
     ...(native.source === "claude_cli" && native.attention_required === true && actionable ? {
       manual_required: false, next_action: "respond_to_interaction",
       interaction_hint: { ...recordValue(native.interaction_hint), actionable: true, source: "verified_terminal" }
     } : {}) }, controls);
+}
+
+function withFolderTrustBlock(native: Row, terminal: Row): Row {
+  const backendId = native.source === "codex_cli" ? String(native.conversation_id ?? native.id) : undefined;
+  const controls = folderTrustActionProjection(native, backendId);
+  return { ...native, ...controls,
+    ...(backendId ? { backend_activity_state: native.backend_activity_state ?? native.activity_state } : {}), activity_state: "blocked",
+    approval_state: terminal.approval_state, manual_required: true, attention_required: true,
+    waiting_for: "folder access decision", send_blocked_reason: "codex_folder_trust_required",
+    ...(Array.isArray(native.interaction_state) ? { interaction_state: native.interaction_state.map(value => {
+      const interaction = recordValue(value);
+      return interaction ? { ...interaction, ...folderTrustActionProjection(interaction, backendId) } : value;
+    }) } : {}) };
+}
+
+function folderTrustActionProjection(row: Row, backendId?: string): Row {
+  const original = recordValue(row.available_actions) ?? {};
+  const actions = Object.fromEntries(Object.entries(original).filter(([name, action]) =>
+    folderTrustActionAllowed(name, action, backendId)));
+  const capabilities = { ...recordValue(row.capabilities) };
+  for (const name of new Set([...Object.keys(capabilities), ...Object.keys(original), "send", "approve", "interaction_respond", "set_permissions"])) {
+    if (!folderTrustActionAllowed(name, original[name], backendId)) capabilities[name] = false;
+  }
+  return { available_actions: actions, capabilities };
+}
+
+function folderTrustActionAllowed(name: string, action: unknown, backendId?: string): boolean {
+  if (folderTrustInputActions.has(name)) return false;
+  const offer = recordValue(action), input = recordValue(offer?.input ?? offer?.arguments);
+  if (name === "close" && input?.expected_transition_id) return false;
+  if (!["native_inspect", "permission_options"].includes(name)) return true;
+  if (!backendId || input?.conversation_id !== backendId || input?.terminal_id) return false;
+  return name !== "native_inspect" || ["status", "permissions"].includes(String(input.inspection ?? input.action ?? "status"));
+}
+
+function folderTrustTerminalControls(terminal: Row): Row {
+  return terminal.agent === "codex" && codexFolderTrustBlocked(terminal.approval_state)
+    ? withFolderTrustBlock(terminal, terminal) : terminal;
+}
+
+/** Apply restrictions after action promotion so terminal offers cannot revive input. */
+function withExactControlRestrictions(native: Row, controls: readonly Row[]): Row {
+  const projected = withExactStoreAuthority(native, controls);
+  const blocked = native.source === "codex_cli" && controls.find(control => codexFolderTrustBlocked(control.approval_state));
+  return blocked ? withFolderTrustBlock(projected, blocked) : projected;
 }
 
 function withExactStoreAuthority(native: Row, controls: readonly Row[]): Row {
@@ -118,9 +176,9 @@ function routedTerminalControls(terminal: Row, native: Row): Row {
     if (capabilities) capabilities[name] = Boolean(available);
   }
   const transfer = recordValue(recordValue(terminal.available_actions)?.transfer_store_authority);
-  return withNativeStoreAuthorityConflict({ ...terminal, available_actions: actions, ...(capabilities ? { capabilities } : {}) },
+  return folderTrustTerminalControls(withNativeStoreAuthorityConflict({ ...terminal, available_actions: actions, ...(capabilities ? { capabilities } : {}) },
     recordValue(terminal.native_store_authority) ? { ...recordValue(terminal.native_store_authority), send_after_transfer: false } : undefined,
-    transfer ? { transfer_store_authority: transfer } : {});
+    transfer ? { transfer_store_authority: transfer } : {}));
 }
 
 /** Public conversation inventory; legacy endpoint arrays remain private-action/diagnostic inputs. */

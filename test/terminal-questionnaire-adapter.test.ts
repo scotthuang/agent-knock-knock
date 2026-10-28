@@ -292,7 +292,7 @@ test("Codex 0.153.4 exact option snapshot yields one semantic question", () => {
     "  tab to add notes | enter to submit answer | esc to interrupt");
 });
 
-for (const version of ["0.162.1", "0.164.0"]) test(`Codex ${version} blocking questions use exact macOS navigation without reusing older profiles`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`Codex ${version} blocking questions use exact macOS navigation without reusing older profiles`, () => {
   const profile = `codex/${version}/request-user-input-v5`;
   assert.equal(codexNativeQuestionnaireProfile(version), profile);
   assert.equal(codexNativeQuestionnaireProfile("0.162.2"), undefined);

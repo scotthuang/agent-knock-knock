@@ -21,6 +21,110 @@ function native() {
     available_actions: { send: { tool: "agent_knock_knock_send", input: { conversation_id: nativeId } } } };
 }
 
+test("exact frontend versions remain distinct from a newer backend", () => {
+  for (const frontend of ["0.162.1", "0.164.0", "0.165.0"]) {
+    const physical = terminal({ agent_version: frontend });
+    const result = unifiedConversationList({ terminals: [physical],
+      codex_cli_sessions: [{ ...native(), backend_version: "0.165.0" }] }, [physical]);
+    const row = result.conversations[0];
+    assert.equal(row.agent_version, frontend);
+    assert.equal(row.backend_version, "0.165.0");
+    assert.equal((compactAkkListModelProjection(result) as any).conversations[0].agent_version, frontend);
+  }
+  const unproven = terminal({ agent_version: "0.162.1", native_agent_session_id: undefined,
+    native_agent_identity_observation: { status: "verified_absent" } });
+  const row = unifiedConversationList({ terminals: [unproven],
+    codex_cli_sessions: [{ ...native(), backend_version: "0.165.0" }] }, [unproven]).conversations[0];
+  assert.equal(row.agent_version, undefined, "workspace grouping never proves the frontend version");
+});
+
+test("folder trust removes stale physical actions after promotion while preserving native reads and record recovery", () => {
+  const inputNames = ["send", "approve", "respond_interaction", "set_permissions", "model_options", "set_model", "cancel",
+    "new_thread", "clear_thread", "resume_thread", "list_resumable_threads", "identify_foreground", "repair_model_control", "retry_submission"];
+  const physicalInputNames = [...inputNames, "native_inspect", "permission_options"];
+  const recordAction = (name: string, target = "managed-turn") => ({ tool: `agent_knock_knock_${name}`, arguments: { turn_id: target } });
+  const physicalActions = Object.fromEntries(physicalInputNames.map(name => [name,
+    { tool: `agent_knock_knock_${name}`, arguments: { terminal_id: terminalId, expected_binding_token: "stale-binding" } }]));
+  const physical = terminal({ agent_version: "0.165.0", activity_state: "blocked",
+    approval_state: { scanned: true, blocked: true, approvable: false, prompt_kind: "folder_trust" },
+    capabilities: Object.fromEntries([...physicalInputNames, "status", "watch", "close"].map(name => [name, true])),
+    available_actions: { ...physicalActions, status: { tool: "agent_knock_knock_status" }, close: recordAction("close") } });
+  const safeNames = ["status", "watch", "native_inspect", "permission_options", "close", "recover", "renew", "retry_callback", "unwatch"];
+  const safeActions = Object.fromEntries(safeNames.map(name => [name, name === "close" ? recordAction(name, "native-watch")
+    : { tool: `agent_knock_knock_${name}`, input: { conversation_id: nativeId } }]));
+  const backend = { ...native(), activity_state: "idle", backend_version: "0.165.0",
+    capabilities: { ...Object.fromEntries([...safeNames, ...inputNames].map(name => [name, true])), interaction_respond: true },
+    available_actions: { ...physicalActions, ...safeActions },
+    interaction_state: [{ available_actions: { approve: physicalActions.approve, respond_interaction: physicalActions.respond_interaction } }] };
+  const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [backend] }, [physical]);
+  const row = result.conversations[0] as any;
+  assert.equal(result.conversations.length, 1);
+  assert.equal(row.activity_state, "blocked"); assert.equal(row.backend_activity_state, "idle");
+  assert.equal(row.capabilities.send, false); assert.equal(row.capabilities.approve, false);
+  assert.equal(row.capabilities.interaction_respond, false); assert.equal(row.capabilities.set_permissions, false);
+  assert.equal(row.capabilities.status, true); assert.equal(row.capabilities.watch, true);
+  assert.equal(row.available_actions.send, undefined);
+  assert.equal(row.terminal_controls[0].available_actions.send, undefined);
+  for (const name of inputNames) {
+    assert.equal(row.available_actions[name], undefined, `${name} cannot be promoted or remain on the native row`);
+    assert.equal(row.capabilities[name], false);
+  }
+  for (const name of physicalInputNames) {
+    assert.equal(row.terminal_controls[0].available_actions[name], undefined, `${name} cannot remain scoped to a blocked terminal`);
+    assert.equal(row.terminal_controls[0].capabilities[name], false);
+  }
+  for (const name of safeNames) assert.deepEqual(row.available_actions[name], safeActions[name], `${name} stays on its existing native/record route`);
+  assert.deepEqual(row.interaction_state[0].available_actions, {});
+  assert.deepEqual(row.terminal_controls[0].available_actions.close, recordAction("close"));
+  assert.equal(row.terminal_controls[0].available_actions.watch, safeActions.watch);
+  assert.equal(withExactTerminalActions(row).backend_activity_state, "idle", "repeated Status projection keeps the actual backend state");
+  const compact = (compactAkkListModelProjection(result) as any).conversations[0];
+  assert.equal(compact.approval_state.prompt_kind, "folder_trust");
+  assert.equal(compact.approval_state.approvable, false);
+  assert.equal(compact.available_actions?.send, undefined);
+  assert.match(compact.usage.summary, /folder access decision/);
+  assert.doesNotMatch(compact.usage.summary, /Ready to receive/);
+  assert.match(compact.usage.next_steps.join(" "), /yourself.*original terminal/);
+  for (const name of inputNames) assert.equal(compact.available_actions?.[name], undefined);
+  assert.deepEqual(Object.keys(compact.scoped_controls[0].available_actions), ["close"], "scoped projection retains record close, never physical input");
+  for (const name of ["status", "watch", "native_inspect", "permission_options"]) assert.equal(compact.available_actions[name], true);
+  assert.ok((physical.available_actions as Record<string, unknown>).send, "projection does not mutate the raw diagnostic evidence");
+});
+
+test("folder trust projection rejects prepromoted physical reads and lifecycle close without suppressing unrelated prompts", () => {
+  const inputActions = Object.fromEntries(["native_inspect", "permission_options", "model_options"].map(name => [name,
+    { tool: `agent_knock_knock_${name}`, arguments: { terminal_id: terminalId } }]));
+  const lifecycleClose = { tool: "agent_knock_knock_close", arguments: { conversation_id: terminalId, expected_transition_id: "transition" } };
+  const blocked = terminal({ approval_state: { blocked: true, approvable: false, prompt_kind: "folder_trust" },
+    available_actions: { ...inputActions, close: lifecycleClose }, capabilities: { native_inspect: true, permission_options: true } });
+  const row = withExactTerminalActions({ ...native(), available_actions: { ...inputActions, close: lifecycleClose },
+    terminal_controls: [blocked, terminal({ id: "terminal:v2:tmux:codex:other:0.0:124" })] }) as any;
+  assert.deepEqual(row.available_actions, {}, "multiple aliases cannot leave already promoted physical operations");
+  assert.deepEqual(row.terminal_controls[0].available_actions, {});
+  assert.equal(row.capabilities.native_inspect, false);
+  assert.equal(row.capabilities.permission_options, false);
+  const otherPrompt = { ...blocked, approval_state: { blocked: true, approvable: false, prompt_kind: "unknown" } };
+  const unchanged = withExactTerminalActions({ ...native(), terminal_controls: [otherPrompt] }) as any;
+  assert.deepEqual(unchanged.available_actions.send, native().available_actions.send);
+  assert.equal(unchanged.capabilities.send, true, "this policy is limited to an identified Folder access modal");
+  assert.equal(unchanged.available_actions.model_options, inputActions.model_options);
+});
+
+test("an unassociated folder decision stays visible without being assigned to another same-directory backend", () => {
+  const physical = terminal({ native_agent_session_id: undefined, native_agent_identity_observation: { status: "verified_absent" },
+    activity_state: "blocked", capabilities: { send: true, status: true, model_options: true },
+    approval_state: { scanned: true, blocked: true, approvable: false, prompt_kind: "folder_trust" },
+    available_actions: { send: { tool: "agent_knock_knock_send" }, model_options: { tool: "agent_knock_knock_model_options" } } });
+  const result = unifiedConversationList({ terminals: [physical], codex_cli_sessions: [native()] }, [physical]);
+  assert.equal(result.conversations.length, 2);
+  assert.deepEqual(result.conversations[0].terminal_aliases, []);
+  assert.equal((result.conversations[0].capabilities as any).send, true, "cwd alone cannot change another thread's authority");
+  assert.match((result.conversations[1].usage as any).summary, /folder access decision/);
+  assert.deepEqual(result.conversations[1].available_actions, {});
+  assert.equal((result.conversations[1].capabilities as any).send, false);
+  assert.equal((result.conversations[1].capabilities as any).model_options, false);
+});
+
 function claudePair() {
   const processStart = "Mon Oct 12 01:02:03 2026";
   const id = createClaudeNativeConversationId({ configDir: "/fixture/claude", sessionId: thread, pid: 123, processStart });

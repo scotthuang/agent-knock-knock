@@ -1,6 +1,7 @@
 import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { observeCodexPermissionSurface } from "./codex-permission-surface.js";
+import { codexFolderTrustPromptVisible } from "./codex-folder-trust-surface.js";
 import { createHash } from "node:crypto";
 import {
   captureCodexFullscreenComposerFrame,
@@ -41,6 +42,7 @@ export function codexAutomatedInputComposerReady(input: {
   runtime?: TerminalRuntimeIdentity;
   adapter(): TerminalAgentAdapter;
 }): boolean {
+  if (codexFolderTrustPromptVisible(input.screen)) return false;
   const sparkleEmpty = exactCodexAstraSparkleReadyStyledComposerCapture(
     input.screen, input.runtime?.agentVersion
   );
@@ -142,7 +144,7 @@ function exactClaudeModelControlComposerCapture(
 function codexBlockingModalVisible(screen: string): boolean {
   const tail = screen.replace(/\r\n?/gu, "\n").split("\n").slice(-80)
     .join("\n");
-  return codexPermissionInputOwnerVisible(screen) ||
+  return codexFolderTrustPromptVisible(screen) || codexPermissionInputOwnerVisible(screen) ||
     /\b(?:press|use)\s+(?:esc|escape)\s+to\s+(?:cancel|close|dismiss)\b/iu
     .test(tail) ||
     /\besc\s+to\s+cancel\b/iu.test(tail) ||
@@ -207,7 +209,7 @@ function terminalUserExplicitInputOwnerBlocked(
     (line, index) => index > modalFooterIndex &&
       (CODEX_COMPOSER_MARKER.test(line) || /^\s*❯(?:\s|\u00a0|$)/u.test(line))
   );
-  return codexPermissionInputOwnerVisible(screen) ||
+  return codexFolderTrustPromptVisible(screen) || codexPermissionInputOwnerVisible(screen) ||
     modalFooterIndex >= 0 && !laterMainComposer ||
     codexActiveWriterViewerVisible(screen) ||
     ["expanded", "ambiguous"].includes(

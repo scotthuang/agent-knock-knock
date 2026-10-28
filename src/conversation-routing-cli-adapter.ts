@@ -21,6 +21,7 @@ import { expandHome } from "./cli-command-runtime.js";
 import { conversationCommandPolicy, conversationRoutedOptions, prepareConversationTerminalOptions, routedCommand, type ConversationRoutingCliPorts } from "./conversation-routing-commands.js";
 import { withExactTerminalActions } from "./conversation-list.js";
 import { assertNativeRuntimeStoreAuthority, withNativeRuntimeStoreAuthority } from "./native-store-authority-runtime.js";
+import { codexFolderTrustBlocked } from "./codex-folder-trust-surface.js";
 
 type Options = Record<string, unknown>;
 type Row = Record<string, unknown>;
@@ -56,6 +57,7 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
   if (!target || !command) return false;
   const options = { ...original };
   let observedTerminals: Row[] | undefined;
+  let selectedTerminal: Row | undefined;
   const sourcePorts = ports;
   ports = { ...ports, terminals: async (...args) => observedTerminals = await sourcePorts.terminals(...args) };
   if (command === "send") options.messageId ??= randomUUID();
@@ -75,12 +77,20 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
       select: async () => canonicalRouteSelection(await ((input ? selectLegacyConversationRoute({ input, nativeTasks: runtime.tasks,
         expectedTerminalToken: nonBlankString(options.expectedTerminalToken), managedOnly: options.managedOnly === true,
         terminalRuntimeDir }) : undefined)
-        ?? selectConversationRoute({ command, target, options, runtime, ports, identityOptions }))),
+        ?? selectConversationRoute({ command, target, options, runtime, ports, identityOptions,
+          captureTerminalIdentity: terminal => { selectedTerminal = { ...terminal }; } }))),
       prepare: async choice => {
         if (choice.route === "native" && nativeAuthorityMutations.has(command)) {
           assertNativeRuntimeStoreAuthority({ nativeThreadId: parseCodexNativeConversationId(choice.targetId).threadId,
             storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir });
-          assertNativeMutationStoreAuthority(choice.targetId, observedTerminals ?? await ports.terminals(options));
+          // Re-observe after route selection: a frontend can enter a local trust dialog
+          // while its previously loaded backend still reports idle.
+          let current = await ports.terminals(options, isCodexNativeConversationId(target)
+            ? undefined : canonicalTerminalRouteId(target));
+          if (!isCodexNativeConversationId(target)) {
+            current = [refreshSelectedNativeTerminal(target, choice.targetId, selectedTerminal, current)];
+          }
+          assertNativeMutationStoreAuthority(choice.targetId, current);
         }
         const selectedOptions = conversationRoutedOptions(command, options, choice.route, choice.targetId);
         const selectedCommand = routedCommand(command, options, choice.route);
@@ -103,13 +113,37 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
   } finally { await runtime.close(); }
 }
 
+function refreshSelectedNativeTerminal(target: string, nativeId: string, prior: Row | undefined, rows: readonly Row[]): Row {
+  const fail = () => { throw new Error("The selected terminal lost its exact backend identity before dispatch; no input was sent"); };
+  if (rows.length !== 1 || !terminalRouteIdsMatch(rows[0].id, target)) return fail();
+  let current = rows[0];
+  assertFolderTrustResolved(current);
+  if (prior && ["pid", "native_agent_process_uuid", "native_agent_process_birth"].some(key => prior[key] !== current[key])) return fail();
+  // Retain only this invocation's completed /status transaction, rechecked
+  // against the same physical process, fresh readiness and exact native home.
+  if (prior?._routing_inspection_thread_id) {
+    current = withClosedStatusInspection(prior, current, { status: "observed", inspection: "status", agent: "codex",
+      terminal_id: target, native_thread_id: prior._routing_inspection_thread_id });
+  }
+  if (proveNativeTerminalRoute(nativeId, current).status !== "exact") return fail();
+  return current;
+}
+
 function assertNativeMutationStoreAuthority(targetId: string, terminals: readonly Row[]): void {
   for (const terminal of terminals) {
     if (proveNativeTerminalRoute(targetId, terminal).status !== "exact") continue;
+    assertFolderTrustResolved(terminal);
     const authority = recordValue(terminal.native_store_authority);
     if (!authority || !["conflict", "transferring"].includes(String(authority.state))) continue;
     throw new Error("Native thread authority belongs to another Store or has an incomplete transfer; " +
       "refresh AKK list and use its transfer_store_authority recovery before this native mutation");
+  }
+}
+
+function assertFolderTrustResolved(terminal: Row): void {
+  if (terminal.agent === "codex" && codexFolderTrustBlocked(terminal.approval_state)) {
+    throw new Error("Codex is waiting for a folder access decision in the original terminal; " +
+      "resolve it there and refresh AKK. No task or approval input was sent");
   }
 }
 
@@ -123,9 +157,9 @@ async function projectNativeStatusStoreAuthority(input: {
   try { terminals = input.observedTerminals ?? await input.ports.terminals(input.options); }
   catch { return input.result; }
   const exact = terminals.filter(row => proveNativeTerminalRoute(input.choice.targetId, row).status === "exact");
-  if (exact.length !== 1) return input.result;
+  if (!exact.length) return input.result;
   const { terminal_controls: _controls, ...projection } = withExactTerminalActions({
-    ...input.result, terminal_aliases: [exact[0].id], terminal_controls: exact
+    ...input.result, terminal_aliases: exact.map(row => row.id), terminal_controls: exact
   });
   return projection;
 }
@@ -167,12 +201,15 @@ async function prepareTerminalFallback(input: { command: string; target: string;
 async function selectConversationRoute(input: {
   command: string; target: string; options: Options; runtime: CodexNativeRuntime;
   ports: ConversationRoutingCliPorts; identityOptions: { defaultCodexHome?: string };
+  captureTerminalIdentity?(terminal: Row): void;
 }): Promise<Selection> {
   const { target, options, runtime, ports, identityOptions } = input;
   if (isCodexNativeConversationId(target)) return selectNativeConversationRoute(input);
   const terminalId = canonicalTerminalRouteId(target);
   const terminals = await ports.terminals(options, terminalId);
   if (terminals.length !== 1 || !terminalRouteIdsMatch(terminals[0].id, target)) throw new Error("The exact selected terminal is unavailable");
+  input.captureTerminalIdentity?.(terminals[0]);
+  if (nativeAuthorityMutations.has(input.command)) assertFolderTrustResolved(terminals[0]);
   const policy = conversationCommandPolicy(input.command, options)!;
   if (!policy.backend) return { route: "terminal", targetId: terminalId, reason: "backend_operation_unavailable" };
   const discovery = await runtime.catalog.discover();
@@ -229,6 +266,7 @@ function mayInspectMissingAlias(terminal: Row): boolean {
 
 async function inspectMissingAlias(input: {
   target: string; options: Options; ports: ConversationRoutingCliPorts; identityOptions: { defaultCodexHome?: string };
+  captureTerminalIdentity?(terminal: Row): void;
 }, before: Row, rows: Row[]) {
   const prior = { ...before };
   if (!terminalRouteIdsMatch(prior.id, input.target)) throw new Error("Native status inspection did not find the exact selected terminal; no task input was sent");
@@ -244,6 +282,7 @@ async function inspectMissingAlias(input: {
   const result = associateConversationRoutes([inspected], rows, input.identityOptions);
   const ambiguous = result.unassociated.find(item => item.reason !== "matching_loaded_backend_not_found");
   if (ambiguous) throw new Error(`Native status inspection could not safely resolve its backend: ${ambiguous.reason}; no task input was sent`);
+  if (result.associations.length === 1) input.captureTerminalIdentity?.(inspected);
   return result.associations[0];
 }
 

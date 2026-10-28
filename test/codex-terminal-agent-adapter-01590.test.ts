@@ -42,7 +42,7 @@ const observe = (screen: string, expectedAgentVersion = "0.159.0") => observeCod
   operation: { kind: "status" }, screen, expectedAgentVersion
 });
 
-for (const version of ["0.162.1", "0.164.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
   // Public rust-v0.162.1 status/card.rs changed only this informational URL.
   // Synthetic account, path and UUID deliberately contain no local evidence.
   const screen = SCREEN.replace("v0.159.0", `v${version}`)
@@ -55,7 +55,7 @@ for (const version of ["0.162.1", "0.164.0"]) test(`${version} recognizes the us
   assert.equal(probeCodexNativeInspection(version).versionCompatibility, "verified");
   assert.equal(isAuditedCodexPaginatedServerPair(version, version), true);
   for (const backend of ["0.162.0", "0.162.2", "0.160.0",
-    version === "0.164.0" ? "0.162.1" : "0.164.0"]) {
+    ...["0.162.1", "0.164.0", "0.165.0", "0.165.1"].filter((other) => other !== version)]) {
     assert.equal(isAuditedCodexPaginatedServerPair(version, backend), false);
   }
   const lifecycle = probeCodexThreadLifecycle(version);
@@ -325,5 +325,18 @@ test("native collapsed-question countdown is optional and limited to the source-
   for (const countdown of [" · 0s", " · 21s", " · 999s", " · 1m", " · 20s extra"]) {
     const screen = `${CARD}\n\n• Queued follow-up inputs\n  ? 1 question${countdown}\n    shift+← to answer\n\n${PLAIN_COMPOSER}`;
     assert.notEqual(observe(screen).status, "observed", countdown);
+  }
+});
+
+// Synthetic rendering derived from the source-identical 0.164/0.165 footer;
+// frame closure is independent of native task activity and never proves a turn.
+test("0.165 fast model footers retain idle, working and history-viewer boundaries", () => {
+  for (const label of ["GPT-6.1-Sol xhigh fast", "GPT-6-Astra ultra fast", "GPT-6-Astra max fast"]) {
+    const ready = `› Ask Codex to do anything\n\n  ${label} · /repo`;
+    const inspect = (screen: string) => inspectCodexScreen({ screen, runtime: { agentVersion: "0.165.0" } });
+    assert.equal(inspect(ready).activity.state, "idle");
+    assert.equal(inspect(`• Working (2s • esc to interrupt)\n\n${ready}`).activity.state, "working");
+    assert.notEqual(inspect(`${ready}\n  New activity · Back to bottom`).activity.state, "idle");
+    assert.notEqual(inspect(ready.replace("Ask Codex to do anything", "my unsent text")).activity.state, "idle");
   }
 });

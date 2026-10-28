@@ -77,7 +77,7 @@ export function observeCodexIdleModel(screen: string, plan?: TerminalModelContro
     ? frame && (frame.hasShortcutFooter || frame.hasContextFooter) ? frame.plainLines[frame.footerIndex] : undefined
     : lines.at(-1);
   const match = footer
-    ? /^\s{2,}([A-Za-z0-9][A-Za-z0-9._:/+\-]{0,127})\s+(low|medium|high|xhigh|max|ultra)(?:\s+fast)?(?:\s+·.*|\s+Plan mode(?:\s+\([^)]*\))?)?\s*$/u
+    ? /^\s{2,}(GPT-6\.1 Terra|[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,127})\s+(low|medium|high|xhigh|max|ultra)(?:\s+fast)?(?:\s+·.*|\s+Plan mode(?:\s+\([^)]*\))?)?\s*$/u
       .exec(footer)
     : undefined;
   if (!match || !isTerminalModelReasoningEffort(match[2])) return undefined;
@@ -354,7 +354,7 @@ export function observeCodexModelControl(
     line.trim() === "Select Model and Effort"
   );
   const reasoningHeader = lastIndex(lines, (line) =>
-    /^\s*Select Reasoning Level for \S+\s*$/u.test(line)
+    /^\s*Select Reasoning Level for (?:GPT-6\.1 Terra|\S+)\s*$/u.test(line)
   );
   const advancedHeader = lastIndex(lines, (line) =>
     line.trim() === "Advanced Reasoning"
@@ -405,7 +405,7 @@ export function observeCodexModelControl(
     return { state: "codex_model_picker", fingerprint, ...parsedRows };
   }
   if (latest === reasoningHeader) {
-    const modelLabel = /^\s*Select Reasoning Level for (\S+)\s*$/u.exec(
+    const modelLabel = /^\s*Select Reasoning Level for (GPT-6\.1 Terra|\S+)\s*$/u.exec(
       region[0] ?? ""
     )?.[1];
     const model = modelLabel && codexSemanticModelLabel(modelLabel, modern);
@@ -582,6 +582,9 @@ export function observeClaudeModelControl(
 }
 
 export function codexSemanticModelLabel(label: string, fullscreen: boolean): string | undefined {
+  // Exact displayName/model pair verified by the native model/list response.
+  // Do not derive unknown spaced labels by replacing spaces with hyphens.
+  if (fullscreen && label === "GPT-6.1 Terra") return "gpt-6.1-terra";
   if (/^[a-z0-9][a-z0-9._:/+\-]*$/u.test(label)) return label;
   return fullscreen && /^GPT-[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(label)
     ? label.toLowerCase()
@@ -596,7 +599,7 @@ export function parseCodexModelRows(region: readonly string[], fullscreen = fals
 } | undefined {
   const rows: ModelRow[] = [];
   for (const line of region.slice(1, -1)) {
-    const match = /^\s*(›\s*)?(\d+)\.\s+([A-Za-z0-9][A-Za-z0-9._:/+\-]*)(?:\s+((?:\((?:current|default)\)\s*){1,2}))?(?:\s{2,}.*)?$/u
+    const match = /^\s*(›\s*)?(\d+)\.\s+(GPT-6\.1 Terra|[A-Za-z0-9][A-Za-z0-9._:/+\-]*)(?:\s+((?:\((?:current|default)\)\s*){1,2}))?(?:\s{2,}.*)?$/u
       .exec(line);
     if (!match) continue;
     const id = codexSemanticModelLabel(match[3]!, fullscreen);

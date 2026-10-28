@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.4 / Pi 0.1.0-poc.12 / DeepSeek Harness 0.1.0-rc.15 — 2026-10-28
+
+- Adapt the reviewed macOS Codex CLI/app-server **0.165.0** pair for native status, models, permissions and question controls. Keep direct-backend operations contract-probed and distinguish the verified frontend version from the backend version; mixed older frontends do not inherit new terminal-write authority.
+- Recognize the exact native `GPT-6.1 Terra` display label and model ID across model pickers, effort headers and idle footers, without guessing unknown labels or fixed option indices. Accept the observed native single-column transcript bullet behind the exact styled Full Access confirmation.
+- Detect Codex's persistent folder-trust dialog as blocked and require a manual decision in the original CLI. With an exact frontend association, List and Send retain this boundary even when the shared backend is idle; pre-input revalidation prevents a newly appearing dialog from receiving task input. This fixes an existing recognition gap, not a new claim that 0.165 introduced trust dialogs.
+- Preserve exact native task identity, bounded public progress, default 720-minute monitoring, managed-terminal inactivity limits and callback/response deduplication. Record isolated native-task checks and their limits in the [0.165.0 compatibility review](docs/codex-0.165.0-compatibility.md); no new Desktop or external-channel delivery claim is made.
+- Release Pi **0.1.0-poc.12** and DeepSeek Harness **0.1.0-rc.15**, both pinning core **0.16.4** and the synchronized Skill. Core remains on `latest`; connectors remain prereleases on `next`, with unchanged Host version ranges.
+
 ## 0.16.3 / Pi 0.1.0-poc.11 / DeepSeek Harness 0.1.0-rc.14 — 2026-10-28
 
 - Identify the exact running Codex native executable behind a verified npm Node launcher. Check process generation, forwarded arguments and mapped file identity before using its reported version; never substitute an unrelated executable from PATH. Fresh observations can recover existing versionless activity Watches without changing their saved anchors.

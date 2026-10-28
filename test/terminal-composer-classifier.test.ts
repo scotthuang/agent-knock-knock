@@ -551,22 +551,27 @@ test("Claude input proof distinguishes occupied stashes from known footer syntax
 });
 
 
-test("0.164 contextual footer closes the default-effort Composer without inventing idle or effort authority", () => {
+for (const version of ["0.164.0", "0.165.0"]) test(`${version} contextual footer closes the default-effort Composer without inventing idle or effort authority`, () => {
   // Layout from the owned 0.164 CLI: no separate shortcut row; warning shares
   // the model/path row. Only synthetic path and transcript are retained.
   const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +
     "  GPT-6.1-Sol default · /repo                     ⚠ 3 warnings · f2 to view";
-  const frame = captureCodexFullscreenComposerFrame(ready, "0.164.0");
+  const frame = captureCodexFullscreenComposerFrame(ready, version);
   assert.equal(frame?.hasContextFooter, true);
   assert.equal(frame?.hasShortcutFooter, false);
   assert.equal(currentCodexComposerCapture(ready, "task", false, false,
-    undefined, false, "0.164.0")?.state, "exact_empty");
+    undefined, false, version)?.state, "exact_empty");
+  for (const label of ["GPT-6.1-Sol xhigh fast", "GPT-6-Astra ultra fast", "GPT-6-Astra max fast", "GPT-6.1 Terra low"]) {
+    const rendered = ready.replace("GPT-6.1-Sol default", label);
+    assert.equal(currentCodexComposerCapture(rendered, "task", false, false,
+      undefined, false, version)?.state, "exact_empty");
+  }
   for (const changed of [ready.replace("default", "unknown"),
     ready + "\n  unknown input owner",
     ready + "\n  New activity · Back to bottom",
     ready + "\n  enter/esc latest · ? shortcuts", ready.replace("Ask Codex to do anything", "pending draft")]) {
     assert.notEqual(currentCodexComposerCapture(changed, "task", false, false,
-      undefined, false, "0.164.0")?.state, "exact_empty");
+      undefined, false, version)?.state, "exact_empty");
   }
   assert.equal(captureCodexFullscreenComposerFrame(ready, "0.162.1")?.hasContextFooter, false,
     "new passive footer does not silently authorize older versions");
@@ -574,8 +579,8 @@ test("0.164 contextual footer closes the default-effort Composer without inventi
     "  /statusline  configure which items appear in the status line"];
   const popup = "\x1b[1;7m" + rows[0] + "\x1b[0m\n" + rows[1] + "\n\n" +
     ready.replace("\x1b[2mAsk Codex to do anything\x1b[0m", "/status");
-  assert.equal(captureCodexFullscreenComposerFrame(popup, "0.164.0")?.hasContextFooter, false);
-  assert.ok(exactCodexFullscreenSlashComposerCapture(popup, "/status", rows, true, "0.164.0"));
+  assert.equal(captureCodexFullscreenComposerFrame(popup, version)?.hasContextFooter, false);
+  assert.ok(exactCodexFullscreenSlashComposerCapture(popup, "/status", rows, true, version));
   assert.equal(exactCodexFullscreenSlashComposerCapture(popup.replace("\x1b[1;7m", "\x1b[1m"),
-    "/status", rows, true, "0.164.0"), undefined);
+    "/status", rows, true, version), undefined);
 });
