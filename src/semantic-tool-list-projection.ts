@@ -103,7 +103,9 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",
-      "attention_required", "updated_at", "observation_error", "send_blocked_reason"]),
+      "attention_required", "updated_at", "observation_error", "send_blocked_reason", "backend_activity_state"]),
+    ...(recordValue(row.approval_state) ? { approval_state: compactAkkListScalars(recordValue(row.approval_state)!,
+      ["scanned", "blocked", "approvable", "prompt_kind"]) } : {}),
     ...(recordValue(row.native_store_authority)
       ? { native_store_authority: compactNativeStoreAuthority(row.native_store_authority) } : {}),
     ...(Array.isArray(row.active_flags) ? { active_flags: row.active_flags } : {}),
@@ -228,7 +230,7 @@ function compactAkkListTerminal(
   compactAkkListNested(output, "terminal_control", terminal.terminal_control,
     ["kind", "target"]);
   compactAkkListNested(output, "approval_state", terminal.approval_state, [
-    "scanned", "blocked", "approvable", "state", "kind", "decision_mode"
+    "scanned", "blocked", "approvable", "state", "kind", "decision_mode", "prompt_kind"
   ]);
   const features = compactAkkListFeatures(terminal);
   if (Object.keys(features).length > 0) output.features = features;

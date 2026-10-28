@@ -18,7 +18,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.159.3": "codex/0.159.3/request-user-input-async-v2",
     "0.160.0": "codex/0.160.0/request-user-input-async-v3",
     "0.162.1": "codex/0.162.1/request-user-input-async-v4",
-    "0.164.0": "codex/0.164.0/request-user-input-async-v5"
+    "0.164.0": "codex/0.164.0/request-user-input-async-v5",
+    "0.165.0": "codex/0.165.0/request-user-input-async-v5"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -862,7 +863,7 @@ function parseExpanded(
   }
   // An unsupported title may render identically to another pending question.
   // Dropping it from the candidates would falsely prove that other identity.
-  if (profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] &&
+  if (usesMarkdownQuestionTitles(profile) &&
       evidence.some((source) => source.questions.some((question) =>
         asyncQuestionRenderedTitle(question.title, profile) === undefined))) {
     return { status: "ambiguous", reason: "unproven_title_rendering" };
@@ -1236,22 +1237,29 @@ function isFullscreenProfile(profile: string): boolean {
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.159.3"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.160.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"];
 }
 
 function usesMacSymbolKeyHints(profile: string): boolean {
   return profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"];
 }
 
-/** 0.164 renders titles as Markdown. Only single-line plain text whose
+function usesMarkdownQuestionTitles(profile: string): boolean {
+  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"];
+}
+
+/** 0.164/0.165 render titles as Markdown. Only single-line plain text whose
  * rendering is unchanged can prove a terminal question identity. Unknown
  * titles must remain in the ambiguity set; native structured replies do not
  * use this screen matcher. The reviewed upstream parser does not enable smart
  * punctuation, but does enable strikethrough, tables and math preprocessing.
  */
 function asyncQuestionRenderedTitle(title: string, profile: string): string | undefined {
-  if (profile !== CODEX_ASYNC_QUESTION_PROFILES["0.164.0"]) return normalizeText(title);
+  if (!usesMarkdownQuestionTitles(profile)) return normalizeText(title);
   if (/[\r\n\t*_`~\[\]<>\\&|$]/u.test(title) ||
       /^(?:#{1,6}(?:\s|$)|[-+](?:\s|$)|\d+[.)](?:\s|$)|[-=]{3,}\s*$)/u.test(title)) {
     return undefined;

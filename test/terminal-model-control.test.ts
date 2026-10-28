@@ -17,7 +17,7 @@ import {
   terminalModelCatalogFingerprint
 } from "../src/terminal-model-control.js";
 
-import { observeCodexIdleModel } from "../src/terminal-model-control-surface.js";
+import { modelControlSelectModelKeys, observeCodexIdleModel } from "../src/terminal-model-control-surface.js";
 
 const CODEX_PLAN = planTerminalModelControl(
   probeTerminalModelControl("codex", "0.154.0")
@@ -136,7 +136,47 @@ test("Codex 0.159.2 official model catalog keeps GPT-6.1 Sol and the shifted nat
   assert.equal(observed.selectedIndex, 7);
 });
 
-for (const version of ["0.162.1", "0.164.0"]) test(`${version} model catalog without default badges retains current model and exact footer`, () => {
+test("0.165 native Terra display label keeps exact slug and dynamic model positions", () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.165.0"));
+  for (const labels of [
+    ["GPT-6.1-Sol", "GPT-6-Astra", "GPT-6.1 Terra"],
+    ["GPT-6.1-Sol", "GPT-6.1 Terra", "GPT-6-Astra"]
+  ]) {
+    const screen = ["  Select Model and Effort", "",
+      ...labels.map((label, index) => `${index === 0 ? "›" : " "} ${index + 1}. ${label}${index === 0 ? " (current)" : ""}  Model description.`),
+      "", "  enter select · esc back"].join("\n");
+    const observed = observeTerminalModelControl(plan, screen);
+    assert.equal(observed.state, "codex_model_picker");
+    if (observed.state !== "codex_model_picker") return;
+    const index = labels.indexOf("GPT-6.1 Terra");
+    assert.equal(observed.rows[index]?.id, "gpt-6.1-terra");
+    assert.deepEqual(modelControlSelectModelKeys(observed, "gpt-6.1-terra"),
+      [...Array.from({ length: index }, () => "Down"), "C-m"]);
+    for (const changed of [
+      screen.replace("GPT-6.1 Terra", "GPT-6.1 Terra Preview"),
+      screen.replace("GPT-6.1 Terra", "GPT-6.1 Sol"),
+      screen.replace("GPT-6.1 Terra", "GPT-6.1-Sol")
+    ]) assert.equal(observeTerminalModelControl(plan, changed).state, "ambiguous");
+  }
+  const effort = ["  Select Reasoning Level for GPT-6.1 Terra", "",
+    "› 1. Low (default)    Fast responses with lighter reasoning",
+    "  2. Medium           Balances speed and reasoning depth for everyday tasks",
+    "  3. High             Greater reasoning depth for complex problems",
+    "  4. Extra high       Extra high reasoning depth for complex problems",
+    "  5. More reasoning…  Max and Ultra consume usage limits faster", "",
+    "  enter default · s session · esc back"].join("\n");
+  const observed = observeTerminalModelControl(plan, effort);
+  assert.equal(observed.state, "codex_reasoning_picker");
+  if (observed.state === "codex_reasoning_picker") assert.equal(observed.model, "gpt-6.1-terra");
+  const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +
+    "  GPT-6.1 Terra low · /repo\n  ← for agents · ? for shortcuts";
+  assert.deepEqual(observeCodexIdleModel(ready, plan), {
+    model: "gpt-6.1-terra", reasoningEffort: "low", planMode: false
+  });
+  assert.equal(observeCodexIdleModel(ready.replace("GPT-6.1 Terra", "GPT-6.1 Sol"), plan), undefined);
+});
+
+for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} model catalog without default badges retains current model and exact footer`, () => {
   const plan = planTerminalModelControl(probeTerminalModelControl("codex", version));
   const screen = [
     "  Select Model and Effort", "",
@@ -157,7 +197,7 @@ for (const version of ["0.162.1", "0.164.0"]) test(`${version} model catalog wit
   ]) assert.equal(observeTerminalModelControl(plan, changed).state, "ambiguous");
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -183,7 +223,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
@@ -1634,12 +1674,18 @@ class FakeModelTerminal {
 }
 
 
-test("0.164 single-line footer reads explicit effort but never treats default as low", () => {
-  const plan = planTerminalModelControl(probeTerminalModelControl("codex", "0.164.0"));
+for (const version of ["0.164.0", "0.165.0"]) test(`${version} single-line footer reads explicit effort but never treats default as low`, () => {
+  const plan = planTerminalModelControl(probeTerminalModelControl("codex", version));
   const ready = "› Ask Codex to do anything\n\n  GPT-6.1-Sol high · /repo";
   assert.deepEqual(observeCodexIdleModel(ready, plan), {
     model: "gpt-6.1-sol", reasoningEffort: "high", planMode: false
   });
+  for (const [model, effort] of [["GPT-6.1-Sol", "xhigh"], ["GPT-6-Astra", "ultra"], ["GPT-6-Astra", "max"]]) {
+    const fast = ready.replace("GPT-6.1-Sol high", `${model} ${effort} fast`);
+    assert.deepEqual(observeCodexIdleModel(fast, plan), {
+      model: model!.toLowerCase(), reasoningEffort: effort, planMode: false
+    });
+  }
   assert.equal(observeCodexIdleModel(ready.replace(" high ", " default "), plan), undefined);
   assert.equal(observeCodexIdleModel(ready.replace("Ask Codex to do anything", "draft"), plan), undefined);
 });

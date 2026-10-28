@@ -178,7 +178,7 @@ test("permission bridge refuses a mismatched or unreviewed runtime profile befor
 });
 
 
-for (const version of ["0.162.1", "0.164.0"]) test(`${version} centered confirmation sends only on a fresh exact affirmative frame`, async () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} centered confirmation sends only on a fresh exact affirmative frame`, async () => {
   const native = terminal(codex1621PermissionConfirmation(), version);
   const yes = await native.ports.capture();
   assert.equal(yes.state, "full_access_confirmation");
@@ -212,17 +212,17 @@ test("0.164 one-line ready footer still rejects working, owned draft and new app
 });
 
 
-test("0.164 centered permission overlay accepts known single-column Composer prefix and rejects unknown widths", async () => {
+for (const [version, marker] of [["0.164.0", "›"], ["0.165.0", "•"]]) test(`${version} centered permission overlay accepts native one-column transcript prefixes and rejects unknown widths`, async () => {
   const original = codex1621PermissionConfirmation();
-  const prefix = "› GPT-6.1-Sol · /repo".padEnd("Previous public update    ".length);
+  const prefix = `${marker} GPT-6.1-Sol · /repo`.padEnd("Previous public update    ".length);
   const screen = original.replaceAll("Previous public update    ", prefix);
-  const native = terminal(screen, "0.164.0");
+  const native = terminal(screen, version);
   const confirmation = await native.ports.capture();
   assert.equal(confirmation.state, "full_access_confirmation");
   await native.ports.input("C-m", confirmation);
   assert.deepEqual(native.sent, [["C-m"]]);
   for (const changed of [screen.replaceAll(prefix, "界" + prefix.slice(1)),
     screen.replace("Apply full access for this session", "Apply full access for every session")]) {
-    assert.equal((await terminal(changed, "0.164.0").ports.capture()).state, "blocked");
+    assert.equal((await terminal(changed, version).ports.capture()).state, "blocked");
   }
 });

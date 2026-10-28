@@ -84,6 +84,68 @@ test("backend-first sends and reads a proven terminal alias without terminal inp
   assert.equal(f.calls.length, 3);
 });
 
+test("folder trust blocks terminal aliases and exact backend mutations without choosing or sending input", async t => {
+  for (const target of ["native", "terminal"] as const) for (const command of ["send", "set-permissions", "approve", "respond-interaction"]) {
+    const f = fixture(t);
+    f.row.activity_state = "blocked";
+    f.row.approval_state = { scanned: true, blocked: true, approvable: false, prompt_kind: "folder_trust" };
+    await assert.rejects(f.run(command, target === "native" ? f.nativeId : f.terminalId), /folder access decision/);
+    assert.deepEqual(f.calls, [], `${target}/${command}`);
+  }
+});
+
+test("folder trust appearing after alias selection refuses dispatch before any executor call", async t => {
+  const f = fixture(t);
+  f.beforeScan = scan => { if (scan === 2) f.row.approval_state = {
+    scanned: true, blocked: true, approvable: false, prompt_kind: "folder_trust" }; };
+  await assert.rejects(f.run("send", f.terminalId), /folder access decision/);
+  assert.deepEqual(f.calls, []);
+  const journal = createConversationRuntimeRouteStore(f.storeDir, f.runtimeDir, { acquire: () => () => {} });
+  const record = journal.load({ controllerSession: "controller", messageId: "message-one", requestText: "READY", canonicalTarget: f.terminalId });
+  assert.ok(record);
+  assert.equal(record.state, "reserved");
+  assert.deepEqual(record.preparation_rejection, {
+    stage: "route_preparation", request_dispatched: false, error_code: "route_preparation_rejected"
+  });
+  assert.equal(record.execution_started_at, undefined);
+});
+
+test("native mutation refresh cannot reuse an alias whose thread, home or process proof disappeared", async t => {
+  for (const field of ["native_agent_session_id", "codex_home", "native_agent_process_birth"]) {
+    const f = fixture(t);
+    f.beforeScan = scan => { if (scan === 2) delete f.row[field]; };
+    await assert.rejects(f.run("send", f.terminalId), /lost its exact backend identity/);
+    assert.deepEqual(f.calls, [], field);
+  }
+});
+
+test("native mutation refresh rejects PID reuse with a different nonempty process incarnation", async t => {
+  for (const field of ["native_agent_process_uuid", "native_agent_process_birth"]) {
+    const f = fixture(t);
+    f.beforeScan = scan => { if (scan === 2) f.row[field] = "replacement-incarnation"; };
+    await assert.rejects(f.run("send", f.terminalId), /lost its exact backend identity/);
+    assert.deepEqual(f.calls, [], field);
+  }
+});
+
+test("native Status keeps a verified frontend trust block separate from backend idle", async t => {
+  const f = fixture(t); f.row.agent_version = "0.162.1";
+  f.row.approval_state = { scanned: true, blocked: true, approvable: false, prompt_kind: "folder_trust" };
+  const status = await f.run("status", f.nativeId);
+  assert.equal(status.activity_state, "blocked");
+  assert.equal(status.agent_version, "0.162.1");
+  assert.equal(status.approval_state.prompt_kind, "folder_trust");
+  assert.equal(status.capabilities.send, false); assert.equal(status.capabilities.approve, false);
+  assert.deepEqual(f.calls.map(call => call.command), ["status"]);
+});
+
+test("an unassociated trust prompt cannot become another backend's authority", async t => {
+  const f = fixture(t); f.row.native_agent_session_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  f.row.approval_state = { blocked: true, approvable: false, prompt_kind: "folder_trust" };
+  await f.run("send", f.nativeId);
+  assert.equal(f.calls[0].options.conversation, f.nativeId);
+});
+
 test("native Status carries the exact terminal Store conflict and recovery using the same inventory", async t => {
   for (const target of ["native", "terminal"] as const) {
     const f = fixture(t);
@@ -131,7 +193,8 @@ test("legacy terminal IDs query the canonical exact terminal before backend rout
     await f.run(command, legacyId);
     assert.equal(f.calls.at(-1)!.options.conversation, f.nativeId);
   }
-  assert.deepEqual(f.scannedTargets, [f.terminalId, f.terminalId, f.terminalId]);
+  assert.deepEqual(f.scannedTargets, [f.terminalId, f.terminalId, f.terminalId, f.terminalId],
+    "Send refreshes the exact physical selector again before native dispatch; read-only operations reuse their scan");
 });
 
 test("legacy terminal fallback stores a canonical chosen target and replays the original immutable request", async t => {
@@ -275,6 +338,41 @@ test("Send may reuse the advertised closed idle status transaction to resolve th
   assert.deepEqual(f.calls.map(call => call.command), ["native-inspect", "send"]);
   assert.equal(f.calls[1].options.conversation, f.nativeId);
   assert.equal(f.calls[0].options.message, undefined);
+});
+
+test("fresh Send and permission checks retain only this invocation's closed status proof after panel dismissal", async t => {
+  for (const command of ["send", "set-permissions"]) {
+    const f = fixture(t); delete f.row.native_agent_session_id;
+    f.row.agent_version = "0.165.0";
+    f.row.native_agent_identity_observation = { status: "verified_absent" };
+    f.row.available_actions = { native_inspect: { tool: "agent_knock_knock_native_inspect", arguments: { expected_binding_token: "binding" } } };
+    f.beforeScan = scan => { if (scan >= 2) delete f.row.native_agent_status_card_session_id; };
+    await f.run(command, f.terminalId, { mode: "read-only" });
+    assert.equal(f.scans, 3);
+    assert.deepEqual(f.calls.map(call => call.command), ["native-inspect", command]);
+    assert.equal(f.calls[1].options.conversation, f.nativeId);
+  }
+});
+
+test("closed status proof is not reused across new blockers, native conflicts, home changes or PID reuse", async t => {
+  for (const change of [
+    { approval_state: { blocked: true, approvable: false, prompt_kind: "folder_trust" } },
+    { approval_state: { blocked: true, approvable: true } },
+    { native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    { codex_home: "/different/isolated/codex-home" },
+    { native_agent_process_birth: "replacement-incarnation" }
+  ]) {
+    const f = fixture(t); delete f.row.native_agent_session_id;
+    f.row.agent_version = "0.165.0";
+    f.row.native_agent_identity_observation = { status: "verified_absent" };
+    f.row.available_actions = { native_inspect: { tool: "agent_knock_knock_native_inspect", arguments: { expected_binding_token: "binding" } } };
+    f.beforeScan = scan => {
+      if (scan >= 2) delete f.row.native_agent_status_card_session_id;
+      if (scan === 3) Object.assign(f.row, change);
+    };
+    await assert.rejects(f.run("send", f.terminalId), /folder access decision|lost its exact backend identity|conflicted with current terminal identity or readiness/);
+    assert.deepEqual(f.calls.map(call => call.command), ["native-inspect"]);
+  }
 });
 
 test("resolved legacy identity without a matching backend is not probed or reinterpreted", async t => {

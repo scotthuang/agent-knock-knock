@@ -6,7 +6,7 @@ export const CODEX_FULLSCREEN_COMPOSER_VERSION = "0.158.0";
 // The native footer uses "default" when effort is unset. This closes the
 // Composer; it does not prove an effective effort for model-control readback.
 export const CODEX_FULLSCREEN_MODEL_FOOTER =
-  /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:default|low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
+  /^ {2}(?:GPT-6\.1 Terra|GPT-[\w.-]+|gpt-[\w.-]+) (?:default|low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 export const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
   /^ {2}(?:← for agents · )?\? for shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;
 const CODEX_FULLSCREEN_WARNING_FOOTER =
@@ -72,10 +72,10 @@ export function captureCodexFullscreenComposerFrame(
     composerText,
     hasShortcutFooter: footerTail.length === 1 &&
       CODEX_FULLSCREEN_SHORTCUT_FOOTER.test(footerTail[0]!.trimEnd()),
-    // 0.164 renders the model/path and warning on one passive footer row.
+    // 0.164/0.165 render the model/path and warning on one passive footer row.
     // The exact empty Composer and independent busy/input-owner checks remain
     // necessary; a command popup must not inherit this ready-surface marker.
-    hasContextFooter: version === "0.164.0" && footerTail.length === 0 &&
+    hasContextFooter: ["0.164.0", "0.165.0"].includes(version) && footerTail.length === 0 &&
       ["", "Ask Codex to do anything"].includes(composerText)
   };
 }

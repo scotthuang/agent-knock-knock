@@ -747,6 +747,10 @@
       "owner": "terminal-action-projection"
     },
     {
+      "path": "src/codex-folder-trust-surface.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/codex-fullscreen-composer-proof.ts",
       "owner": "terminal-dispatch-core"
     },

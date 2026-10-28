@@ -1,4 +1,5 @@
 import { recordValue } from "./value-guards.js";
+import { codexFolderTrustBlocked } from "./codex-folder-trust-surface.js";
 
 type Row = Record<string, unknown>;
 interface ConversationUsage {
@@ -107,6 +108,12 @@ function explainMonitoring(row: Row, usage: ConversationUsage, send: boolean, wa
 
 function explainBlockedSend(row: Row, usage: ConversationUsage): void {
   row = withExactManagementFacts(row);
+  if (row.agent === "codex" && codexFolderTrustBlocked(row.approval_state)) {
+    usage.summary = "Codex is waiting for a folder access decision in the original terminal.";
+    usage.limitations.push("This is a local folder-trust decision; backend idle does not mean the terminal is ready. AKK does not choose or persist trust for you.");
+    usage.next_steps.push("Review the folder access prompt yourself in the original terminal, then refresh List.");
+    return;
+  }
   const authority = recordValue(row.native_store_authority);
   if (authority?.state === "transferring" || authority?.state === "conflict" ||
       row.management_state === "conflict" || row.management_conflict) return explainOwnership(row, usage);
