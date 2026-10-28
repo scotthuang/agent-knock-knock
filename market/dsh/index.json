@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Agent Knock Knock for DeepSeek Harness",
+    "zh": "Agent Knock Knock · DeepSeek Harness 插件"
+  },
+  "description": {
+    "en": "Maintainer-curated AKK connector releases. Third-party index; not an official DeepSeek marketplace or endorsement. Prerelease versions remain prereleases.",
+    "zh": "AKK 维护者提供的连接器索引；并非 DeepSeek 官方市场或官方推荐。预发布版本仍为预发布版本。"
+  },
+  "plugins": [
+    {
+      "name": "@scotthuang/agent-knock-knock-deepseek-harness",
+      "title": "Agent Knock Knock (AKK)",
+      "description": "Native Agent Knock Knock connector for DeepSeek Harness",
+      "author": "scotthuang",
+      "homepage": "https://github.com/scotthuang/agent-knock-knock/tree/main/connectors/deepseek-harness#readme",
+      "repository": {
+        "url": "https://github.com/scotthuang/agent-knock-knock.git",
+        "directory": "connectors/deepseek-harness"
+      },
+      "metadata": {
+        "keywords": []
+      },
+      "versions": [
+        {
+          "version": "0.1.0-rc.17",
+          "publishTimestamp": 1793195105,
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmjs.org"
+          },
+          "engines": {
+            "dsh": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2"
+          }
+        }
+      ]
+    }
+  ]
+}
