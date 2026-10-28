@@ -1,5 +1,11 @@
 # Changelog
 
+## DeepSeek Harness 0.1.0-rc.18 — 2026-10-29
+
+- Add DSH connector author/keywords and a clearer installation/discovery entry. Keep `next` for the prerelease connector and exact core **0.16.6**; no core or Pi release or runtime compatibility expansion.
+- Publish an AKK-maintained format-1 market index using exact published npm versions and reviewed DSH peer ranges, avoiding the old bare-package `latest` selection. It is an opt-in third-party source, not a default official market or endorsement.
+- Repair npm README cross-directory links and clarify POSIX resident-Web, prerelease, clean-restart, approval and callback boundaries. Reuse the existing AKK demo with its actual controller environment identified.
+
 ## 0.16.6 / Pi 0.1.0-poc.14 / DeepSeek Harness 0.1.0-rc.17 — 2026-10-28
 
 - Align Claude List offers with managed Send and native thread-lifecycle admission. Check the applicable transcript-boundary and exact idle-reader requirements, retain bounded readiness diagnostics in compact List, and provide actionable recovery guidance. Execution still captures fresh evidence; List observations do not grant cached input authority.

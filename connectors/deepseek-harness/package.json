@@ -1,7 +1,7 @@
 {
   "name": "@scotthuang/agent-knock-knock-deepseek-harness",
-  "version": "0.1.0-rc.17",
-  "description": "Native Agent Knock Knock connector for DeepSeek Harness",
+  "version": "0.1.0-rc.18",
+  "description": "Delegate from DeepSeek Harness Web to existing Codex CLI, Codex Desktop and Claude Code sessions with progress and completion callbacks.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -77,5 +77,19 @@
     "@types/node": "22.20.0",
     "typescript": "6.0.3",
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2"
-  }
+  },
+  "author": {
+    "name": "scotthuang",
+    "url": "https://github.com/scotthuang"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "agent-knock-knock",
+    "agent-orchestration",
+    "codex",
+    "claude-code",
+    "local-first"
+  ]
 }

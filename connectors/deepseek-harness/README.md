@@ -1,5 +1,11 @@
 # Agent Knock Knock for DeepSeek Harness
 
+Let your DeepSeek Harness agent delegate to **Codex CLI, Codex Desktop and
+Claude Code**, follow progress and receive results in the same DSH conversation.
+
+[Install](#five-minute-quick-start) · [DSH Discover](#find-akk-in-dsh-discover) ·
+[Demo](#demo) · [Support](https://github.com/scotthuang/agent-knock-knock/blob/main/SUPPORT.md)
+
 This package is the native DeepSeek Harness Web connector for Agent Knock
 Knock (AKK). When the Web Host mounts the bundle, it adds `/akk`, the AKK
 semantic tools supplied by its pinned runtime, and the bundled
@@ -13,7 +19,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.17** pins AKK **0.16.6** in its package and lockfile,
+Connector **0.1.0-rc.18** pins AKK **0.16.6** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the 0.165.0 adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
@@ -24,13 +30,25 @@ monitoring records (24 hours by default), plus active or unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
 prerelease uses the `next` dist-tag.
 
-The development baseline is DeepSeek Harness **0.2.1-rc.2** with Cordis
-**4.0.5**. This is a release candidate, not a stable release; as checked on
-2026-10-17, npm `next` points here while `latest` still points to
-**0.2.0-rc.2**. Do not downgrade a newer installed RC just to follow `latest`.
-Previously reviewed Hosts `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.5-rc.2`,
-`0.2.0-rc.2`, and preview `0.2.1-alpha.2` remain accepted. Use a resident POSIX Web Host
-and Node.js `>=22.19.0`.
+The reviewed baseline is **DeepSeek Harness Web 0.2.1-rc.2** and **Cordis
+4.0.5**. These are prerelease compatibility claims, not a stable-version
+endorsement. On 2026-10-29, upstream DSH `latest` is `0.2.1-rc.2`, while
+`next` is `0.2.1-rc.4` and `alpha` is `0.2.2-alpha.2`; the latter two are **not
+validated or accepted by this connector**. Do not replace an existing Host
+with a different release merely to follow a tag.
+
+| Scope | Declared / validated boundary |
+| --- | --- |
+| Current Web baseline | DSH `0.2.1-rc.2`, Cordis `4.0.5` |
+| Previously reviewed DSH RCs | `0.1.1-rc.2`, `0.1.5-rc.2`, `0.2.0-rc.2` |
+| Separate preview coverage | `0.1.2-alpha.1`, `0.2.1-alpha.2` |
+| Accepted Cordis peers | `4.0.1`, `4.0.2`, `4.0.4`, `4.0.5-alpha.1`, `4.0.5` (not a continuous range) |
+| Platform / runtime | Resident POSIX Web Host, Node.js `>=22.19.0`, `pnpm` on `PATH` |
+| Outside validated scope | DSH Desktop embedded launcher, headless/one-shot Host, Windows named pipes; newer unlisted DSH releases |
+
+The versioned validation notes below distinguish live Host checks from fixtures
+and earlier compatibility runs. This metadata/documentation release does not
+add a new Host compatibility claim.
 
 Activation locates the real `@deepseek-ai/dsh` launcher and requires the
 launcher, `dsh-base`, `dsh-agent`, `dsh-commands`, `dsh-llm`, `dsh-skill`, and
@@ -53,9 +71,45 @@ Headless/one-shot Harness processes, Windows named pipes, and DSH Desktop's
 embedded launcher are outside this connector's validated scope. Existing Codex CLI backend and Desktop connections need no
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
-see [core compatibility](../../README.md#compatibility) and the
-[Pi/DSH validation matrix](../../docs/pi-dsh-compatibility.md). This connector does
+see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/README.md#compatibility) and the
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
+
+## Demo
+
+Existing AKK demo by [@scotthuang](https://github.com/scotthuang):
+OpenClaw/WeChat delegates a task to Codex Desktop, handles an explicitly
+authorized approval, and brings the result back to chat. This edited clip shows
+AKK core capabilities, **not the DSH interface**.
+
+https://github.com/user-attachments/assets/cc20a609-7907-4996-977e-0b88d8ba6388
+
+## Find AKK in DSH Discover
+
+This is an **AKK-maintained third-party index**, not a default DSH market or an
+official endorsement. DSH does not ship with built-in index sources.
+
+1. In a supported DSH Web profile, open **Plugins → Experimental plugins →
+   Custom plugin market** and enable it.
+2. Open **Discover → Add index source** and paste this HTTPS URL:
+
+   ```text
+   https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/market/dsh/index.json
+   ```
+
+3. Search for **Agent Knock Knock**. Check the confirmation shows the package
+   `@scotthuang/agent-knock-knock-deepseek-harness`, an explicit reviewed RC
+   version and the npm registry. Confirm only that expected package/version.
+4. Finish existing work and cleanly restart the Web Host after installation;
+   this connector is not hot-loaded. Then run `/akk list` in a Web conversation.
+
+The index pins a published version, so market installation does not resolve the
+old bare-package `latest` tag. All listed connector versions are prereleases;
+DSH can recommend a compatible prerelease when the entry has no stable version.
+The source URL is stable, but its selected version can change after future
+verified releases. CLI users can use `@next` or the exact version shown in
+this README. See the [official market guide](https://deepseek-harness.github.io/deepseek-harness/guide/plugin-market)
+and the [index maintenance notes](https://github.com/scotthuang/agent-knock-knock/tree/main/market/dsh).
 
 ## Five-minute quick start
 
@@ -82,7 +136,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.17`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.18`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -392,7 +446,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.17
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.18
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -423,13 +477,20 @@ Restart `dsh web` after installation. The child package currently installs and
 tests against its pinned AKK runtime `0.16.6`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
-[coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases);
+[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/CONTRIBUTING.md#coordinated-package-releases);
 the registry-based `npm ci` above requires that exact core to be published.
 Testing connector changes against another AKK runtime requires an explicit
 dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.18`** keeps exact core **`0.16.6`** and the existing
+runtime/Host compatibility behavior. This release adds npm discovery metadata,
+a clearer DSH entry and explicit-version market installation guidance, and
+replaces cross-directory README links with public URLs that work on npm.
+The curated index uses published registry metadata and the official format-1
+contract; adding an index or publishing a community post is not official approval.
 
 Connector **`0.1.0-rc.17`** pins AKK **`0.16.6`** and its synchronized Skill.
 It carries [PR #478](https://github.com/scotthuang/agent-knock-knock/pull/478):
@@ -457,7 +518,7 @@ coordinated dependency refresh adds no new DSH live-model or external-channel
 delivery claim and remains on npm `next`.
 
 Connector **`0.1.0-rc.15`** pins AKK **`0.16.4`** and its synchronized Skill.
-It carries the [Codex CLI 0.165.0 compatibility update](../../docs/codex-0.165.0-compatibility.md):
+It carries the [Codex CLI 0.165.0 compatibility update](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/docs/codex-0.165.0-compatibility.md):
 exact frontend/backend version reporting, native terminal profiles, Terra model
 label handling, and manual folder-trust blocking. Existing task identities,
 monitor deadlines and callback receipts are preserved. Host version ranges and
@@ -530,13 +591,13 @@ remains available when no controllable terminal counterpart exists. Codex stays
 backend-first. Existing task routes, interaction authority, the DSH Host/peer
 policy, independent Store and callback ownership remain unchanged. This
 dependency update does not claim a new DSH live-model or external-channel
-delivery test. See the [Claude direct-control guide](../../docs/claude-cli-direct.md)
+delivery test. See the [Claude direct-control guide](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/docs/claude-cli-direct.md)
 for prerequisites and operation-specific limits. The connector remains on `next`.
 
 Connector **`0.1.0-rc.9`** pins AKK **`0.14.17`** and carries its Codex CLI
 `0.164.0` compatibility changes and reviewed Skill. The DSH Host/peer version
 policy, independent Store, typed interactions and callback ownership are
-unchanged. The core [compatibility matrix](../../docs/codex-0.164.0-compatibility.md)
+unchanged. The core [compatibility matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.6/docs/codex-0.164.0-compatibility.md)
 separates native backend task/approval/question checks from terminal capture
 regressions and retained limits. This dependency refresh does not claim a new
 DSH live-model or external-channel delivery run. It remains on npm `next`.
@@ -565,7 +626,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.17` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.18` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -610,7 +671,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.17
+npm run release:check -- --publish --confirm-version 0.1.0-rc.18
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
