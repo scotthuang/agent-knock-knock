@@ -12,7 +12,7 @@ socket.
 
 ## Status and compatibility
 
-Connector **0.1.0-poc.14** pins AKK **0.16.6**, including CLI direct
+Connector **0.1.0-poc.15** pins AKK **0.16.7**, including CLI direct
 connections, Codex Desktop, Recovery, state-derived List guidance and verified
 running-process Codex version discovery, with the 0.165.0 adaptation and accurate
 Claude pane-observation diagnostics. Its generated Skill and registered tools
@@ -35,7 +35,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.6`, pinned by this connector's package and lockfile. A different
+- AKK `0.16.7`, pinned by this connector's package and lockfile. A different
   version at the repository root is not substituted automatically. Before core
   publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
@@ -87,8 +87,8 @@ pi list
 ```
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
-core `0.16.6` connector, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.14`; exact versions are pinned
+core `0.16.7` connector, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.15`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -453,7 +453,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.14
+npm run release:check -- --publish --confirm-version 0.1.0-poc.15
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -502,6 +502,17 @@ established conversation; diagnostic List retains their exact IDs. This is
 a presentation change, not evidence that a candidate is disconnected, and it
 does not change Send routing or callback ownership. Sole empty conversations
 and exact frontend associations remain visible.
+
+Connector **`0.1.0-poc.15`** pins AKK **`0.16.7`** and its synchronized Skill.
+It carries [PR #484](https://github.com/scotthuang/agent-knock-knock/pull/484):
+command-scoped discovery reuse and targeted inspection reduce repeated reader
+and terminal probes. Default List defers detailed approval/composer scans;
+unscanned state is not approval or Send authority, and Status and mutating
+operations keep fresh identity and input checks. Pi Host versions, callback
+ownership and the prerelease `next` policy are unchanged. Performance samples
+in the [core record](../../docs/command-discovery-performance.md) are observations
+from the PR's development verification, not universal latency guarantees or a
+new Pi live-model/channel acceptance run.
 
 Connector **`0.1.0-poc.14`** pins AKK **`0.16.6`** and its synchronized Skill.
 It carries [PR #478](https://github.com/scotthuang/agent-knock-knock/pull/478):
@@ -601,8 +612,8 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.14` is an npm prerelease distributed through the `next` dist-tag;
-its publication is coordinated with core `0.16.6` and the DSH connector.
+`0.1.0-poc.15` is an npm prerelease distributed through the `next` dist-tag;
+its publication is coordinated with core `0.16.7` and the DSH connector.
 ClawHub publication remains a separate channel.
 
 ## Deliberate POC limits

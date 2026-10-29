@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.7 / Pi 0.1.0-poc.15 / DeepSeek Harness 0.1.0-rc.19 — 2026-10-29
+
+- Reduce repeated discovery work within one CLI command: share in-flight Claude reader and terminal probes, isolate the memo between commands, inspect known Claude targets directly, and bound parallel process checks. Execution identity and input fences remain fresh and are never cached as authority.
+- Make default List a lightweight inventory. Detailed approval/composer/task scans are deferred to Status, explicit `--approval-scan` / `noApprovalScan: false`, and execution preflight. Deferred or unknown observations are not proof that a session is input-ready. Keep unavailable or unresolved operations explicit.
+- Preserve the existing default-list treatment of verified unstarted Codex candidates. Only ambiguous same-home/workspace groups receive additional snapshot verification; unavailable evidence keeps candidates visible, and task bodies are excluded from the inventory.
+- Publish coordinated Pi and DSH connector updates with exact core **0.16.7** dependencies and synchronized Skill guidance. Existing Host compatibility ranges, callback ownership, persistent recovery and prerelease `next` tags remain unchanged.
+- Preserve the PR #484 measurement record as development evidence. Its environment-specific read-only timing samples are not universal latency guarantees; complete Status includes additional safety checks and can remain slower than direct inspection.
+
 ## DeepSeek Harness 0.1.0-rc.18 — 2026-10-29
 
 - Add DSH connector author/keywords and a clearer installation/discovery entry. Keep `next` for the prerelease connector and exact core **0.16.6**; no core or Pi release or runtime compatibility expansion.
