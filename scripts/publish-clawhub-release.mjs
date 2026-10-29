@@ -122,7 +122,7 @@ async function main() {
   requireThat(/^[a-f0-9]{40}$/.test(sourceCommit), 'invalid_publisher_commit');
   execFileSync('git', ['merge-base', '--is-ancestor', release.commit, sourceCommit]);
   const changed = execFileSync('git', ['diff', '--name-only', release.commit, sourceCommit], { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  const publishingFiles = new Set(['.github/clawhub-release.json', '.github/workflows/clawhub-publish.yml', '.github/README.md', 'scripts/publish-clawhub-release.mjs']);
+  const publishingFiles = new Set(['.github/clawhub-release.json', '.github/workflows/clawhub-publish.yml', '.github/CLAWHUB-PUBLISH.md', 'scripts/publish-clawhub-release.mjs']);
   requireThat(changed.every((file) => publishingFiles.has(file)), 'product_changed_since_tested_release');
   const archive = await fetchBytes(`https://github.com/${release.repository}/releases/download/${tag}/${release.asset}`);
   requireThat(archive.length === release.bytes && sha256(archive) === release.sha256, 'release_archive_mismatch');
