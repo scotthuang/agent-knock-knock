@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.7",
+  "version": "0.16.8",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "507826c547b4dc734fd1e6c721af247e72db1a19",
-  "asset": "scotthuang-agent-knock-knock-0.16.7.tgz",
-  "sha256": "aebd65057b1cf5a201c80a97cf84395b55a4cd2bd1b5ba49821da612a64e3d1b",
-  "bytes": 3960960,
-  "changelog": "Reuse discovery reads within one command and make default List a lightweight inventory. Detailed Status/explicit scans and execution retain fresh exact identity, approval and input checks. Preserve verified empty-thread folding and update Claude display confidence only after exact identity resolution. Core 0.16.7 is coordinated with Pi 0.1.0-poc.15 and DSH 0.1.0-rc.19 on next. Formal gate passed 3895 core full tests, both connector gates, isolated OpenClaw 2026.9.1 loading, runtime Inspector and package dry-run. No production install, destructive live lifecycle or external delivery claim."
+  "commit": "c056685f364b97474bb36bd31189bbf9c6430649",
+  "asset": "scotthuang-agent-knock-knock-0.16.8.tgz",
+  "sha256": "bf73eb66384c19207ac91faf24b2370f3496c68465a769d02d104aa9848b2080",
+  "bytes": 3969474,
+  "changelog": "Compact List v5 removes repeated usage prose and duplicate IDs while preserving exact selectors, readable unknown states, dynamic action inputs and blockers. OpenClaw, Pi and DSH default to v5; generic Host SDK and MCP keep v4 with explicit format selection and version-bound pagination. Budgets, raw CLI output, action contract 35 and execution authority remain unchanged. Coordinated core 0.16.8, Pi 0.1.0-poc.16 and DSH 0.1.0-rc.20. Formal release gate passed 3904 core tests, both connector gates, isolated OpenClaw compatibility, runtime validation and dry-run. No external delivery claim."
 }
