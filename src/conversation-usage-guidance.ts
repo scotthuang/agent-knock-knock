@@ -77,6 +77,15 @@ function conversationUsage(row: Row): ConversationUsage {
     : watch ? "You can observe this conversation; task sending is unavailable."
     : "Task sending is unavailable; check the recovery steps below.",
   available: usableOperations(row), limitations: [], next_steps: [] };
+  if (row.detail_scan === "deferred" && !knownDiscoveryBlocker(row)) {
+    usage.summary = send ? "You can request Send; AKK checks this window before submitting input."
+      : "Discovery is complete; use Status to check this window's current input actions.";
+    usage.limitations.push("Approval, input-box and thread-control details have not been scanned. Omitted input actions are not proof that the feature is unsupported.");
+    usage.next_steps.push(send ? "Use Send for this conversation; fresh identity, ownership and input checks still run before any text is sent."
+      : "Use Status, or List with noApprovalScan:false (CLI: --approval-scan), to inspect current input actions.");
+    explainMonitoring(row, usage, send, watch);
+    return usage;
+  }
   explainClaudeLifecycleReadiness(row, usage);
   if (explicitClaudeInput(row)) {
     usage.summary = "可以向此窗口发送任务。AKK 会输入文字并提交，但目前无法可靠确认后台任务的接受和完成状态；请在窗口中查看执行结果。";
@@ -93,6 +102,15 @@ function conversationUsage(row: Row): ConversationUsage {
     usage.limitations.push("Sending first recovers an abandoned ownership record using verified recovery evidence.");
   }
   return usage;
+}
+
+function knownDiscoveryBlocker(row: Row): boolean {
+  const facts = withExactManagementFacts(row);
+  return ["conflict", "unavailable"].includes(String(facts.management_state)) ||
+    Boolean(facts.management_conflict || facts.management_unavailable) ||
+    ["conflict", "transferring"].includes(String(recordValue(facts.native_store_authority)?.state)) ||
+    ["working", "busy", "active", "running", "waiting", "awaiting_approval", "exited"].includes(String(row.activity_state)) ||
+    ["exited", "stopped", "dead"].includes(String(row.process_state));
 }
 
 function explainMonitoring(row: Row, usage: ConversationUsage, send: boolean, watch: boolean): void {
@@ -152,7 +170,7 @@ function explainPhysicalReadiness(row: Row, usage: ConversationUsage): boolean {
   if (row.agent !== "claude" || readiness?.ready !== false) return false;
   if (readiness.reason === "screen_not_scanned") {
     usage.limitations.push("AKK did not scan this window, so it cannot verify that input is safe.");
-    usage.next_steps.push("Call List again with noApprovalScan:false, or omit that option (CLI: omit --no-approval-scan). Check the refreshed Send action before sending.");
+    usage.next_steps.push("Use Status, or call List with noApprovalScan:false (CLI: --approval-scan). Check the refreshed Send action before sending.");
   } else if (readiness.reason === "screen_unavailable") {
     usage.limitations.push("AKK could not read this window, so it cannot verify that input is safe.");
     usage.next_steps.push("Open Status to inspect the capture error; restore terminal-provider access, then refresh List with pane scanning enabled.");

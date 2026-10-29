@@ -1,4 +1,5 @@
-import { claudeTerminalObservationFailure, claudeTerminalWindowRole, normalizeClaudeAgentRows, readClaudeTerminalAgents } from "./claude-terminal-agent-observation.js";
+import { claudeTerminalObservationFailure, claudeTerminalWindowRole, normalizeClaudeAgentRows, readClaudeTerminalAgent, readClaudeTerminalAgents, readClaudeTerminalAgentsForDiscovery } from "./claude-terminal-agent-observation.js";
+import { isClaudeNativeConversationId, parseClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isAuditedCodexPaginatedServerPair } from "./codex-lifecycle-compatibility.js";
 import { runningCodexExecutables } from "./codex-running-executable.js";
 import { spawnSync } from "node:child_process";
@@ -21,10 +22,11 @@ import {
   parseJsonOption,
   resolveOptionalExecutable
 } from "./cli-command-runtime.js";
-import { cliRuntimeLog, type CliCommandDependencies } from "./cli-runtime-context.js";
+import { cliExecutionMemo, cliExecutionMemoAsync, cliRuntimeLog, type CliCommandDependencies } from "./cli-runtime-context.js";
 import type { ExecutorKind } from "./executors.js";
 import { HerdrTerminalControlProvider } from "./herdr-terminal-control-provider.js";
 import {
+  parseTerminalConversationId,
   type TerminalAgentAdapterRegistry,
   type TerminalCompletionEvidence,
   type TerminalControlCapability,
@@ -107,6 +109,7 @@ export interface TerminalRuntimeCliAdapter {
   createControlProvider(registry?: TerminalControlProviderRegistry): TerminalControlProvider;
   createProcessSource(): TerminalProcessSource;
   loadClaudeAgentRows(observation?: { required?: boolean }): ClaudeAgentRow[];
+  loadClaudeAgentRowsForDiscovery(): Promise<ClaudeAgentRow[]>;
   observeClaudeWindowRole(pid: number, cwd?: string): "background_view" | undefined;
   createAgentRegistry(): TerminalAgentAdapterRegistry;
   createBridge(provider?: TerminalControlProvider,
@@ -135,10 +138,13 @@ export interface TerminalRuntimeCliAdapter {
 export function createTerminalRuntimeCliAdapter(
   input: CreateTerminalRuntimeCliAdapterInput
 ): TerminalRuntimeCliAdapter {
-  const createControlProviderRegistry = () => controlProviderRegistry(input);
+  const createControlProviderRegistry = () => input.options.listDiscoveryOnly
+    ? cliExecutionMemo("list-terminal-provider-registry", input.dependencies.terminalControlProviderRegistry ??
+      JSON.stringify([input.options.terminalsJson, input.options.terminalScreensJson, input.options.processesJson]),
+      () => controlProviderRegistry(input)) : controlProviderRegistry(input);
   const createControlProvider = (
     registry: TerminalControlProviderRegistry = createControlProviderRegistry()
-  ) => registry.asProvider();
+  ) => input.options.listDiscoveryOnly ? discoveryProvider(registry) : registry.asProvider();
   const createProcessSource = () => processSource(input);
   const loadClaudeAgentRows = (observation: { required?: boolean } = {}) =>
     claudeAgentRows(input, observation);
@@ -160,6 +166,7 @@ export function createTerminalRuntimeCliAdapter(
   return Object.freeze({
     createControlProviderRegistry, createControlProvider, createProcessSource,
     loadClaudeAgentRows, createAgentRegistry, createBridge,
+    loadClaudeAgentRowsForDiscovery: () => claudeAgentRowsForDiscovery(input),
     observeClaudeWindowRole: (pid: number, cwd?: string) => input.dependencies.loadClaudeAgentRows ||
       input.dependencies.terminalProcessSource || input.dependencies.terminalControlProviderRegistry
       ? undefined : claudeTerminalWindowRole(input.options, pid, cwd),
@@ -172,6 +179,21 @@ export function createTerminalRuntimeCliAdapter(
       expectedVersion: CodexModelControlAgentVersion,
       cwd?: string
     ) => runningCodexModelCatalog(input, pid, expectedVersion, cwd)
+  });
+}
+
+/** Only enumeration shares a snapshot. All endpoint resolution and input methods bind the live provider. */
+function discoveryProvider(registry: TerminalControlProviderRegistry): TerminalControlProvider {
+  return cliExecutionMemo("list-terminal-provider", registry, () => {
+    const provider = registry.asProvider();
+    // Preserve endpoint object provenance (Herdr binds private evidence in a WeakMap).
+    const listTerminals = async () => [...await cliExecutionMemoAsync("list-terminal-endpoints", registry,
+      () => provider.listTerminals())];
+    return new Proxy(provider, { get(target, property) {
+      if (property === "listTerminals") return listTerminals;
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
   });
 }
 
@@ -228,7 +250,11 @@ function agentSessionProvider(
     }));
   }
   return new CodexLocalSessionProvider(new CodexStoreAdapter({
-    codexHome: expandHome(input.options.codexHome as string | undefined)
+    codexHome: expandHome(input.options.codexHome as string | undefined),
+    ...(input.options.listDiscoveryOnly === true ? {
+      memoizeOpenRootInventory: (key, observe) =>
+        cliExecutionMemoAsync("codex-list-open-root-inventory", key, observe)
+    } : {})
   }));
 }
 
@@ -302,6 +328,16 @@ function processSource({ options, dependencies }: Pick<
     diagnosticLog: (event, fields) => cliRuntimeLog("info", event, { ...fields })
   });
 }
+async function claudeAgentRowsForDiscovery(input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">): Promise<ClaudeAgentRow[]> {
+  if (input.dependencies.loadClaudeAgentRows || ["claudeAgentsJson", "processesJson", "terminalsJson", "terminalScreensJson"]
+    .some(key => input.options[key] !== undefined)) return claudeAgentRows(input, { required: true });
+  const pid = claudeTargetPid(input.options);
+  const result = (pid === undefined ? undefined : readClaudeTerminalAgent(input.options, pid)) ??
+    await readClaudeTerminalAgentsForDiscovery(input.options);
+  if (result.errors.length) throw new Error(claudeTerminalObservationFailure(result));
+  return result.rows;
+}
+
 function claudeAgentRows(
   input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
   observation: { required?: boolean }
@@ -313,7 +349,8 @@ function claudeAgentRows(
   const options = input.options;
   if (options.claudeAgentsJson === undefined) {
     if (options.processesJson || options.terminalsJson || options.terminalScreensJson) return [];
-    const result = readClaudeTerminalAgents(options);
+    const pid = claudeTargetPid(options);
+    const result = (pid === undefined ? undefined : readClaudeTerminalAgent(options, pid)) ?? readClaudeTerminalAgents(options);
     if (observation.required && result.errors.length) {
       throw new Error(claudeTerminalObservationFailure(result));
     }
@@ -330,6 +367,16 @@ function claudeAgentRows(
   return normalizeClaudeAgentRows(rows);
 }
 
+function claudeTargetPid(options: TerminalRuntimeCliOptions): number | undefined {
+  const target = options.conversation ?? options.conversationId ?? options.terminal ?? options.session;
+  if (typeof target !== "string") return undefined;
+  try {
+    if (isClaudeNativeConversationId(target)) return parseClaudeNativeConversationId(target).pid;
+    const terminal = parseTerminalConversationId(target);
+    return terminal?.agent === "claude" ? terminal.pid : undefined;
+  } catch { return undefined; }
+}
+
 function terminalAgentRegistry(
   input: CreateTerminalRuntimeCliAdapterInput,
   loadClaudeAgentRows: (observation?: { required?: boolean }) => ClaudeAgentRow[]
@@ -341,7 +388,8 @@ function terminalAgentRegistry(
           request, input.completion)
       }),
       createClaudeTerminalAgentAdapter({
-        agentRows: loadClaudeAgentRows(),
+        // Inventory resolves native rows asynchronously after physical discovery.
+        agentRows: input.options.listDiscoveryOnly || input.options.listDiscoverySnapshot || input.options.agent === "codex" ? [] : loadClaudeAgentRows(),
         detectPendingApproval(request) {
           return detectClaudeTranscriptPendingApproval(request, {
             claudeHome: expandHome(input.options.claudeHome as string | undefined),
@@ -603,7 +651,7 @@ function runningAgentVersion(
     return undefined;
   }
   if (agent === "claude") {
-    const observation = readClaudeTerminalAgents(input.options);
+    const observation = readClaudeTerminalAgent(input.options, pid) ?? readClaudeTerminalAgents(input.options);
     if (observation.rejectedPids.includes(pid)) return undefined;
     const versions = [...new Set(observation.rows.filter(row => row.pid === pid)
       .flatMap(row => row.version ? [row.version] : []))];

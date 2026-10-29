@@ -595,6 +595,10 @@
       "owner": "value-guards"
     },
     {
+      "path": "src/claude-agent-discovery-cache.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-conversation-routing-cli-adapter.ts",
       "owner": "agent-session-core"
     },

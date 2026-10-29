@@ -1,4 +1,4 @@
-import { associateClaudeConversationRoutes } from "./claude-conversation-routing-identity.js";
+import { associateClaudeConversationRoutes, exactClaudeTerminal } from "./claude-conversation-routing-identity.js";
 import { claudeNativeControlCapabilities } from "./claude-native-public-projection.js";
 import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, claudeUserExplicitTerminalSendOffer, withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
 import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
@@ -22,9 +22,11 @@ export function isTerminalSpecificConversationAction(agent: unknown, name: strin
 }
 
 /** Ordinary Claude Send keeps its canonical selector while choosing a managed terminal first. */
-export function withClaudeSendRouteProjection(native: Row, terminals: readonly Row[]): Row {
+export function withClaudeSendRouteProjection(native: Row, terminals: readonly Row[], writable = true): Row {
   if (native.source !== "claude_cli") return native;
   const id = String(native.conversation_id ?? native.id ?? "");
+  const deferred = writable ? deferredClaudeSendProjection(native, terminals, id) : undefined;
+  if (deferred) return deferred;
   const route = claudeManagedSendRoute(id, terminals);
   if (route.kind === "native") return { ...native, route_preference: "claude_native", route_status: "backend_available" };
   const actions = { ...recordValue(native.available_actions) };
@@ -34,6 +36,22 @@ export function withClaudeSendRouteProjection(native: Row, terminals: readonly R
   return { ...native, route_preference: "managed_terminal", route_status: send ? "terminal_available" : "terminal_blocked",
     capabilities: { ...recordValue(native.capabilities), send }, available_actions: actions,
     ...(route.kind === "blocked" ? { send_blocked_reason: route.reason } : {}) };
+}
+
+/** Discovery describes a callable route; only fresh execution may authorize input. */
+function deferredClaudeSendProjection(native: Row, terminals: readonly Row[], id: string): Row | undefined {
+  const matches = terminals.filter(terminal => exactClaudeTerminal(id, terminal));
+  if (matches.length !== 1 || matches[0].detail_scan !== "deferred") return undefined;
+  const terminal = matches[0], authority = recordValue(terminal.native_store_authority);
+  const control = recordValue(terminal.terminal_control);
+  if (!Array.isArray(control?.capabilities) || !control.capabilities.includes("send_keys") ||
+      terminals.filter(row => row.pid === terminal.pid && row.agent === "claude" && row.process_state === "active").length !== 1) return undefined;
+  if (["conflict", "unavailable"].includes(String(terminal.management_state)) ||
+      terminal.management_conflict || terminal.management_unavailable ||
+      ["conflict", "transferring"].includes(String(authority?.state))) return undefined;
+  const canSend = recordValue(native.capabilities)?.send === true;
+  return { ...native, route_preference: "managed_terminal", route_status: "preflight_required",
+    detail_scan: "deferred", send_preflight_required: canSend };
 }
 
 /** Use the physical incarnation with the Store-filtered action offers from the same scan. */
@@ -197,7 +215,7 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
   const claudeSendTargets = claudeSendTerminals(terminals, rows(result.terminals), recordValue(result.store)?.writable !== false);
   conversations.push(...claude.map(row => withClaudeSendRouteProjection({ ...row,
     terminal_aliases: claudeAssociations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
-    terminal_controls: rows(result.terminals).filter(terminal => claudeAssociations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) }, claudeSendTargets)));
+    terminal_controls: rows(result.terminals).filter(terminal => claudeAssociations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id)) }, claudeSendTargets, recordValue(result.store)?.writable !== false)));
   for (const terminal of rows(result.terminals)) {
     if (linked.has(String(terminal.id))) continue;
     conversations.push(standaloneConversation(terminal, claudeSendTargets.find(row => row.id === terminal.id)));

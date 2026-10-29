@@ -9,9 +9,9 @@ import { createTerminalWatchOpenClawCallbackRoute, parseCallbackRoute } from "./
 import { isCodexNativeConversationId, parseCodexNativeConversationId } from "./codex-native-identity.js";
 import { isCodexNativeWatchId, type PersistedNativeInteraction, type CodexNativeTaskRecord } from "./codex-native-state-store.js";
 import { codexNativeTaskNeedsReconciliation, nativeDigest, nativeErrorCode } from "./codex-native-task-service.js";
-import { createCodexNativeRuntime, type CodexNativeRuntimeOptions } from "./codex-native-runtime.js";
+import { createCodexNativeRuntime, type CodexNativeRuntimeOptions, type CodexNativeCatalogEntry } from "./codex-native-runtime.js";
 import { launchCodexNativeMonitor, runCodexNativeMonitor } from "./codex-native-monitor.js";
-import { codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
+import { codexNativeDiscoveryProjection, codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
 import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { CodexNativeError, type CodexNativeIdentity, type CodexNativePermissionPreset, type NativeInteractionResponse } from "./codex-native-types.js";
 
@@ -43,15 +43,40 @@ export function codexNativeRuntimeOptions(options: Options): CodexNativeRuntimeO
 
 const runtimeFor = (options: Options) => (cliDependencies().createCodexNativeRuntime ?? createCodexNativeRuntime)(codexNativeRuntimeOptions(options));
 
+const discoveryGroup = (entry: CodexNativeCatalogEntry) => JSON.stringify([path.resolve(entry.codexHome), path.resolve(entry.thread.cwd)]);
+/** Only ambiguous groups need the historical evidence used by empty-candidate presentation. */
+function discoveryHistoryGroups(entries: readonly CodexNativeCatalogEntry[]): Set<string> {
+  const groups = new Map<string, CodexNativeCatalogEntry[]>();
+  for (const entry of entries) { const key = discoveryGroup(entry); groups.set(key, [...groups.get(key) ?? [], entry]); }
+  return new Set([...groups].filter(([, group]) => group.length > 1 && group.some(entry =>
+    entry.thread.status.type === "idle" && [entry.thread.name, entry.thread.preview]
+      .every(value => value == null || typeof value === "string" && value.trim() === ""))).map(([key]) => key));
+}
+
 export async function codexNativeListForCli(options: Options): Promise<Record<string, unknown>> {
   if (options.agent && options.agent !== "codex") return { codex_cli_sessions: [], codex_cli_scan: { status: "filtered" } };
   const runtime = runtimeFor(options);
   try {
     const discovery = await runtime.catalog.discover();
-    const rows: ReturnType<typeof codexNativeSessionProjection>[] = [];
+    const rows: Array<ReturnType<typeof codexNativeSessionProjection> | ReturnType<typeof codexNativeDiscoveryProjection>> = [];
     const errors = [...discovery.errors];
+    const historyGroups = discoveryHistoryGroups(discovery.sessions);
     for (const entry of discovery.sessions) {
       try {
+        if (options.approvalScan !== true && options.noApprovalScan !== false) {
+          if (!options.status || options.status === entry.thread.status.type ||
+              options.status === "working" && entry.thread.status.type === "active") {
+            let row = codexNativeDiscoveryProjection(entry, entry.thread, entry.backendVersion);
+            if (historyGroups.has(discoveryGroup(entry))) {
+              try {
+                const snapshot = await (await runtime.clientFor(entry)).readSnapshot(entry.threadId);
+                row = codexNativeDiscoveryProjection(entry, snapshot.thread, entry.backendVersion, snapshot);
+              } catch (error) { errors.push({ codexHome: entry.codexHome, error_code: nativeErrorCode(error) }); }
+            }
+            rows.push(row);
+          }
+          continue;
+        }
         const client = await runtime.clientFor(entry);
         const snapshot = await client.readSnapshot(entry.threadId);
         if (options.status && options.status !== snapshot.thread.status.type &&

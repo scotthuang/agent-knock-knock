@@ -10,6 +10,7 @@ import { discoverClaudeNativeSessions, inspectClaudeNativeSession, type ClaudeNa
 import { ClaudeNativeError, createClaudeNativeConversationId, isClaudeNativeWatchId, parseClaudeNativeConversationId,
   type ClaudeNativeCatalogEntry, type ClaudeNativeIdentity } from "../src/claude-native-identity.js";
 import { buildClaudeNativePeerContent } from "../src/claude-native-peer-envelope.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
 
 const identity: ClaudeNativeIdentity = { configDir: "/tmp/claude-fixture", sessionId: "11111111-1111-4111-8111-111111111111",
   pid: 123, processStart: "Sun Oct 11 10:20:30 2026" };
@@ -132,7 +133,7 @@ async function fixture() {
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
   await chmod(socketPath, 0o600);
   const m: Record<string, unknown> = { pid: 123, sessionId: identity.sessionId, procStart: identity.processStart, cwd: "/tmp/project",
-    status: "idle", version: "2.1.999", messagingSocketPath: socketPath, peerProtocol: 1, peerFeatures: ["notify_idle"] };
+    kind: "interactive", status: "idle", version: "2.1.999", messagingSocketPath: socketPath, peerProtocol: 1, peerFeatures: ["notify_idle"] };
   const row: Record<string, unknown> = { kind: "interactive", pid: 123, sessionId: identity.sessionId, cwd: "/tmp/project", status: "idle", name: "Fixture" };
   const save = () => writeFile(path.join(configDir, "sessions", "123.json"), JSON.stringify(m), { mode: 0o600 }); await save();
   let ps = `${process.getuid?.()} ${identity.processStart}`;
@@ -169,6 +170,101 @@ test("discovery never treats disagreeing states or unsafe registry ownership as 
     await chmod(path.join(f.configDir, "sessions", "123.json"), 0o666);
     const result = await discoverClaudeNativeSessions(f.options);
     assert.equal(result.sessions.length, 0); assert.equal(result.errors[0].code, "unsafe_metadata");
+  } finally { await f.cleanup(); }
+});
+
+test("targeted native inspection reads one current registry and PID without enumerating agents", async () => {
+  const f = await fixture(), commands: string[] = [];
+  try {
+    const target = { ...identity, configDir: await realpath(f.configDir) };
+    const options = { ...f.options, run: async (file: string, args: string[], env?: NodeJS.ProcessEnv) => {
+      commands.push(file); assert.equal(file, "/bin/ps", "known identity must not invoke the agents reader");
+      assert.deepEqual(args, ["-p", "123", "-o", "uid=", "-o", "lstart="]);
+      return f.options.run!(file, args, env);
+    } };
+    assert.equal((await inspectClaudeNativeSession(target, options)).status, "idle");
+    f.m.status = "busy"; await f.save();
+    assert.equal((await inspectClaudeNativeSession(target, options)).status, "working");
+    assert.deepEqual(commands, ["/bin/ps", "/bin/ps"]);
+  } finally { await f.cleanup(); }
+});
+
+test("targeted inspection retains registry, process incarnation and owned socket fences", async () => {
+  const f = await fixture();
+  try {
+    const target = { ...identity, configDir: await realpath(f.configDir) }, original = { ...f.m };
+    for (const [change, code] of [
+      [{ sessionId: randomUUID() }, "identity_unavailable"],
+      [{ procStart: "Sun Oct 11 10:20:31 2026" }, "identity_unavailable"],
+      [{ pid: 124 }, "unsupported_contract"],
+      [{ kind: "bg" }, "unsupported_contract"],
+      [{ kind: undefined }, "unsupported_contract"],
+      [{ parkedJobId: "background-job" }, "unsupported_contract"],
+      [{ pidDomain: "linux" }, "unsupported_contract"],
+      [{ peerProtocol: 2 }, "unsupported_contract"],
+      [{ peerFeatures: [1] }, "unsupported_contract"],
+      [{ cwd: "relative/path" }, "unsupported_contract"],
+      [{ messagingSocketPath: path.join(f.root, "124.sock") }, "unsupported_contract"]
+    ] as const) {
+      for (const key of Object.keys(f.m)) delete f.m[key];
+      Object.assign(f.m, original, change); await f.save();
+      await assert.rejects(inspectClaudeNativeSession(target, f.options), { code });
+    }
+    for (const key of Object.keys(f.m)) delete f.m[key];
+    Object.assign(f.m, original); await f.save();
+    f.setPs(`${process.getuid?.()} Sun Oct 11 10:20:31 2026`);
+    await assert.rejects(inspectClaudeNativeSession(target, f.options), { code: "process_changed" });
+    f.setPs(`${Number(process.getuid?.()) + 1} ${identity.processStart}`);
+    await assert.rejects(inspectClaudeNativeSession(target, f.options), { code: "process_changed" });
+    f.setPs(`${process.getuid?.()} ${identity.processStart}`);
+    await chmod(String(f.m.messagingSocketPath), 0o666);
+    await assert.rejects(inspectClaudeNativeSession(target, f.options), { code: "unsafe_metadata" });
+    await chmod(String(f.m.messagingSocketPath), 0o600);
+    await chmod(path.join(f.configDir, "sessions", "123.json"), 0o666);
+    await assert.rejects(inspectClaudeNativeSession(target, f.options), { code: "unsafe_metadata" });
+  } finally { await f.cleanup(); }
+});
+
+test("native discovery is single flight across clients in one command, but never crosses command executions", async () => {
+  const f = await fixture(); let agents = 0, processes = 0;
+  const run = async (file: string, args: string[], env?: NodeJS.ProcessEnv) => {
+    if (file === "/bin/ps") processes++; else agents++;
+    return f.options.run!(file, args, env);
+  };
+  try {
+    for (const expected of [1, 2]) {
+      await runCliCommandExecution("list", {}, { runtimeLog: () => {} }, async () => {
+        const clients = [new Peer(), new Peer()].map(peerTransport =>
+          createClaudeNativeClient({ ...f.options, run, peerTransport }));
+        try {
+          const results = await Promise.all(clients.map(client => client.discover()));
+          assert.equal(results[0].sessions.length, 1); assert.deepEqual(results[1], results[0]);
+          await clients[0].discover();
+          assert.equal(agents, expected); assert.equal(processes, expected);
+        } finally { clients.forEach(client => client.close()); }
+      });
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("native send freshly inspects the registry after persisted intent despite a cached discovery", async () => {
+  const f = await fixture(), peer = new Peer(); let agents = 0;
+  const run = async (file: string, args: string[], env?: NodeJS.ProcessEnv) => {
+    if (file !== "/bin/ps") agents++;
+    return f.options.run!(file, args, env);
+  };
+  try {
+    await runCliCommandExecution("send", {}, { runtimeLog: () => {} }, async () => {
+      const client = createClaudeNativeClient({ ...f.options, run, peerTransport: peer });
+      try {
+        const selected = (await client.discover()).sessions[0];
+        const receipt = await client.send(selected, { ...input(), beforeDispatch: async () => {
+          f.m.status = "busy"; await f.save();
+        } });
+        assert.deepEqual(receipt, { dispatchState: "not_sent", errorCode: "session_not_idle" });
+        assert.equal(agents, 1); assert.equal(peer.probes, 3); assert.equal(peer.sent, 0);
+      } finally { client.close(); }
+    });
   } finally { await f.cleanup(); }
 });
 

@@ -23,6 +23,12 @@ export type ClaudeTerminalWindowObservation =
   | { state: "verified"; role: "background_view" | "ordinary" }
   | Exclude<ClaudeTerminalRegistryObservation, { state: "verified" }>;
 
+export type ClaudeTerminalRegistryRowObservation =
+  | { state: "verified"; row: ClaudeTerminalRegistryRow & {
+      configDir: string; processStart: string; version: string; waitingFor?: string } }
+  | { state: "legacy" }
+  | Exclude<ClaudeTerminalRegistryObservation, { state: "verified" }>;
+
 const MAX_REGISTRY_BYTES = 64 * 1024;
 class RegistryError extends Error {
   constructor(readonly reason: Extract<ClaudeTerminalRegistryObservation, { state: "invalid" }>["reason"]) {
@@ -154,6 +160,35 @@ export function observeClaudeTerminalRegistry(input: {
     const bound = bindRegistry(configDir, input.pid, registry, row);
     assertCurrentProcess(bound);
     return bound;
+  } catch (error) {
+    if (error instanceof RegistryError) return { state: "invalid", reason: error.reason };
+    if (error instanceof SyntaxError) return { state: "invalid", reason: "invalid_registry" };
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { state: "absent" };
+    return { state: "invalid", reason: "registry_unavailable" };
+  }
+}
+
+/** Fresh one-PID metadata only; native socket authority and caller identity fences remain separate. */
+export function observeClaudeTerminalRegistryRow(input: {
+  configDir: string; pid: number;
+}): ClaudeTerminalRegistryRowObservation {
+  if (!absolute(input.configDir) || !Number.isSafeInteger(input.pid) || input.pid < 1) {
+    return { state: "invalid", reason: "invalid_identity" };
+  }
+  try {
+    const configDir = realpathSync(input.configDir), registry = readRegistry(configDir, input.pid);
+    if (registry.kind !== undefined && registry.kind !== "interactive" || registry.parkedJobId !== undefined
+      || registry.pidDomain !== undefined && registry.pidDomain !== process.platform) {
+      throw new RegistryError("registry_mismatch");
+    }
+    // Older registries can omit kind. Verify their owner/process metadata before
+    // allowing the legacy reader to supply interactive-kind evidence.
+    const row = selectExactRow([{ ...registry, kind: "interactive" }], input.pid);
+    const { state: _state, ...bound } = bindRegistry(configDir, input.pid, registry, row);
+    assertCurrentProcess(bound);
+    if (registry.kind === undefined) return { state: "legacy" };
+    return { state: "verified", row: { ...bound, kind: "interactive", status: row.status,
+      ...(statusShape(registry.waitingFor) ? { waitingFor: registry.waitingFor } : {}) } };
   } catch (error) {
     if (error instanceof RegistryError) return { state: "invalid", reason: error.reason };
     if (error instanceof SyntaxError) return { state: "invalid", reason: "invalid_registry" };

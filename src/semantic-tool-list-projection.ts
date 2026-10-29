@@ -103,7 +103,7 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",
-      "attention_required", "updated_at", "observation_error", "send_blocked_reason", "backend_activity_state"]),
+      "attention_required", "updated_at", "observation_error", "send_blocked_reason", "backend_activity_state", "detail_scan", "send_preflight_required"]),
     ...(recordValue(row.approval_state) ? { approval_state: compactAkkListScalars(recordValue(row.approval_state)!,
       ["scanned", "blocked", "approvable", "prompt_kind"]) } : {}),
     ...(recordValue(row.native_store_authority)
@@ -215,6 +215,7 @@ function compactAkkListTerminal(
     "native_identity_state",
     "native_agent_session_id",
     "management_state",
+    "detail_scan",
     "send_blocked_reason",
     "handoff_state",
     "confidence"

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { createCodexNativeConversationId } from "./codex-native-identity.js";
 import { parseCodexNativeConversationId } from "./codex-native-identity.js";
 import type { CodexNativeTaskRecord, PersistedNativeInteraction } from "./codex-native-state-store.js";
-import type { CodexNativeIdentity, CodexNativeSnapshot, CodexNativeTurn, NativeInteractionResponse } from "./codex-native-types.js";
+import type { CodexNativeIdentity, CodexNativeSnapshot, CodexNativeThread, CodexNativeTurn, NativeInteractionResponse } from "./codex-native-types.js";
 import { isRecord } from "./value-guards.js";
 
 const semanticId = (kind: string, parts: unknown[]): string => `${kind}:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
@@ -139,6 +139,36 @@ export function nativeTurnProjection(turn: CodexNativeTurn | undefined) {
   const text = (finals.length ? finals : messages.filter(item => item.phase == null)).map(item => item.text).join("\n\n");
   return { id: turn.id, status: turn.status, items_complete: turn.itemsComplete,
     ...(turn.status !== "inProgress" && turn.itemsComplete ? { final_text: text } : { response_text: text }) };
+}
+
+/** Ordinary inventory uses loaded-thread summaries; ambiguous groups retain only exact history identity. */
+export function codexNativeDiscoveryProjection(identity: CodexNativeIdentity, thread: CodexNativeThread, backendVersion: string,
+  history?: CodexNativeSnapshot) {
+  if (thread.id !== identity.threadId || history && history.threadId !== identity.threadId) throw new Error("Native discovery history identity mismatch");
+  const id = createCodexNativeConversationId(identity);
+  const loaded = history?.loaded ?? thread.status.type !== "notLoaded";
+  const send = loaded && thread.status.type === "idle" && (history?.canSend ?? true);
+  const latest = history?.turns.find(turn => turn.id === history.latestTurnId);
+  const watch = loaded && thread.status.type === "active";
+  const flags = thread.status.type === "active" ? thread.status.activeFlags : [];
+  return {
+    id, conversation_id: id, source: "codex_cli", agent: "codex",
+    title: thread.name ?? thread.preview ?? "Codex CLI", cwd: thread.cwd,
+    native_thread_id: identity.threadId, backend_version: backendVersion,
+    ...(history ? { ...unstartedThreadProjection(history), native_turn_id: history.latestTurnId,
+      latest_turn: latest ? { id: latest.id, status: latest.status } : null,
+      ...(history.historyMaterialized === false ? { history_state: "unmaterialized" } : {}) } : {}),
+    connection_state: loaded ? "loaded_backend_verified" : "not_loaded", activity_state: thread.status.type,
+    active_flags: flags, interaction_requests_scanned: false, pending_interaction_count: null,
+    attention_required: flags.length > 0 || Boolean(history?.pendingInteractions.length), detail_scan: "deferred", send_preflight_required: send,
+    capabilities: { status: true, send, watch, interaction_notify: watch,
+      interaction_respond: false, approve: false, set_permissions: false },
+    available_actions: {
+      status: { tool: "agent_knock_knock_status", input: { conversation_id: id } },
+      ...(send ? { send: { tool: "agent_knock_knock_send", input: { conversation_id: id } } } : {}),
+      ...(watch ? { watch: { tool: "agent_knock_knock_watch", input: { conversation_id: id } } } : {})
+    }
+  };
 }
 
 export function codexNativeSessionProjection(identity: CodexNativeIdentity, snapshot: CodexNativeSnapshot, backendVersion: string, interactionsScanned = false) {

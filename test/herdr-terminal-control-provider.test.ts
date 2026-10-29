@@ -79,6 +79,7 @@ interface HerdrHarness {
   readBehaviors: Record<string, "unsupported" | "invalid" | "transport" | undefined>;
   extraPanes: PaneState[];
   snapshotProfiles: Partial<Record<number, { version: string; protocol: number }>>;
+  activitySnapshots?: Array<{ agent?: unknown; agent_status?: unknown }>;
   socketIdentity: HerdrSocketIdentity;
   viewportColumns: number;
   viewportRows: number;
@@ -231,6 +232,7 @@ function createHarness(profile: { version: string; protocol: number } = {
               cwd: snapshotPane.cwd,
               focused: true,
               agent_status: null,
+              ...harness.activitySnapshots?.[snapshotOrdinal - 1],
               revision: 0
             })),
             ...(harness.includeViewportLayout ? {
@@ -512,6 +514,30 @@ test("Herdr control refs retain socket-incarnation evidence across capture and i
     ),
     false
   );
+});
+
+test("Herdr discovery activity uses only recognized final-snapshot metadata for the matching agent", async () => {
+  const harness = createHarness();
+  harness.activitySnapshots = [
+    { agent: "codex", agent_status: "working" },
+    { agent: "codex", agent_status: "idle" }
+  ];
+  const [terminal] = await harness.provider.listTerminals();
+  const requestCount = harness.requests.length;
+  assert.equal(harness.provider.discoveryActivity(terminal, "codex"), "idle");
+  assert.equal(harness.provider.discoveryActivity(terminal, "claude"), undefined);
+  const control = harness.provider.toControlRef(terminal);
+  assert.equal(harness.provider.discoveryActivity(harness.provider.endpoint(control), "codex"), "idle");
+  assert.equal(harness.requests.length, requestCount, "display metadata requires no extra read");
+  assert.equal("discoveredActivity" in control, false, "display metadata is not persisted authority");
+  for (const agent_status of ["working", "blocked", "done", "unknown", "new-unsupported-state", null]) {
+    harness.activitySnapshots = undefined;
+    const nextSnapshot = harness.requests.filter(entry => entry.request.method === "session.snapshot").length;
+    harness.activitySnapshots = Array.from({ length: nextSnapshot + 2 }, () => ({ agent: "codex", agent_status }));
+    const [current] = await harness.provider.listTerminals();
+    assert.equal(harness.provider.discoveryActivity(current, "codex"),
+      agent_status === "working" ? "working" : undefined);
+  }
 });
 
 test("Herdr resolve refreshes a moved pane route without changing identity", async () => {

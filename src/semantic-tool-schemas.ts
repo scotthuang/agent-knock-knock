@@ -320,7 +320,7 @@ export const listParameters = {
     },
     noApprovalScan: {
       type: "boolean",
-      description: "When true, skip pane reading, including approval, activity and input-readiness checks; actions that require those checks (including Claude terminal Send) may be unavailable. Omit this option or set false when listing terminals to send work."
+      description: "List defaults to discovery and current native activity; detailed approval, Composer and lifecycle checks are deferred to Status and execution preflight. Set false to explicitly scan panes and show current terminal input actions (CLI: --approval-scan). True keeps pane reading disabled."
     },
     terminalDebug: {
       type: "boolean",

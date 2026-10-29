@@ -673,6 +673,7 @@ function registerSemanticListTool(api): void {
       pushOptional(args, "--desktop-limit", numberString(params.desktopLimit));
       pushOptional(args, "--codex-home", stringValue(config.codexHome));
       if (params.noApprovalScan === true) args.push("--no-approval-scan");
+      if (params.noApprovalScan === false) args.push("--approval-scan");
       if (params.terminalDebug === true) args.push("--terminal-debug");
       return args;
     }

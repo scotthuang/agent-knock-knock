@@ -36,7 +36,7 @@ export async function executeConversationCommand(command: string | undefined, op
     terminals: cliDependencies().conversationRoutingTerminals ?? terminals,
     execute: async (selectedCommand, selectedOptions) => {
       const result = await runCliCommandExecution(selectedCommand, selectedOptions, { ...cliDependencies(), stdout: undefined },
-        () => execute(selectedCommand, selectedOptions));
+        () => execute(selectedCommand, selectedOptions), { inheritDiscovery: true });
       setCliExitCode(result.exitCode);
       return JSON.parse(result.stdout);
     }

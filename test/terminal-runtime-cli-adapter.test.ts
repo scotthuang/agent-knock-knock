@@ -82,6 +82,48 @@ test("runtime factories stay lazy, ordered, and instance scoped", () => {
   assert.equal(second.createProcessSource(), secondSource);
 });
 
+test("List runtimes share terminal enumeration but endpoint resolution and later commands stay fresh", async () => {
+  let discoveries = 0, resolutions = 0;
+  const observed = new WeakSet<TerminalEndpointRef>();
+  class Provider extends StaticTerminalControlProvider {
+    override async listTerminals() {
+      discoveries++; const endpoints = await super.listTerminals();
+      endpoints.forEach(endpoint => observed.add(endpoint)); return endpoints;
+    }
+    override async resolve(terminal: TerminalEndpointRef) {
+      assert.equal(observed.has(terminal), true); resolutions++; return terminal;
+    }
+  }
+  const registry = createTerminalControlProviderRegistry([new Provider({ panes: [{
+    kind: "tmux", target: "work:0.0", session: "work", window: 0, pane: 0, panePid: 42
+  }] })]);
+  const dependencies = { terminalControlProviderRegistry: registry };
+  await runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    const a = runtime({ listDiscoveryOnly: true }, dependencies).createControlProvider();
+    const b = runtime({ listDiscoveryOnly: true }, dependencies).createControlProvider();
+    const [first, second] = await Promise.all([a.listTerminals(), b.listTerminals()]);
+    assert.deepEqual(first, second);
+    assert.equal(discoveries, 1);
+    await a.resolve(first[0]); await b.resolve(second[0]);
+    assert.equal(resolutions, 2);
+    await runtime({}, dependencies).createControlProvider().listTerminals();
+    assert.equal(discoveries, 2);
+  });
+  await runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    await runtime({ listDiscoveryOnly: true }, dependencies).createControlProvider().listTerminals();
+  });
+  assert.equal(discoveries, 3);
+});
+
+test("lightweight and Codex-only inventory does not eagerly enumerate Claude for adapter construction", () => {
+  const dependencies = { loadClaudeAgentRows() { throw new Error("unexpected Claude enumeration"); } };
+  for (const options of [{ listDiscoveryOnly: true }, { agent: "codex" }]) {
+    const registry = runtime(options, dependencies).createAgentRegistry();
+    assert.ok(registry.require("codex"));
+    assert.ok(registry.require("claude"));
+  }
+});
+
 test("injected and static terminal observations preserve precedence and truthiness", async () => {
   const injectedRegistry = createTerminalControlProviderRegistry([
     new StaticTerminalControlProvider()
@@ -294,6 +336,9 @@ test("Claude observation uses the exact command and keeps fail-closed errors", a
       sessionId: "native-42",
       status: "idle"
     }]);
+    assert.deepEqual(runtime({ terminal: "terminal:v2:tmux:claude:akk:0.0:42" })
+      .loadClaudeAgentRows({ required: true }), [{ pid: 42, sessionId: "native-42", status: "idle" }],
+    "a missing exact registry retains the legacy reader fallback");
   });
   assert.deepEqual(fs.readFileSync(argsPath, "utf8").trim().split("\n"),
     ["agents", "--json", "--all"]);

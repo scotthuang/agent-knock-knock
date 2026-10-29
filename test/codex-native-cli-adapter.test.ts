@@ -9,6 +9,7 @@ import { createCodexNativeConversationId } from "../src/codex-native-identity.js
 import { CodexNativeError, type CodexNativeSnapshot, type CodexNativePermissions } from "../src/codex-native-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 import { isSubmissionError, toolResult, withTurnIdentity } from "../src/semantic-tool-presentation.js";
+import { presentConversationList } from "../src/conversation-list-presentation.js";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-cli-"));
@@ -51,10 +52,94 @@ function fixture(t: { after(fn: () => void): void }) {
   };
 }
 
+test("native List discovery reads no task snapshots and Status retains fresh detailed reads", async t => {
+  const f = fixture(t);
+  f.failReads();
+  for (const state of ["idle", "active"] as const) {
+    f.snapshot.thread.status = state === "idle" ? { type: state } : { type: state, activeFlags: ["waitingOnApproval"] };
+    const result = await f.run("codex-cli-list");
+    assert.equal(result.codex_cli_scan.complete, true, "broken task-history reads do not erase discovered loaded sessions");
+    const row = result.codex_cli_sessions[0];
+    assert.equal(row.activity_state, state);
+    assert.equal(row.capabilities.send, state === "idle");
+    assert.equal(row.capabilities.watch, state === "active");
+    assert.equal(row.detail_scan, "deferred");
+    assert.equal(row.interaction_requests_scanned, false);
+    assert.equal(row.pending_interaction_count, null);
+    assert.equal(row.native_turn_id, undefined, "a thread activity flag is not an exact task anchor");
+    assert.equal(row.latest_turn, undefined);
+    assert.equal(row.interaction_state, undefined);
+  }
+  const detailed = await f.run("codex-cli-list", { approvalScan: true });
+  assert.equal(detailed.codex_cli_scan.complete, false, "explicit detailed scan still reads current history");
+  await assert.rejects(f.run("status", { conversation: f.id }), /private backend failure/u,
+    "Status routing still demands a fresh snapshot rather than reusing List's summary");
+  assert.equal(f.sends, 0);
+});
+
+test("default native List retains exact empty-candidate folding only for ambiguous project groups", async t => {
+  const f = fixture(t); f.snapshot.historyMaterialized = false;
+  const existing: CodexNativeSnapshot = structuredClone(f.snapshot);
+  existing.threadId = existing.thread.id = existing.thread.sessionId = "existing-peer";
+  existing.thread.name = "Existing task"; existing.historyMaterialized = true;
+  existing.latestTurnId = "existing-turn";
+  existing.turns = [{ id: "existing-turn", status: "completed", itemsComplete: true,
+    items: [{ id: "private-item", type: "agentMessage", text: "DO_NOT_RETURN_HISTORY_BODY" }] }];
+  const unrelated = { ...existing.thread, id: "unrelated", sessionId: "unrelated", cwd: path.join(existing.thread.cwd, "other") };
+  const reads: string[] = []; let subscriptions = 0;
+  f.client.discover = async () => [f.snapshot.thread, existing.thread, unrelated];
+  f.client.readSnapshot = async id => {
+    reads.push(id);
+    assert.notEqual(id, unrelated.id, "ordinary single-thread groups do not read history");
+    return structuredClone(id === f.target.threadId ? f.snapshot : existing);
+  };
+  f.client.subscribe = async () => { subscriptions++; throw new Error("List must not subscribe"); };
+  const result = await f.run("codex-cli-list");
+  assert.equal(result.codex_cli_scan.complete, true);
+  assert.deepEqual(reads, [f.target.threadId, existing.threadId]);
+  assert.equal(subscriptions, 0);
+  const rows = result.codex_cli_sessions;
+  assert.equal(rows[0].unstarted_thread, true);
+  assert.equal(rows[0].history_state, "unmaterialized");
+  assert.equal(rows[0].native_turn_id, null);
+  assert.equal(rows[0].latest_turn, null);
+  assert.deepEqual(rows[1].latest_turn, { id: "existing-turn", status: "completed" });
+  assert.equal(rows[2].native_turn_id, undefined);
+  assert.doesNotMatch(JSON.stringify(rows), /DO_NOT_RETURN_HISTORY_BODY|private-item|response_text|final_text/u);
+  const presented = presentConversationList(rows, []);
+  assert.equal(presented.conversations.length, 2);
+  assert.equal(presented.conversation_presentation.unstarted_candidates_omitted, 1);
+  const debug = presentConversationList(rows, [], { diagnostics: true });
+  assert.equal(debug.conversations.length, 3);
+  assert.equal(debug.conversations[0].classification, "unstarted_candidate");
+  assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
+});
+
+test("ambiguous native discovery preserves visible rows when history is unavailable or crossed", async t => {
+  for (const fault of ["read_failure", "crossed_thread"] as const) await t.test(fault, async t => {
+    const f = fixture(t); f.snapshot.historyMaterialized = false;
+    const peer = { ...f.snapshot.thread, id: "existing-peer", sessionId: "existing-peer", name: "Existing task" };
+    f.client.discover = async () => [f.snapshot.thread, peer];
+    f.client.readSnapshot = async () => {
+      if (fault === "read_failure") throw new Error("PRIVATE_READ_FAILURE");
+      return { ...structuredClone(f.snapshot), threadId: "different-thread" };
+    };
+    const result = await f.run("codex-cli-list");
+    assert.equal(result.codex_cli_scan.complete, false);
+    assert.equal(result.codex_cli_scan.returned, 2, "failed detail reads do not erase loaded owners");
+    const presented = presentConversationList(result.codex_cli_sessions, []);
+    assert.equal(presented.conversations.length, 2);
+    assert.equal(presented.conversation_presentation.unstarted_candidates_omitted, undefined);
+    assert.ok(result.codex_cli_sessions.every(row => row.native_turn_id === undefined && row.unstarted_thread === undefined));
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_READ_FAILURE|different-thread/u);
+    assert.equal(f.sends, 0); assert.equal(f.callbacks, 0);
+  });
+});
+
 test("unmaterialized native Status offers first Send without claiming subscription or permission authority", async t => {
   const f = fixture(t); f.snapshot.historyMaterialized = false;
   f.client.subscribe = async () => { throw new CodexNativeError("unmaterialized_subscription", "No materialized history"); };
-  const listed = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+  const listed = (await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0];
   assert.equal(listed.unstarted_thread, true);
   assert.equal(listed.connection_state, "loaded_backend_verified"); assert.equal(listed.activity_state, "idle");
   assert.equal(listed.capabilities.send, true); assert.equal(listed.available_actions.send.input.conversation_id, f.id);
@@ -86,7 +171,7 @@ test("unmaterialized native Status offers first Send without claiming subscripti
   const sent = await f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" });
   assert.equal(sent.delivered, true); assert.equal(sent.submission_state, "verified");
   assert.equal(sent.native_thread_id, f.target.threadId); assert.equal(sent.native_turn_id, "native-turn-1");
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, undefined);
   assert.equal(f.sends, 1); assert.equal(f.launches, 1); assert.equal(f.callbacks, 0);
   f.finish();
   const completed = await f.run("watch-status", { watch: sent.watch_id });
@@ -97,18 +182,18 @@ test("only a verified unnamed pre-first-task snapshot is marked as an unstarted 
   const f = fixture(t);
   for (const history of [undefined, true, false]) {
     f.snapshot.historyMaterialized = history;
-    assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, history === false ? true : undefined);
+    assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, history === false ? true : undefined);
   }
   for (const field of ["name", "preview"] as const) {
     f.snapshot.thread[field] = "A deliberately named new session";
-    const row = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+    const row = (await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0];
     assert.equal(row.unstarted_thread, undefined);
     assert.equal(row.capabilities.send, true);
     delete f.snapshot.thread[field];
   }
   f.snapshot.pendingInteractions.push({ id: "pending", kind: "blocking_question", threadId: f.target.threadId,
     turnId: "pending-turn", itemId: "pending-item", method: "item/tool/requestUserInput", questions: [] });
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, undefined);
   assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
 });
 
@@ -126,7 +211,7 @@ test("native Status public progress stays on the exact selected turn and disting
   assert.equal(running.progress.latest_item_at, "2023-11-14T22:13:20.000Z");
   assert.ok(Number.isFinite(Date.parse(running.progress.read_at)));
   assert.deepEqual((toolResult(running).details as typeof running).progress, running.progress);
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].progress, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].progress, undefined);
   f.finish();
   await f.run("watch-status", { watch: sent.watch_id });
   f.snapshot.latestTurnId = "successor";
@@ -166,7 +251,7 @@ test("native CLI Send persists one exact task, Status recovers completion withou
 
 test("native CLI list/status and permission tools preserve native identities without terminal selection", async t => {
   const f = fixture(t);
-  const list = await f.run("codex-cli-list"); assert.equal(list.codex_cli_sessions[0].conversation_id, f.id);
+  const list = await f.run("codex-cli-list", { approvalScan: true }); assert.equal(list.codex_cli_sessions[0].conversation_id, f.id);
   const status = await f.run("status", { conversation: f.id }); assert.equal(status.connection_state, "loaded_backend_verified");
   const options = await f.run("native-inspect", { conversation: f.id, action: "permissions" });
   assert.equal(options.current, "read-only"); assert.deepEqual(options.choices.map(c => c.id), ["read-only", "default", "full-access"]);

@@ -21,6 +21,7 @@
     "test/codex-async-question-adapter.test.ts",
     "test/codex-terminal-agent-adapter-01590.test.ts",
     "test/codex-local-session-provider.test.ts",
+    "test/codex-store-process-probes.test.ts",
     "test/codex-session-provider.test.ts",
     "test/codex-sticky-rollout-lifecycle-core.test.ts",
     "test/conversation-trace.test.ts",

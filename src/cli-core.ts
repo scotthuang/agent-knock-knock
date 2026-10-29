@@ -6,6 +6,7 @@ import { DEFAULT_MONITOR_HARD_TIMEOUT_MINUTES } from "./monitor-deadline-policy.
 import { dispatchLocalCodexCli, localCodexListForCli } from "./local-codex-cli-adapter.js";
 import { assertBackendRecoveryCliTarget } from "./backend-recovery-semantic.js";
 import { executeConversationCommand } from "./conversation-routing-cli-adapter.js";
+import { isClaudeNativeConversationId, parseClaudeNativeConversationId } from "./claude-native-identity.js";
 import { withConversationSendAuthority } from "./conversation-routing-commands.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -479,14 +480,13 @@ export async function executeCliCommand(
 }
 
 async function conversationTerminals(commandName: string | undefined, request: CliCommandOptions, terminalId?: string) {
-  const agentFilter = /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(
-    String(request.conversation ?? request.conversationId ?? request.terminal ?? request.session)
-  ) ? "claude" : "codex";
+  const target = request.conversation ?? request.conversationId ?? request.terminal ?? request.session;
+  const agentFilter = /^(?:claude-cli:|terminal:v\d+:.*:claude:)/u.test(String(target)) ? "claude" : "codex";
   if (commandName === "send" && terminalId && agentFilter === "codex") {
     const observation = await terminalListCliFacade.observeExactTerminal({ options: request, terminalId });
     return observation.state === "available" ? [withConversationSendAuthority(observation.rawTerminal, observation.terminal)] : [];
   }
-  return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId, agentFilter,
+  return terminalListCliFacade.buildTerminalListGroup({ options: request, terminalId, agentFilter, processPid: isClaudeNativeConversationId(target) ? parseClaudeNativeConversationId(String(target)).pid : undefined,
     includeManagedActions: ["send", "status", "native-status", "native-inspect", "set-permissions", "approve", "respond-interaction"].includes(commandName ?? "")
   }).then(scan => scan.terminalControlled);
 }
@@ -1260,7 +1260,7 @@ const terminalListCliFacade = createTerminalListCliFacade({
   },
   discovery: {
     localCodexList: localCodexListForCli,
-    loadClaudeAgentRows, observeClaudeWindowRole: (options, pid, cwd) => terminalRuntime(options).observeClaudeWindowRole(pid, cwd),
+    loadClaudeAgentRows, loadClaudeAgentRowsForDiscovery: options => terminalRuntime(options).loadClaudeAgentRowsForDiscovery(), observeClaudeWindowRole: (options, pid, cwd) => terminalRuntime(options).observeClaudeWindowRole(pid, cwd),
     agentVersionForRunningProcess,
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,

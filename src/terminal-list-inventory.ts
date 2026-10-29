@@ -41,6 +41,8 @@ export interface TerminalListInventoryScan {
 export interface TerminalListInventoryOptions {
   managedOnly?: boolean;
   noApprovalScan?: boolean;
+  listDiscoveryOnly?: boolean;
+  listDiscoverySnapshot?: boolean;
   terminalDebug?: boolean;
 }
 
@@ -80,6 +82,7 @@ export async function collectTerminalListInventory<
   options: Options;
   agentFilter?: ExecutorKind;
   terminalId?: string;
+  processPid?: number;
   ports: TerminalListInventoryPorts<Options>;
 }): Promise<TerminalListInventoryScan> {
   const { options, agentFilter, terminalId, ports } = input;
@@ -161,22 +164,19 @@ export async function collectTerminalListInventory<
           (session) => session.terminalControl !== undefined &&
             bridge.terminalConversationId(session) === terminalId
         )
-      : controlledSessions;
-    for (const session of selectedSessions) {
-      try {
-        terminalControlled.push(await ports.projectTerminal({
-          session,
-          activeSessions,
-          selectedSessions,
-          options,
-          bridge
-        }));
-      } catch (error) {
-        errors.push(
-          `terminal process ${session.pid}: ` +
-            (error instanceof Error ? error.message : String(error))
-        );
-      }
+      : input.processPid === undefined ? controlledSessions
+        : controlledSessions.filter(session => session.pid === input.processPid);
+    // Bound provider pressure even when an explicit detailed scan selects many panes.
+    for (let offset = 0; offset < selectedSessions.length; offset += 8) {
+      const projected = await Promise.all(selectedSessions.slice(offset, offset + 8).map(async session => {
+        try {
+          return await ports.projectTerminal({ session, activeSessions, selectedSessions, options, bridge });
+        } catch (error) {
+          errors.push(`terminal process ${session.pid}: ${error instanceof Error ? error.message : String(error)}`);
+          return undefined;
+        }
+      }));
+      terminalControlled.push(...projected.filter((entry): entry is TerminalListInventoryEntry => entry !== undefined));
     }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
@@ -199,7 +199,7 @@ export async function collectTerminalListInventory<
       agents: adapters.map((adapter) => adapter.agent),
       active_count: activeCount,
       terminal_count: terminalControlled.length,
-      approval_scan: options.noApprovalScan ? "disabled" : "enabled",
+      approval_scan: options.noApprovalScan ? "disabled" : options.listDiscoveryOnly ? "deferred" : "enabled",
       diagnostics: terminalDiagnostics,
       error: errors.length > 0 ? errors.join("; ") : undefined
     }
