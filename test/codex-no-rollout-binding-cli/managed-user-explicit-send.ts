@@ -1324,7 +1324,7 @@ test("explicit close of a v1 uncertain clear dispatch restores only future candi
       typeof futureAction.arguments.expected_terminal_token,
       "string"
     );
-    const listedAfterClose = await listFixtureTerminal(fixture);
+    const listedAfterClose = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(listedAfterClose.management_state, "conflict");
     assert.equal(
       listedAfterClose.management_conflict?.kind,
