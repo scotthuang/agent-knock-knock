@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.6",
+  "version": "0.16.7",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "30b4f5201788271f141069a88e9a0295a36a55ff",
-  "asset": "scotthuang-agent-knock-knock-0.16.6.tgz",
-  "sha256": "3a6d7237d9327e4e5e5488e6413a0a8dd8d50b08eb5474199e694ac9540218bc",
-  "bytes": 3939866,
-  "changelog": "Align Claude List offers with fresh managed-Send transcript admission and exact idle lifecycle evidence. Safely reattach a conclusively inactive prior Session for Claude New thread/Clear, preserving history and binding generations. Validate original tokens before recovery and refreshed thread/process identity after it; retain locks, pending-Turn/transition, revision/CAS, cross-Store, input and no-silent-fallback guards. Coordinate Pi 0.1.0-poc.14 and DSH 0.1.0-rc.17 on next, both pinning core 0.16.6. Full release gate: 3866 core tests, connector gates, isolated OpenClaw 2026.9.1 loading and ClawHub validation passed. No new destructive live lifecycle or external-channel delivery claim."
+  "commit": "507826c547b4dc734fd1e6c721af247e72db1a19",
+  "asset": "scotthuang-agent-knock-knock-0.16.7.tgz",
+  "sha256": "aebd65057b1cf5a201c80a97cf84395b55a4cd2bd1b5ba49821da612a64e3d1b",
+  "bytes": 3960960,
+  "changelog": "Reuse discovery reads within one command and make default List a lightweight inventory. Detailed Status/explicit scans and execution retain fresh exact identity, approval and input checks. Preserve verified empty-thread folding and update Claude display confidence only after exact identity resolution. Core 0.16.7 is coordinated with Pi 0.1.0-poc.15 and DSH 0.1.0-rc.19 on next. Formal gate passed 3895 core full tests, both connector gates, isolated OpenClaw 2026.9.1 loading, runtime Inspector and package dry-run. No production install, destructive live lifecycle or external delivery claim."
 }
