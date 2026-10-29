@@ -9,6 +9,7 @@ import { createCodexNativeConversationId } from "../src/codex-native-identity.js
 import { CodexNativeError, type CodexNativeSnapshot, type CodexNativePermissions } from "../src/codex-native-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 import { isSubmissionError, toolResult, withTurnIdentity } from "../src/semantic-tool-presentation.js";
+import { presentConversationList } from "../src/conversation-list-presentation.js";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-native-cli-"));
@@ -74,6 +75,65 @@ test("native List discovery reads no task snapshots and Status retains fresh det
   await assert.rejects(f.run("status", { conversation: f.id }), /private backend failure/u,
     "Status routing still demands a fresh snapshot rather than reusing List's summary");
   assert.equal(f.sends, 0);
+});
+
+test("default native List retains exact empty-candidate folding only for ambiguous project groups", async t => {
+  const f = fixture(t); f.snapshot.historyMaterialized = false;
+  const existing: CodexNativeSnapshot = structuredClone(f.snapshot);
+  existing.threadId = existing.thread.id = existing.thread.sessionId = "existing-peer";
+  existing.thread.name = "Existing task"; existing.historyMaterialized = true;
+  existing.latestTurnId = "existing-turn";
+  existing.turns = [{ id: "existing-turn", status: "completed", itemsComplete: true,
+    items: [{ id: "private-item", type: "agentMessage", text: "DO_NOT_RETURN_HISTORY_BODY" }] }];
+  const unrelated = { ...existing.thread, id: "unrelated", sessionId: "unrelated", cwd: path.join(existing.thread.cwd, "other") };
+  const reads: string[] = []; let subscriptions = 0;
+  f.client.discover = async () => [f.snapshot.thread, existing.thread, unrelated];
+  f.client.readSnapshot = async id => {
+    reads.push(id);
+    assert.notEqual(id, unrelated.id, "ordinary single-thread groups do not read history");
+    return structuredClone(id === f.target.threadId ? f.snapshot : existing);
+  };
+  f.client.subscribe = async () => { subscriptions++; throw new Error("List must not subscribe"); };
+  const result = await f.run("codex-cli-list");
+  assert.equal(result.codex_cli_scan.complete, true);
+  assert.deepEqual(reads, [f.target.threadId, existing.threadId]);
+  assert.equal(subscriptions, 0);
+  const rows = result.codex_cli_sessions;
+  assert.equal(rows[0].unstarted_thread, true);
+  assert.equal(rows[0].history_state, "unmaterialized");
+  assert.equal(rows[0].native_turn_id, null);
+  assert.equal(rows[0].latest_turn, null);
+  assert.deepEqual(rows[1].latest_turn, { id: "existing-turn", status: "completed" });
+  assert.equal(rows[2].native_turn_id, undefined);
+  assert.doesNotMatch(JSON.stringify(rows), /DO_NOT_RETURN_HISTORY_BODY|private-item|response_text|final_text/u);
+  const presented = presentConversationList(rows, []);
+  assert.equal(presented.conversations.length, 2);
+  assert.equal(presented.conversation_presentation.unstarted_candidates_omitted, 1);
+  const debug = presentConversationList(rows, [], { diagnostics: true });
+  assert.equal(debug.conversations.length, 3);
+  assert.equal(debug.conversations[0].classification, "unstarted_candidate");
+  assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
+});
+
+test("ambiguous native discovery preserves visible rows when history is unavailable or crossed", async t => {
+  for (const fault of ["read_failure", "crossed_thread"] as const) await t.test(fault, async t => {
+    const f = fixture(t); f.snapshot.historyMaterialized = false;
+    const peer = { ...f.snapshot.thread, id: "existing-peer", sessionId: "existing-peer", name: "Existing task" };
+    f.client.discover = async () => [f.snapshot.thread, peer];
+    f.client.readSnapshot = async () => {
+      if (fault === "read_failure") throw new Error("PRIVATE_READ_FAILURE");
+      return { ...structuredClone(f.snapshot), threadId: "different-thread" };
+    };
+    const result = await f.run("codex-cli-list");
+    assert.equal(result.codex_cli_scan.complete, false);
+    assert.equal(result.codex_cli_scan.returned, 2, "failed detail reads do not erase loaded owners");
+    const presented = presentConversationList(result.codex_cli_sessions, []);
+    assert.equal(presented.conversations.length, 2);
+    assert.equal(presented.conversation_presentation.unstarted_candidates_omitted, undefined);
+    assert.ok(result.codex_cli_sessions.every(row => row.native_turn_id === undefined && row.unstarted_thread === undefined));
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_READ_FAILURE|different-thread/u);
+    assert.equal(f.sends, 0); assert.equal(f.callbacks, 0);
+  });
 });
 
 test("unmaterialized native Status offers first Send without claiming subscription or permission authority", async t => {

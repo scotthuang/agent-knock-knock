@@ -141,19 +141,26 @@ export function nativeTurnProjection(turn: CodexNativeTurn | undefined) {
     ...(turn.status !== "inProgress" && turn.itemsComplete ? { final_text: text } : { response_text: text }) };
 }
 
-/** Inventory uses the loaded-thread summary, never turn bodies or request hydration. */
-export function codexNativeDiscoveryProjection(identity: CodexNativeIdentity, thread: CodexNativeThread, backendVersion: string) {
+/** Ordinary inventory uses loaded-thread summaries; ambiguous groups retain only exact history identity. */
+export function codexNativeDiscoveryProjection(identity: CodexNativeIdentity, thread: CodexNativeThread, backendVersion: string,
+  history?: CodexNativeSnapshot) {
+  if (thread.id !== identity.threadId || history && history.threadId !== identity.threadId) throw new Error("Native discovery history identity mismatch");
   const id = createCodexNativeConversationId(identity);
-  const loaded = thread.status.type !== "notLoaded", send = loaded && thread.status.type === "idle";
+  const loaded = history?.loaded ?? thread.status.type !== "notLoaded";
+  const send = loaded && thread.status.type === "idle" && (history?.canSend ?? true);
+  const latest = history?.turns.find(turn => turn.id === history.latestTurnId);
   const watch = loaded && thread.status.type === "active";
   const flags = thread.status.type === "active" ? thread.status.activeFlags : [];
   return {
     id, conversation_id: id, source: "codex_cli", agent: "codex",
     title: thread.name ?? thread.preview ?? "Codex CLI", cwd: thread.cwd,
     native_thread_id: identity.threadId, backend_version: backendVersion,
+    ...(history ? { ...unstartedThreadProjection(history), native_turn_id: history.latestTurnId,
+      latest_turn: latest ? { id: latest.id, status: latest.status } : null,
+      ...(history.historyMaterialized === false ? { history_state: "unmaterialized" } : {}) } : {}),
     connection_state: loaded ? "loaded_backend_verified" : "not_loaded", activity_state: thread.status.type,
     active_flags: flags, interaction_requests_scanned: false, pending_interaction_count: null,
-    attention_required: flags.length > 0, detail_scan: "deferred", send_preflight_required: send,
+    attention_required: flags.length > 0 || Boolean(history?.pendingInteractions.length), detail_scan: "deferred", send_preflight_required: send,
     capabilities: { status: true, send, watch, interaction_notify: watch,
       interaction_respond: false, approve: false, set_permissions: false },
     available_actions: {
