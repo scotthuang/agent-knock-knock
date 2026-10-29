@@ -171,6 +171,7 @@ async function mountResolvedConnector(
     server = builtServer;
     const lifecycleControllerId = `akk-dsh:${activeResources.instanceNonce}:lifecycle`;
     const builtAdapter = resolved.createHostAdapter({
+      listProjectionVersion: 5,
       environmentForContext(context) {
         if (context.sessionKey !== context.sessionId) {
           throw new Error("DeepSeek Harness AKK controller identities diverged");

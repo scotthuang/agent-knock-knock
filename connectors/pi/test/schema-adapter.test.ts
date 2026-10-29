@@ -12,6 +12,7 @@ import {
 
 test("pinned AKK verifies the bundled Skill and every Pi tool schema", async () => {
   const adapter = createHostAdapter({
+    listProjectionVersion: 5,
     environmentForContext: () => process.env,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });

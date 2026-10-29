@@ -1,4 +1,5 @@
 import { paginateHostList } from "./semantic-tool-list-budget.js";
+import { compactListV5Row, resolveHostListProjectionVersion } from "./semantic-tool-list-format.js";
 import { isAkkModelFacingPrivateAuthorityField } from
   "./semantic-tool-model-facing-field-policy.js";
 import { arrayValue, finiteNumber, nonEmptyString, stringArrayValue,
@@ -14,13 +15,14 @@ import { withConversationUsage } from "./conversation-usage-guidance.js";
  * Watch inventory and retained history use the separate watches command. The controller
  * receives current resource identities and state, action names, and only the
  * dynamic semantic inputs needed to invoke those actions. Current-state usage
- * advice stays with each row; shared instructions live in the bundled skill.
+ * advice stays with v4 rows; v5 uses shared instructions in the bundled skill.
  */
 export function compactAkkListModelProjection(
   value: unknown,
   params: Record<string, unknown> = {}
 ): Record<string, unknown> {
   const result = recordValue(value) ?? {};
+  const version = resolveHostListProjectionVersion(params.listProjectionVersion);
   const routingDiagnostics = recordValue(result.conversation_presentation)?.mode === "diagnostics";
   const actionContracts = recordValue(result.action_contracts);
   const diagnostics = compactAkkListDiagnostics(result);
@@ -28,7 +30,7 @@ export function compactAkkListModelProjection(
   const projected = {
     projection: {
       schema: "agent-knock-knock/host-list-compact",
-      version: 4,
+      version,
       skill: "agent-knock-knock",
       ...(finiteNumber(actionContracts?.version) !== undefined
         ? { action_contract_version: finiteNumber(actionContracts?.version) }
@@ -51,7 +53,7 @@ export function compactAkkListModelProjection(
       claude_cli_scan: compactClaudeListScan(recordValue(result.claude_cli_scan) ?? {})
     } : {}),
     ...(Array.isArray(result.conversations)
-      ? { conversations: arrayValue(result.conversations).map(row => compactConversation(row, routingDiagnostics)),
+      ? { conversations: arrayValue(result.conversations).map(row => compactConversation(row, routingDiagnostics, version)),
           conversation_presentation: compactConversationPresentation(result.conversation_presentation),
           ...(routingDiagnostics ? { conversation_routing: compactAkkListScalars(recordValue(result.conversation_routing) ?? {},
             ["policy", "codex", "claude", "exact_associations", "unresolved_terminals"]) } : {}) }
@@ -59,6 +61,11 @@ export function compactAkkListModelProjection(
     ...(recovery ? { recovery } : {}),
     ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {})
   };
+  if (version === 5) {
+    for (const field of ["conversations", "terminals", "codex_cli_sessions", "claude_cli_sessions", "desktop_sessions"] as const) {
+      if (Array.isArray(projected[field])) projected[field] = arrayValue(projected[field]).map(compactListV5Row);
+    }
+  }
   return paginateHostList(projected, params);
 }
 
@@ -119,13 +126,20 @@ function compactNativeConversation(row: Record<string, unknown>): Record<string,
   }, row);
 }
 
-function compactConversation(row: Record<string, unknown>, diagnostics: boolean): Record<string, unknown> {
+function compactConversation(row: Record<string, unknown>, diagnostics: boolean, version: number): Record<string, unknown> {
   const output = row.source === "codex_desktop" ? compactDesktopConversation(row)
     : ["codex_cli", "claude_cli"].includes(String(row.source)) ? compactNativeConversation(row) : compactAkkListTerminal(row);
   output.surface = row.surface ?? (row.source === "codex_desktop" ? "desktop" : "cli");
   if (diagnostics) return { ...output, ...compactAkkListScalars(row, ["conversation_id", "route_preference", "route_status"]),
     ...(Array.isArray(row.terminal_aliases) ? { terminal_aliases: stringArrayValue(row.terminal_aliases) } : {}) };
   const controls = arrayValue(output.terminal_controls);
+  if (version === 5 && row.agent === "claude") {
+    // v4 explains this folded fact through usage. v5 retains the structured blocker instead.
+    const readiness = Object.hasOwn(row, "physical_send_readiness") ? row.physical_send_readiness
+      : controls.length === 1 ? controls[0].physical_send_readiness : undefined;
+    if (readiness === null) output.physical_send_readiness = null;
+    else compactAkkListNested(output, "physical_send_readiness", readiness, ["ready", "reason", "message"]);
+  }
   const management = controls.map(compactConversationControlRecord).filter(control => Object.keys(control).length > 0);
   if (management.length === 1) Object.assign(output, management[0]);
   else if (management.length > 1) output.control_records = management;

@@ -7,6 +7,7 @@ import {
   bindSemanticToolRelayEnvironment,
   bindSemanticToolRelayPath
 } from "./semantic-tool-relay.js";
+import type { HostListProjectionVersion } from "./semantic-tool-list-format.js";
 
 export interface HostBridgeToolContext {
   readonly sessionKey: string;
@@ -70,6 +71,8 @@ export interface HostBridgeCommandToolRegistry extends HostBridgeToolRegistry {
 }
 
 export interface CreateHostBridgeToolsOptions {
+  /** Omitted preserves the v4 contract for existing embedding Hosts and MCP clients. */
+  readonly listProjectionVersion?: HostListProjectionVersion;
   readonly relayPath: string;
   readonly relayEnvironment: NodeJS.ProcessEnv;
   readonly pluginConfig: Readonly<Record<string, unknown>>;
@@ -101,7 +104,9 @@ export function createHostBridgeToolRegistry(
   bindSemanticToolRelayEnvironment(runtime, options.relayEnvironment);
   bindHostBridgeToolPresentation(runtime);
   bindSemanticToolAsyncRelay(runtime);
-  const catalog = createAkkSemanticToolCatalog(runtime, new Map());
+  const catalog = createAkkSemanticToolCatalog(runtime, new Map(), {
+    listProjectionVersion: options.listProjectionVersion
+  });
 
   const commandName = requiredString(catalog.command.name, "command name");
   if (commandName !== "akk") {

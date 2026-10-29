@@ -163,6 +163,7 @@ async function startConnector(
     const lifecycleControllerId = `akk-pi:${resources.instanceNonce}:lifecycle`;
     const pluginConfig = connectorPluginConfig(process.env);
     adapter = dependencies.createHostAdapter({
+      listProjectionVersion: 5,
       environmentForContext(context) {
         if (context.sessionKey !== context.sessionId) {
           throw new Error("Pi AKK controller identities diverged");

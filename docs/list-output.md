@@ -13,7 +13,26 @@ reconcile callbacks, reconnect a native session or send notifications.
 
 ## Understanding a conversation row
 
-Each conversation includes `usage`, a bounded explanation derived from its
+The v5 format below is part of the unreleased development build; the published
+0.16.7 release uses v4.
+For the design comparison and same-budget measurements, see the
+[v5 payload evaluation](list-payload-evaluation.md).
+
+Compact List v5 retains exact identities, readable state values, capability
+booleans, `available_actions`, dynamic `action_inputs`, and current exceptions
+such as `manual_action`. It omits the derived `usage` explanation and a row's
+`id` only when it is identical to `conversation_id`. Use `conversation_id` as
+the target; a distinct `id` is retained. No integer state codes, lookup
+dictionary or extra decoding request is needed.
+
+For a Claude row with one exactly associated folded terminal control, v5 also
+retains its structured `physical_send_readiness` (`ready`, `reason`, `message`).
+This preserves draft, stash and cleanup-marker reasons that v4 explained only
+through `usage`. An explicit row-level value takes precedence; multiple controls
+are not reduced to an assumed window. These facts explain the current offer and
+do not create an action or authorize input.
+
+Compact List v4 retains `usage`, a bounded explanation derived from the row's
 current offered actions, activity, capabilities and blockers:
 
 | Field | Meaning |
@@ -23,16 +42,26 @@ current offered actions, activity, capabilities and blockers:
 | `limitations` | Why a relevant operation is unavailable, including uncertainty |
 | `next_steps` | Concrete actions the user or controller can take next |
 
-Controllers should present this guidance in the user's language, beside the
-conversation title and project. A list of missing switches or internal reason
-codes is not a substitute for explaining what to do. Guidance is regenerated
-from each observation; it does not grant authority, add an action, or change
-existing action eligibility. The current `available_actions` and their input
-contracts remain authoritative. `usage` is an additive field within Host List
-projection v4. Action contract v35 adds a no-existing-stash prerequisite to Claude physical Send. This narrows eligibility for an empty input box with a stashed draft, so the action contract increases from v34; it is not only a wording change. The per-agent Composer policy names and public Send parameters remain unchanged. Readiness diagnostics are additive, and compact projection remains v4.
-The shared List projection adds this guidance to Codex CLI, Codex Desktop,
-Claude and terminal-only rows. Existing identities, capabilities and action
-offers retain their meanings; consumers may ignore the new display field.
+Controllers should explain the observed state and offered actions in the user's
+language, beside the title and project. In v5, use these structured fields and
+the Skill guidance; read exact Status when current blockers or action details
+need explanation. In v4, `usage` can also help with that explanation. Neither
+generated guidance nor its omission grants authority, adds an action, or
+changes eligibility. The current `available_actions` and their input contracts
+remain authoritative. Missing `usage` in v5 does not mean missing capability or
+missing monitoring.
+
+`unknown`, `null`, `false` and `deferred` retain distinct meanings. For example,
+an unknown activity state is not idle, a null pending-interaction count is not
+zero, and `approval_state.scanned: false` or `detail_scan: "deferred"` means
+the detail was not checked. A capability boolean reports that capability's
+value; it does not replace the current action offer or its fresh preflight.
+Do not invent an action from a missing field.
+
+The projection change does not change action contract v35. That contract added
+a no-existing-stash prerequisite to Claude physical Send, narrowing eligibility
+for an empty input box with a stashed draft. The per-agent Composer policies,
+public Send parameters and action safety checks remain unchanged.
 The additional identity recheck and background-view diagnosis described below
 apply only to Claude terminals, not to Codex discovery or dispatch.
 
@@ -85,7 +114,8 @@ List. Reopening the same background conversation does not make it an ordinary
 foreground conversation.
 The raw observation adds
 `native_agent_identity_observation.window_role: "background_view"` only for
-that positive diagnosis; compact Host output carries its explanation in `usage`.
+that positive diagnosis. Compact v4 carries its explanation in `usage`; v5
+callers can read exact Status for the diagnosis and use the Skill guidance.
 This diagnosis does not identify or bind the background worker, inspect daemon
 or claim sockets, or grant physical Send authority or exact-task monitoring.
 Physical authority comes only from the current terminal action and its input
@@ -96,7 +126,7 @@ does not infer a background session. It retains the generic explanation that
 the native conversation identity could not be confirmed, together with the
 actual physical Send option when offered, or instructions to inspect the pane,
 use it manually, and retry ordinary startup and List refresh if appropriate.
-Failure to diagnose never removes the guidance.
+Failure to diagnose never proves that the window is a background session.
 Relaunching is a recovery attempt, not a guaranteed repair.
 
 Claude physical rows additionally expose `physical_send_readiness` from the
@@ -126,9 +156,8 @@ the explicit detailed scan to obtain current action offers. If pane capture fail
 screen excerpt, readiness reports `screen_unavailable`; inspect Status for the
 capture error, restore terminal-provider access, then refresh List. Neither
 case proves that a draft, menu or malformed Composer exists. Physical-terminal
-Send offers remain omitted until the existing input checks pass. These reasons and their
-guidance are additive diagnostics, with no action-contract, projection or
-Store-protocol version change.
+Send offers remain omitted until the existing input checks pass. These readiness
+diagnostics do not change action eligibility or the Store protocol.
 
 To use an offered physical Send, select its displayed `terminal_id` and the
 existing Send tool's semantic inputs. No new public scope or token parameter
@@ -187,8 +216,23 @@ List still does not scan persisted Watches: an uncertain first Send may have no
 native task history yet and can remain folded. Inspect its original Watch or
 `watches`; folding never proves that a request was not submitted or permits a retry.
 
-Host List uses `agent-knock-knock/host-list-compact` v4. Follow
-`pagination.next_args` while `has_more` is true. `listLimit` defaults to 40 and
+Host List uses `agent-knock-knock/host-list-compact`. The updated first-party
+OpenClaw, Pi and DeepSeek Harness connectors default to v5. Generic SDK and MCP
+callers default to v4. Pass `listProjectionVersion: 5` to opt in to v5 or
+`listProjectionVersion: 4` to request the compatible v4 shape. An explicit
+parameter wins over the connector default; `terminalDebug: true` without an
+explicit projection version defaults to v4.
+
+Read `projection.version` before interpreting the format. Do not derive write
+authority from an unfamiliar projection version: request v4 with a fresh
+read-only List, or inspect an already known exact target with Status. The v5
+format requires no dictionary fetch or decoder. The tool schema/catalog and
+Skill digests change, while the action contract remains v35 because action
+semantics are unchanged.
+
+Follow `pagination.next_args` unchanged while `has_more` is true. Cursors are
+bound to the projection version; do not continue a v4 page in v5 or vice versa.
+Start a fresh List when changing formats. `listLimit` defaults to 40 and
 accepts 1–100. Pages are fresh discoveries, not a frozen snapshot; restart if
 membership changes invalidate a cursor. Legacy `listView=history/all`, `all=true`
 and CLI `list --all` return a migration error directing callers to `watches`.
@@ -197,9 +241,10 @@ Each Host page is capped at 24 KiB of UTF-8 JSON and 12,000 weighted characters
 (ASCII 1, other code points 16), including metadata. This is not a token budget.
 Oversized rows retain exact IDs and a Status entry point; omitted actions do not
 mean unsupported capabilities. Read exact Status for current questions, approvals
-and bounded public progress. Their guidance explains that details were omitted
-and directs the user to Status instead of claiming those operations are
-unsupported. List contains no progress body.
+and bounded public progress. `details_omitted` marks a shortened row and its
+Status entry point supplies the next read. The v5 shortened row also omits derived `usage`. List
+contains no progress body. Smaller output does not imply fewer native discovery
+reads, and these output limits are not a measured Host token limit.
 
 Desktop catalog pagination remains separate: finish Host pages for one catalog
 page, then pass `desktop_scan.next_cursor` as `desktopCursor` with the same filters

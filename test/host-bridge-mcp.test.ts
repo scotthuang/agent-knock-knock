@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,10 +18,11 @@ import {
   hostBridgeToolCallId,
   HOST_BRIDGE_MCP_SERVER_NAME
 } from "../src/host-bridge-mcp.js";
-import type {
-  HostBridgeToolDescriptor,
-  HostBridgeToolRegistry,
-  HostBridgeToolResult
+import {
+  createHostBridgeToolRegistry,
+  type HostBridgeToolDescriptor,
+  type HostBridgeToolRegistry,
+  type HostBridgeToolResult
 } from "../src/host-bridge-tools.js";
 
 const inputSchema = {
@@ -47,6 +51,31 @@ test("MCP server initializes and advertises all exact host bridge tools", async 
     );
     assert.equal(listed.tools[0]?.description, "Test semantic tool 0");
     assert.deepEqual(listed.tools[0]?.inputSchema, inputSchema);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("MCP List retains v4 for old clients and permits explicit v5 without changing raw execution", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-mcp-list-format-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  fs.writeFileSync(relayPath, 'process.stdout.write(JSON.stringify({ conversations: [] }));\n');
+  const registry = createHostBridgeToolRegistry({
+    relayPath, relayEnvironment: {}, pluginConfig: {}, logger: { info() {}, warn() {} },
+    context: { sessionKey: "mcp-format", sessionId: "mcp-format" }
+  });
+  const harness = await connectHarness(registry);
+  try {
+    for (const [args, version] of [[{}, 4], [{ listProjectionVersion: 5 }, 5],
+      [{ listProjectionVersion: 4 }, 4]] as const) {
+      const result = await harness.client.callTool({ name: "agent_knock_knock_list", arguments: args });
+      const body = JSON.parse(resultText(result));
+      assert.equal(body.projection.version, version);
+      assert.deepEqual(result.structuredContent, body);
+    }
+    await assertInvalidParams(harness.client.callTool({ name: "agent_knock_knock_list",
+      arguments: { listProjectionVersion: 6 } }), /Invalid arguments|schema|listProjectionVersion/iu);
   } finally {
     await harness.close();
   }

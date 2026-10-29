@@ -27,6 +27,6 @@ export function registerOpenClawCommands(
 ): void {
   registerSemanticToolCatalog(
     api,
-    createAkkSemanticToolCatalog(api, displayedResumeSnapshots)
+    createAkkSemanticToolCatalog(api, displayedResumeSnapshots, { listProjectionVersion: 5 })
   );
 }

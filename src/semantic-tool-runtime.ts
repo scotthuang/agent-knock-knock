@@ -1,5 +1,7 @@
 import { parseWatchListOptions } from "./watch-list-projection.js";
 import { parseHostListPageOptions } from "./semantic-tool-list-budget.js";
+import { resolveHostListProjectionVersion, type HostListProjectionVersion } from
+  "./semantic-tool-list-format.js";
 import { createDesktopCreationSemanticTool } from "./desktop-creation-semantic.js";
 import { isClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isDesktopConversationId } from "./desktop-identity.js";
@@ -164,8 +166,10 @@ export type DisplayedResumeSnapshotMap = Map<
 /** Build the one host-neutral AKK command/tool catalog for a runtime owner. */
 export function createAkkSemanticToolCatalog(
   api: object & Record<string, any>,
-  displayedResumeSnapshots: DisplayedResumeSnapshotMap
+  displayedResumeSnapshots: DisplayedResumeSnapshotMap,
+  options: { listProjectionVersion?: HostListProjectionVersion } = {}
 ): SemanticToolCatalog {
+  const listProjectionVersion = resolveHostListProjectionVersion(options.listProjectionVersion);
   beginSemanticToolCatalog(api);
   const command = {
     name: "akk",
@@ -177,7 +181,7 @@ export function createAkkSemanticToolCatalog(
     execute: async (ctx) => handleAkkCommand(api, ctx, displayedResumeSnapshots)
   };
 
-  registerSemanticListTool(api);
+  registerSemanticListTool(api, listProjectionVersion);
   registerSemanticWatchesTool(api);
 
   registerCliTool(api, {
@@ -640,20 +644,27 @@ function registerBackendRecoveryTool(api): void {
   });
 }
 
-function registerSemanticListTool(api): void {
+function registerSemanticListTool(api, defaultProjectionVersion: HostListProjectionVersion): void {
+  const projectionParams = (params: Record<string, unknown>): Record<string, unknown> => ({
+    ...params,
+    listProjectionVersion: resolveHostListProjectionVersion(params.listProjectionVersion,
+      params.terminalDebug === true ? 4 : defaultProjectionVersion)
+  });
   registerCliTool(api, {
     name: "agent_knock_knock_list",
     description:
       semanticToolDescriptions.list,
-    parameters: listParameters,
-    modelProjection: compactAkkListModelProjection,
+    parameters: { ...listParameters, properties: { ...listParameters.properties,
+      listProjectionVersion: { ...listParameters.properties.listProjectionVersion,
+        default: defaultProjectionVersion } } },
+    modelProjection: (value, params) => compactAkkListModelProjection(value, projectionParams(params)),
     compactText: true,
     buildArgs: (params) => {
       const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
       if (params.all === true || params.listView === "history" || params.listView === "all") {
         throw new Error("List now returns conversations only. Use agent_knock_knock_watches (CLI: watches) for monitoring and history.");
       }
-      parseHostListPageOptions(params);
+      parseHostListPageOptions(projectionParams(params));
       const args = ["list"];
       pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
       pushOptional(

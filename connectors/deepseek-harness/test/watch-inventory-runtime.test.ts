@@ -43,6 +43,7 @@ test("published DSH and core separate current List from retained Watches", async
   new CommandRuntime(ctx);
   new SkillRegistry(ctx);
   const core = createHostAdapter({
+    listProjectionVersion: 5,
     relayPath: relay,
     pluginConfig: { storeDir: path.join(temporary, "store") },
     environmentForContext: () => ({}),
@@ -55,7 +56,8 @@ test("published DSH and core separate current List from retained Watches", async
       async loadSupportedDeepSeekHarnessRuntime() {
         return { version: "0.2.1-rc.2", createUserMessage, assertSupportedJsonSchema };
       },
-      createHostAdapter() {
+      createHostAdapter(options) {
+        assert.equal(options.listProjectionVersion, 5);
         return { ...core, lifecycle: { ...core.lifecycle, start() {}, async stop() {} } };
       },
     });
@@ -68,7 +70,7 @@ test("published DSH and core separate current List from retained Watches", async
     const list = await invoke("agent_knock_knock_list", {}, "list-current");
     assert.equal(list.isError, false);
     const details = (list.value as { details: Record<string, unknown> }).details;
-    assert.equal((details.projection as Record<string, unknown>).version, 4);
+    assert.equal((details.projection as Record<string, unknown>).version, 5);
     assert.equal((details.conversations as Record<string, unknown>[])[0]?.conversation_id, conversationId);
     assert.deepEqual((details.conversations as Record<string, unknown>[])[0]?.available_actions, { status: true });
     for (const key of ["codex_cli_watches", "desktop_watches", "terminal_watches"]) assert.equal(key in details, false);
@@ -100,6 +102,7 @@ test("published DSH and core separate current List from retained Watches", async
     const diagnostic = await invoke("agent_knock_knock_list", { terminalDebug: true }, "list-diagnostic");
     assert.equal(diagnostic.isError, false);
     const diagnosticDetails = (diagnostic.value as { details: Record<string, unknown> }).details;
+    assert.equal((diagnosticDetails.projection as Record<string, unknown>).version, 4);
     const empty = (diagnosticDetails.conversations as Record<string, unknown>[])[0]!;
     assert.equal(empty.conversation_id, "fixture-empty");
     assert.equal(empty.unstarted_thread, true);
