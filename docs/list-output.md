@@ -13,8 +13,8 @@ reconcile callbacks, reconnect a native session or send notifications.
 
 ## Understanding a conversation row
 
-The v5 format below is part of the unreleased development build; the published
-0.16.7 release uses v4.
+Starting with 0.16.8, the OpenClaw, Pi and DSH connectors default to compact
+List v5. Generic Host SDK and MCP consumers retain v4 by default.
 For the design comparison and same-budget measurements, see the
 [v5 payload evaluation](list-payload-evaluation.md).
 

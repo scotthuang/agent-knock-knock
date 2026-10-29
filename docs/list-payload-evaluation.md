@@ -1,7 +1,7 @@
 # Compact List v5 evaluation
 
-Development evidence, 2026-10-29. This is an unreleased presentation change on
-top of 0.16.7, not another discovery-speed change or a production installation.
+Development evidence from 2026-10-29 for the List v5 presentation change in
+0.16.8. This is separate from the discovery-speed improvements in 0.16.7.
 See [the output contract](list-output.md) for format selection and safety rules.
 
 ## Decision
@@ -113,3 +113,21 @@ immutability and exact selectors, and emits only metrics/hashes, never the
 snapshot's titles, paths or IDs. Runtime/Host wrappers may add their own metadata;
 this benchmark counts the complete model-facing List JSON, not an entire RPC
 transport envelope that may also duplicate it as structured details.
+
+## Independent installed-candidate acceptance
+
+On 2026-10-30, a user-reviewed local candidate was installed through the official
+OpenClaw CLI and exercised from the real OpenClaw tool entry. A single
+`agent_knock_knock_list({listLimit:50})` call, with no format override or filter,
+returned all nine current conversations on one page: five CLI and four Desktop.
+Three Desktop entries with no verified live owner stayed visible and unavailable
+for Send. Default projection was v5 and action contract remained 35; the budgets
+were unchanged. A second actual tool result measured 10,523 UTF-8 bytes and
+11,628 weighted characters. Private titles, selectors and raw output are not
+published. These measurements are not token counts or network-latency results,
+and do not guarantee that arbitrarily large inventories fit on one page.
+
+The installed candidate also passed independent fast tests under a restrictive
+umask and a nondefault temporary directory. Its public-progress, routing and
+Watch behavior was not retested by dispatching real work for this presentation
+change. Formal release gates are recorded separately for the published version.

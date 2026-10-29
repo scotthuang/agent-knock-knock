@@ -19,14 +19,15 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.19** pins AKK **0.16.7** in its package and lockfile,
+Connector **0.1.0-rc.20** pins AKK **0.16.8** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the 0.165.0 adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
 including Codex CLI backend and Desktop operations when the selected
 conversation advertises them. `list`
-returns current discoverable conversations; `watches` separately returns recent
-monitoring records (24 hours by default), plus active or unresolved records.
+returns current discoverable conversations in compact v5; `watches` separately
+returns recent monitoring records (24 hours by default), plus active or
+unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
 prerelease uses the `next` dist-tag.
 
@@ -47,8 +48,8 @@ with a different release merely to follow a tag.
 | Outside validated scope | DSH Desktop embedded launcher, headless/one-shot Host, Windows named pipes; newer unlisted DSH releases |
 
 The versioned validation notes below distinguish live Host checks from fixtures
-and earlier compatibility runs. This metadata/documentation release does not
-add a new Host compatibility claim.
+and earlier compatibility runs. This List presentation update does not add a
+new Host compatibility claim.
 
 Activation locates the real `@deepseek-ai/dsh` launcher and requires the
 launcher, `dsh-base`, `dsh-agent`, `dsh-commands`, `dsh-llm`, `dsh-skill`, and
@@ -71,8 +72,8 @@ Headless/one-shot Harness processes, Windows named pipes, and DSH Desktop's
 embedded launcher are outside this connector's validated scope. Existing Codex CLI backend and Desktop connections need no
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
-see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.7/README.md#compatibility) and the
-[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.7/docs/pi-dsh-compatibility.md). This connector does
+see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.8/README.md#compatibility) and the
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.8/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
 
 ## Demo
@@ -136,7 +137,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.19`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.20`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -446,7 +447,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.19
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.20
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -474,16 +475,27 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.7`; building the current repository
+tests against its pinned AKK runtime `0.16.8`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
-[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.7/CONTRIBUTING.md#coordinated-package-releases);
+[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.8/CONTRIBUTING.md#coordinated-package-releases);
 the registry-based `npm ci` above requires that exact core to be published.
 Testing connector changes against another AKK runtime requires an explicit
 dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.20`** pins AKK **`0.16.8`** and its synchronized Skill.
+Its Host tools explicitly opt into compact List **v5**, removing derived usage
+prose and duplicate IDs while preserving exact selectors, readable states,
+dynamic action inputs, current blockers and bounded pagination. An explicit
+`listProjectionVersion: 4` keeps the legacy format; `terminalDebug: true`
+defaults to v4 unless a format is explicitly selected. Generic Host SDK and MCP
+consumers still default to v4. This changes presentation, not action authority:
+Status, raw CLI output, execution checks, callback ownership and the existing
+Host compatibility ranges are unchanged. The connector remains on `next`;
+this update does not add a live-model or external-channel delivery claim.
 
 Connector **`0.1.0-rc.19`** pins AKK **`0.16.7`** and its synchronized Skill.
 It carries [PR #484](https://github.com/scotthuang/agent-knock-knock/pull/484):
@@ -637,7 +649,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.19` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.20` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -682,7 +694,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.19
+npm run release:check -- --publish --confirm-version 0.1.0-rc.20
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
