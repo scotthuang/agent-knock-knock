@@ -580,6 +580,7 @@ function nativeFixture(options: NativeFixtureOptions = {}) {
       return server;
     },
     createHostAdapter(received) {
+      assert.equal(received.listProjectionVersion, 5);
       hostAdapterOptions = received;
       return adapter;
     },

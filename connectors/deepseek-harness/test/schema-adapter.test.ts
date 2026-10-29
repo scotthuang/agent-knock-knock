@@ -17,6 +17,7 @@ import {
 
 test("all pinned AKK schemas pass the shared supported DSH validator", async () => {
   const adapter = createHostAdapter({
+    listProjectionVersion: 5,
     environmentForContext: () => ({}),
     lifecycleEnvironment: {},
     logger: { info() {}, warn() {} },
@@ -35,13 +36,13 @@ test("all pinned AKK schemas pass the shared supported DSH validator", async () 
       () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
       /capability handshake/u,
     );
-    // Contract for core 0.16.7 pinned in this connector's lockfile.
+    // Contract for the candidate core's first-party v5 List default.
     // List guidance and Claude physical-input descriptions evolve with this core;
     // the catalog retains 27 tool names.
     assert.equal(adapter.tools.length, 27);
     assert.equal(
       catalogDigest(adapter),
-      "775d552031638cb0e4003238642c128b0258bb9e3c86de3522b1adc68e21b787"
+      "7d675b3c8b808262ea03c8a690719d76c8cbd7a6be551764308ef7ecbf36d2e4"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

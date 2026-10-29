@@ -36,6 +36,7 @@ const result = argv[0] === "list" ? {
 process.stdout.write(JSON.stringify(result));
 `, "utf8");
   const adapter = createHostAdapter({
+    listProjectionVersion: 5,
     relayPath,
     environmentForContext: () => ({ AKK_TEST_LOG: logPath }),
     logger: { info() {}, warn() {} },
@@ -44,6 +45,7 @@ process.stdout.write(JSON.stringify(result));
   const context = { authority: {}, sessionKey: "fixture-owner", sessionId: "fixture-owner" };
 
   const list = modelResult(await adapter.executeTool(context, "agent_knock_knock_list", "list-call", {}));
+  assert.equal((list.projection as Record<string, unknown>).version, 5);
   assert.equal((list.conversations as unknown[]).length, 1);
   assert.equal(list.codex_cli_watches, undefined);
   assert.equal(list.desktop_watches, undefined);
@@ -75,6 +77,7 @@ process.stdout.write(JSON.stringify(result));
   assert.equal(fs.readFileSync(logPath, "utf8").trim().split("\n").length, 2);
 
   const diagnostic = modelResult(await adapter.executeTool(context, "agent_knock_knock_list", "diagnostic-call", { terminalDebug: true }));
+  assert.equal((diagnostic.projection as Record<string, unknown>).version, 4);
   const empty = (diagnostic.conversations as Record<string, unknown>[])[0]!;
   assert.equal(empty.conversation_id, "fixture-empty");
   assert.equal(empty.unstarted_thread, true);

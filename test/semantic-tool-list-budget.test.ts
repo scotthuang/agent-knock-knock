@@ -7,6 +7,7 @@ import { compactAkkListModelProjection } from "../src/semantic-tool-list-project
 import { HOST_LIST_MAX_BYTES, HOST_LIST_MAX_WEIGHTED_CHARS, hostListWeightedChars } from "../src/semantic-tool-list-budget.js";
 import { createAkkSemanticToolCatalog } from "../src/semantic-tool-runtime.js";
 import { bindSemanticToolRelayPath } from "../src/semantic-tool-relay.js";
+import { compactListV5Row, resolveHostListProjectionVersion } from "../src/semantic-tool-list-format.js";
 
 type Row = Record<string, any>;
 const watch = (index: number, status = "completed", callback = "accepted"): Row => ({
@@ -328,4 +329,105 @@ test("oversized List rows retain honest Status guidance throughout pagination", 
     params = result.pagination.next_args;
   } while (params);
   assert.deepEqual(seen, ["huge-0", "huge-1", "huge-2"]);
+});
+
+test("v5 retains exact targets, live uncertainty and action inputs without repeating derived advice", () => {
+  const cases = [
+    { source: "codex_cli", surface: "cli", connection_state: "loaded_backend_verified", activity_state: "unknown", detail_scan: "deferred" },
+    { source: "codex_desktop", surface: "desktop", connection_state: "live_owner_not_confirmed", activity_state: "unknown",
+      manual_action: "Open this exact conversation", can_send_reason: "no_live_owner", capability_verification: { send: "unverified" } },
+    { source: "codex_desktop", surface: "desktop", connection_state: "live_owner_verified", activity_state: "blocked",
+      pending_interaction_count: 1, observation_error: "request_read_failed", capability_verification: { send: "verified" } }
+  ];
+  for (const state of cases) {
+    const id = `fixture:${state.connection_state}`;
+    const row = { id, conversation_id: id, title: "项目🙂", cwd: "/fixtures/project", agent: "codex", ...state,
+      capabilities: { send: false, approve: false, interaction_notify: true },
+      available_actions: { status: { tool: "agent_knock_knock_status", input: { conversation_id: id } },
+        respond_interaction: { tool: "agent_knock_knock_respond_interaction", input: { conversation_id: id, interaction_id: "question-7" },
+          scope: "exact_request", requires_user_intent: true, missing_required: ["answers"], choices: ["One", "Two"] } } };
+    const raw = { conversations: [row], action_contracts: { version: 35 } }, saved = structuredClone(raw);
+    const v4 = compactAkkListModelProjection(raw) as Row;
+    const v5 = compactAkkListModelProjection(raw, { listProjectionVersion: 5 }) as Row;
+    const { id: redundant, usage, ...preserved } = v4.conversations[0];
+    assert.equal(redundant, id); assert.ok(usage);
+    assert.deepEqual(v5.conversations[0], preserved, "no state/action/privacy fields silently removed or reinterpreted");
+    assert.equal(v5.conversations[0].capabilities.send, false);
+    assert.equal(v5.conversations[0].available_actions.send, undefined);
+    assert.equal(v5.conversations[0].action_inputs.respond_interaction.arguments.interaction_id, "question-7");
+    assert.equal(v5.projection.version, 5); assert.equal(v5.projection.action_contract_version, 35);
+    assert.deepEqual(raw, saved); bounded(v5);
+  }
+  const distinct = compactListV5Row({ id: "physical-target", conversation_id: "native-target", usage: { summary: "old" },
+    unknown: "unknown", nullable: null, flag: false, detail_scan: "deferred" });
+  assert.deepEqual(distinct, { id: "physical-target", conversation_id: "native-target", unknown: "unknown", nullable: null, flag: false, detail_scan: "deferred" });
+  for (const invalid of [0, 6, "5", null, true, {}, NaN]) assert.throws(() => resolveHostListProjectionVersion(invalid), /must be 4 or 5/u);
+});
+
+test("v5 pages retain every distinct conversation and pin format across continuations", () => {
+  const rows = Array.from({ length: 70 }, (_, i) => {
+    const id = `fixture-${String(i).padStart(3, "0")}`;
+    return { ...conversations[i % 2], id, conversation_id: id, title: `项目 ${i} 🙂`, cwd: `/fixtures/project-${i % 4}`,
+      connection_state: i % 2 ? "live_owner_not_confirmed" : "loaded_backend_verified", capabilities: { send: false },
+      available_actions: { status: { tool: "agent_knock_knock_status" } } };
+  });
+  const raw = { conversations: rows }, first = compactAkkListModelProjection(raw, { listProjectionVersion: 5, listLimit: 50 }) as Row;
+  assert.ok(first.pagination.has_more); assert.equal(first.pagination.next_args.listProjectionVersion, 5);
+  assert.throws(() => compactAkkListModelProjection(raw, { ...first.pagination.next_args, listProjectionVersion: 4 }), /Invalid List cursor/u);
+  assert.throws(() => compactAkkListModelProjection(raw, { ...first.pagination.next_args, desktopProject: "/different" }), /changed filters/u);
+  const legacy = compactAkkListModelProjection(raw, { listLimit: 1 }) as Row;
+  assert.throws(() => compactAkkListModelProjection(raw, { ...legacy.pagination.next_args, listProjectionVersion: 5 }), /Invalid List cursor/u);
+  const { listProjectionVersion: ignored, ...oldNextArgs } = legacy.pagination.next_args;
+  assert.doesNotThrow(() => compactAkkListModelProjection(raw, oldNextArgs), "pre-v5 continuation remains accepted in v4");
+  let args: Row | null = { listProjectionVersion: 5, listLimit: 50 };
+  const seen = new Set<string>(); let pages = 0;
+  do {
+    const page = compactAkkListModelProjection({ conversations: [...rows].reverse() }, args!) as Row;
+    bounded(page); assert.equal(page.projection.version, 5);
+    for (const row of page.conversations) {
+      assert.ok(!seen.has(row.conversation_id)); seen.add(row.conversation_id);
+      assert.equal(row.usage, undefined); assert.equal(row.id, undefined);
+      assert.ok(row.title && row.cwd); assert.equal(row.capabilities.send, false);
+    }
+    args = page.pagination.next_args; assert.ok(++pages < 100);
+  } while (args);
+  assert.equal(seen.size, 70);
+});
+
+test("v5 oversized action rows keep recognizable identity and an honest exact Status fallback", () => {
+  const raw = { conversations: [{ conversation_id: "desktop:large-actions", id: "desktop:large-actions", source: "codex_desktop",
+    agent: "codex", title: "测试项目🙂", cwd: "/fixtures/project", sidebar_project_name: "项目", connection_state: "live_owner_verified",
+    activity_state: "blocked", pending_interaction_count: 1,
+    available_actions: { approve: { tool: "agent_knock_knock_approve", choices: Array.from({ length: 100 }, (_, i) => `${i}-${"x".repeat(100)}`) } } }] };
+  const result = compactAkkListModelProjection(raw, { listProjectionVersion: 5 }) as Row;
+  bounded(result);
+  const row = result.conversations[0];
+  assert.equal(row.details_omitted, true); assert.equal(row.usage, undefined); assert.equal(row.id, undefined);
+  assert.equal(row.title, raw.conversations[0].title); assert.equal(row.cwd, "/fixtures/project"); assert.equal(row.sidebar_project_name, "项目");
+  assert.equal(row.attention_required, true); assert.equal(row.pending_interaction_count, 1);
+  assert.deepEqual(row.available_actions, { status: true });
+  assert.deepEqual(row.action_inputs.status.arguments, { conversation_id: "desktop:large-actions" });
+  assert.match(row.next_action, /omitted actions are not unsupported/u);
+  assert.throws(() => compactAkkListModelProjection({ conversations: [{ ...raw.conversations[0], cwd: "/" + "x".repeat(30_000) }] },
+    { listProjectionVersion: 5 }), /exceeds the response budget/u, "oversize identity fails explicitly instead of losing a target or silently dropping rows");
+});
+
+test("v5 preserves folded Claude input blockers without choosing a different terminal or exposing authority", () => {
+  const control = { id: "terminal:v2:herdr:claude:fixture:w1:p1:123", agent: "claude",
+    physical_send_readiness: { ready: false, reason: "stash_not_empty", message: "Save the stashed draft first.", token: "private-anchor" } };
+  const base = { conversation_id: "claude-cli:v1:folded", source: "claude_cli", agent: "claude", activity_state: "idle",
+    terminal_controls: [control], capabilities: { send: false }, available_actions: { status: { tool: "agent_knock_knock_status" } } };
+  const project = (extra: Row = {}, version = 5) => (compactAkkListModelProjection({ conversations: [{ ...base, ...extra }] },
+    { listProjectionVersion: version }) as Row).conversations[0];
+  const legacy = project({}, 4);
+  assert.equal(legacy.physical_send_readiness, undefined); assert.match(JSON.stringify(legacy.usage), /stashed draft/u);
+  const output = project();
+  assert.deepEqual(output.physical_send_readiness, { ready: false, reason: "stash_not_empty", message: "Save the stashed draft first." });
+  assert.equal(output.available_actions.send, undefined); assert.doesNotMatch(JSON.stringify(output), /private-anchor/u);
+  assert.deepEqual(project({ physical_send_readiness: { ready: false, reason: "composer_not_empty" } }).physical_send_readiness,
+    { ready: false, reason: "composer_not_empty" });
+  assert.equal(project({ physical_send_readiness: null }).physical_send_readiness, null, "explicit unknown does not inherit a control's state");
+  assert.equal(project({ terminal_controls: [control, { ...control, id: "other-terminal" }] }).physical_send_readiness, undefined);
+  assert.equal(project({ source: "codex_cli", agent: "codex" }).physical_send_readiness, undefined);
+  assert.equal(control.physical_send_readiness.token, "private-anchor", "raw input is unchanged");
 });

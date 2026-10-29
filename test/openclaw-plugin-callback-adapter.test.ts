@@ -121,13 +121,28 @@ test("OpenClaw plugin CLI relay leaves the Gateway event loop responsive", async
   const result = await listTool.execute("tool-call-async", {});
   const listed = result.details as Record<string, any>;
   assert.deepEqual(listed.projection, {
-    schema: "agent-knock-knock/host-list-compact", version: 4, skill: "agent-knock-knock"
+    schema: "agent-knock-knock/host-list-compact", version: 5, skill: "agent-knock-knock"
   });
   assert.deepEqual(listed.terminals, []);
   assert.equal(listed.terminal_watches, undefined);
   assert.equal(listed.unavailable_managed_turns, undefined);
   assert.equal(listed.pagination.has_more, false);
   assert.equal(listed.watch_summary, undefined);
+});
+
+test("OpenClaw List defaults to v5 while explicit and diagnostic compatibility views remain selectable", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-openclaw-list-format-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  fs.writeFileSync(relayPath, 'process.stdout.write(JSON.stringify({ conversations: [] }));\n');
+  const tool = registerOpenClawListTool(relayPath);
+  for (const [params, version] of [
+    [{}, 5], [{ listProjectionVersion: 4 }, 4], [{ terminalDebug: true }, 4],
+    [{ terminalDebug: true, listProjectionVersion: 5 }, 5]
+  ] as const) {
+    const result = await tool.execute(`format-${version}`, params);
+    assert.equal((result.details as Record<string, any>).projection.version, version);
+  }
 });
 
 test("OpenClaw plugin aborts its asynchronous CLI relay", async (t) => {

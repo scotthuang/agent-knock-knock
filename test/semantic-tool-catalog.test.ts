@@ -27,11 +27,11 @@ test("semantic catalog freezes the exact ordered tool metadata digest", () => {
   );
   assert.equal(
     createHash("sha256").update(schemaBytes).digest("hex"),
-    "5cae7d30d3c990f469b26d6d896ca185584135ae8463617a1009d4800ec17196"
+    "55976d0587df4de415db39a5772a7d28a363d25060f28a7a86ab54951e912d9a"
   );
   assert.equal(
     publicMetadataDigest(catalog.command, catalog.tools),
-    "775d552031638cb0e4003238642c128b0258bb9e3c86de3522b1adc68e21b787"
+    "62f123ada806f0f2bae463c66379264e55d0cd1509718efead9c3e19e524ccff"
   );
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(Object.isFrozen(catalog.command), true);
@@ -40,7 +40,7 @@ test("semantic catalog freezes the exact ordered tool metadata digest", () => {
   assert.equal(catalog.tools.every(Object.isFrozen), true);
 });
 
-test("OpenClaw registration and Host Bridge consume one catalog byte-for-byte", () => {
+test("OpenClaw registration and Host Bridge with the same List format consume one catalog byte-for-byte", () => {
   const openClawTools: ToolMetadata[] = [];
   let openClawCommand: Record<string, unknown> | undefined;
   const api = {
@@ -71,6 +71,7 @@ test("OpenClaw registration and Host Bridge consume one catalog byte-for-byte", 
     relayPath: new URL("../src/cli.js", import.meta.url).pathname,
     relayEnvironment: {},
     pluginConfig: {},
+    listProjectionVersion: 5,
     logger: logger(),
     context: {
       sessionKey: "host-owner",

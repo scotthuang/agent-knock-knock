@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { HostListProjectionVersion } from "./semantic-tool-list-format.js";
 import { withStoreOwnerHostEnvironment } from "./store-owner-identity.js";
 
 import { packageRootDir } from "./cli-command-runtime.js";
@@ -43,6 +44,7 @@ export type {
   HostBridgeToolLogger,
   HostBridgeToolResult
 } from "./host-bridge-tools.js";
+export type { HostListProjectionVersion } from "./semantic-tool-list-format.js";
 
 export {
   createTrustedHostProfileRuntime,
@@ -89,6 +91,8 @@ export interface HostAdapterLifecycle {
 }
 
 export interface CreateHostAdapterOptions {
+  /** Omitted retains the existing v4 result shape; first-party connectors opt into v5. */
+  readonly listProjectionVersion?: HostListProjectionVersion;
   readonly relayPath?: string;
   readonly environmentForContext: (
     context: HostAdapterEnvironmentContext
@@ -150,6 +154,7 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
   );
   const pluginConfig = options.pluginConfig ?? {};
   const metadataRegistry = createHostBridgeToolRegistry({
+    listProjectionVersion: options.listProjectionVersion,
     relayPath,
     relayEnvironment: {},
     pluginConfig,
@@ -216,6 +221,7 @@ export function createHostAdapter(options: CreateHostAdapterOptions): HostAdapte
       throw new Error("environmentForContext must return a process environment");
     }
     const registry = createHostBridgeToolRegistry({
+      listProjectionVersion: options.listProjectionVersion,
       relayPath,
       relayEnvironment: withStoreOwnerHostEnvironment(environment, "host-adapter"),
       pluginConfig,

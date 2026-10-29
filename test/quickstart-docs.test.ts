@@ -350,7 +350,7 @@ test("operator guide and bundled skill keep advanced commands in their workflows
   );
   assert.match(
     skill,
-    /compact projection v4[\s\S]*CLI keeps the complete operator\/debug action contract/u
+    /compact projection v5 \(explicit v4 remains available\)[\s\S]*CLI keeps the complete operator\/debug action contract/u
   );
   assert.match(
     skill,

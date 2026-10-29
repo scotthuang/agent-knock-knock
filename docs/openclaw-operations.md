@@ -62,13 +62,32 @@ consent. When supported, this explicit installation command passes
 reports `capability_consent: "accepted"` in its result. Older OpenClaw versions
 continue through the same installation path without the unsupported option.
 
-Do not run `install-openclaw` after a ClawHub installation. These are
-alternative installation paths. For a nonstandard OpenClaw executable:
+Do not run the full `install-openclaw` workflow after a ClawHub installation.
+These are alternative installation paths; the Skill-only command below is a
+separate, non-installing operation. For a nonstandard OpenClaw executable:
 
 ```bash
 agent-knock-knock install-openclaw --verify \
   --openclaw-bin /absolute/path/to/openclaw
 ```
+
+## Synchronize an existing personal Skill after an upgrade
+
+The package bundles its matching Skill. An older personal copy at
+`~/.openclaw/skills/agent-knock-knock/SKILL.md` is separate and may remain after a
+plugin-only upgrade. If you use that personal copy, synchronize it from the
+matching installed AKK version:
+
+```bash
+agent-knock-knock install-openclaw --skill-only --no-restart
+```
+
+This updates only the personal Skill; it does not reinstall the plugin, change
+plugin configuration or restart the Gateway. The standalone CLI must match the
+installed plugin. With a package-only installation, invoke the same command via
+`node /path/to/installed/agent-knock-knock/dist/src/cli.js` instead of using a
+different global CLI version. Verify the selected package and personal Skill
+match before relying on new format guidance.
 
 ## Local development build
 

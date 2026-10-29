@@ -1523,6 +1523,10 @@
       "owner": "host-bridge"
     },
     {
+      "path": "src/semantic-tool-list-format.ts",
+      "owner": "host-bridge"
+    },
+    {
       "path": "src/semantic-tool-list-projection.ts",
       "owner": "host-bridge"
     },

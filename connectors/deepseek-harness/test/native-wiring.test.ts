@@ -109,6 +109,7 @@ test("mounts native command/tools and routes every call through the exact Agent"
       };
     },
     createHostAdapter(options) {
+      assert.equal(options.listProjectionVersion, 5);
       assert.equal(options.pluginConfig?.storeDir, path.join(os.homedir(), ".agent-knock-knock", "hosts", "deepseek-harness", "store"));
       assert.equal(options.lifecycleEnvironment?.AKK_DSH_CONTROLLER_ID, "akk-dsh:host-instance:lifecycle");
       return fakeAdapter(options, {

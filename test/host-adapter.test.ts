@@ -257,6 +257,67 @@ test("public Host metadata is a lossless owner-isolated immutable snapshot", () 
   assert.equal(secondProperties.agent.type, "string");
 });
 
+test("Host List projection opt-in is bound to catalog metadata and exact controller registries", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-adapter-list-format-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const relayPath = path.join(directory, "relay.mjs");
+  const callsPath = path.join(directory, "calls.jsonl");
+  fs.writeFileSync(relayPath, `
+import fs from "node:fs";
+fs.appendFileSync(process.env.AKK_TEST_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
+process.stdout.write(JSON.stringify({ conversations: [{
+  id: "codex-cli:v1:fixture", conversation_id: "codex-cli:v1:fixture",
+  source: "codex_cli", agent: "codex", activity_state: "idle",
+  available_actions: { status: { tool: "agent_knock_knock_status" } }
+}] }));
+`, "utf8");
+  const create = (listProjectionVersion?: 4 | 5) => createHostAdapter({
+    relayPath, listProjectionVersion, logger: logger(),
+    environmentForContext: () => ({ AKK_TEST_LOG: callsPath })
+  });
+  const legacy = create();
+  const modern = create(5);
+  const schemaDefault = (adapter: typeof legacy) => {
+    const schema = adapter.tools.find(tool => tool.name === "agent_knock_knock_list")!.inputSchema;
+    return (schema.properties as Record<string, { default?: number }>).listProjectionVersion.default;
+  };
+  assert.equal(schemaDefault(legacy), 4);
+  assert.equal(schemaDefault(modern), 5);
+  assert.notEqual(legacy.capabilityHandshake.catalogDigest, modern.capabilityHandshake.catalogDigest);
+  assert.equal(legacy.capabilityHandshake.version, 1, "format selection does not mutate handshake v1");
+  assert.equal(legacy.capabilityHandshake.skillDigest, modern.capabilityHandshake.skillDigest);
+
+  const cases: Array<{ adapter: typeof legacy; args: Record<string, unknown>; version: number }> = [
+    { adapter: legacy, args: {}, version: 4 },
+    { adapter: legacy, args: { listProjectionVersion: 5 }, version: 5 },
+    { adapter: modern, args: {}, version: 5 },
+    { adapter: modern, args: { listProjectionVersion: 4 }, version: 4 },
+    { adapter: modern, args: { terminalDebug: true }, version: 4 },
+    { adapter: modern, args: { terminalDebug: true, listProjectionVersion: 5 }, version: 5 }
+  ];
+  for (const [index, scenario] of cases.entries()) {
+    // Every call constructs an owner registry, exercising metadata/default parity.
+    const result = await scenario.adapter.executeTool(controller({}, `format-${index}`),
+      "agent_knock_knock_list", `format-${index}`, scenario.args);
+    const details = result.details as Record<string, any>;
+    assert.equal(details.projection.version, scenario.version);
+    assert.equal(details.conversations[0].conversation_id, "codex-cli:v1:fixture");
+    assert.equal(Object.hasOwn(details.conversations[0], "usage"), scenario.version === 4);
+  }
+  const beforeInvalid = fs.readFileSync(callsPath, "utf8");
+  for (const value of [3, 6, "5", null]) {
+    await assert.rejects(modern.executeTool(controller({}, "invalid-format"),
+      "agent_knock_knock_list", "invalid-format", { listProjectionVersion: value }),
+    /listProjectionVersion/u);
+  }
+  assert.equal(fs.readFileSync(callsPath, "utf8"), beforeInvalid,
+    "unsupported projections must fail before starting the relay");
+  const calls = beforeInvalid.trim().split("\n").map(line => JSON.parse(line) as string[]);
+  assert.equal(calls.length, cases.length);
+  assert.ok(calls.every(argv => argv[0] === "list" &&
+    !argv.some(value => /projection/iu.test(value))), "presentation options never reach the native CLI");
+});
+
 test("public Host adapter owns one shared monitor lifecycle", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "akk-adapter-life-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

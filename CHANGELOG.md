@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.8 / Pi 0.1.0-poc.16 / DeepSeek Harness 0.1.0-rc.20 — 2026-10-30
+
+- Add an explicitly versioned compact List v5 for updated OpenClaw, Pi and DSH connectors. Omit repeated usage prose and duplicate IDs while retaining exact selectors, readable states, dynamic action inputs and structured blockers. Keep the existing whole-response budgets and complete pagination.
+- Preserve v4 for existing generic Host SDK and MCP consumers; allow `listProjectionVersion: 4 | 5`, bind continuations to that format and reject unsupported versions before discovery. Raw CLI output, action contract 35, private authority and execution checks are unchanged.
+
+- Publish coordinated Pi and DSH connector updates pinned to core **0.16.8**, retaining their existing Host compatibility ranges and `next` tags. Document separate synchronization of an existing personal OpenClaw Skill without reinstalling the plugin or restarting the Gateway.
+- Correct test fixtures for restrictive caller umasks and opaque Desktop identity ordering; retain the permission and connection assertions.
+
 ## 0.16.7 / Pi 0.1.0-poc.15 / DeepSeek Harness 0.1.0-rc.19 — 2026-10-29
 
 - Reduce repeated discovery work within one CLI command: share in-flight Claude reader and terminal probes, isolate the memo between commands, inspect known Claude targets directly, and bound parallel process checks. Execution identity and input fences remain fresh and are never cached as authority.

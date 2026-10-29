@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { arrayValue } from "./semantic-tool-value-helpers.js";
 import { recordValue } from "./value-guards.js";
 import { withConversationUsage } from "./conversation-usage-guidance.js";
+import { compactListV5Row, resolveHostListProjectionVersion, type HostListProjectionVersion } from "./semantic-tool-list-format.js";
 
 // A byte budget also bounds UTF-16 output and leaves room for Host envelopes.
 // It is not a token budget, and does not reduce the native discovery/read cost.
@@ -20,20 +21,23 @@ export function parseHostListPageOptions(params: Row = {}) {
     throw new Error("List now returns conversations only; use agent_knock_knock_watches or akk watches for monitoring and history");
   }
   const view = "current";
+  const projectionVersion = resolveHostListProjectionVersion(params.listProjectionVersion);
+  const cursorVersion = projectionVersion === 4 ? 2 : 3;
   const limit = params.listLimit ?? 40;
   if (!Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 100) throw new Error("listLimit must be between 1 and 100");
   const filters = Object.fromEntries(FILTERS.filter(key => params[key] !== undefined).map(key => [key, params[key]]));
-  const scope = digest(JSON.stringify({ view, filters }));
+  // Keep existing v4 cursors usable; new cursors bind the selected format as well as filters.
+  const scope = digest(JSON.stringify({ view, filters, ...(projectionVersion === 5 ? { projectionVersion } : {}) }));
   let after = "";
   if (params.listCursor !== undefined) {
     try {
       if (typeof params.listCursor !== "string" || params.listCursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(params.listCursor)) throw new Error();
       const cursor = JSON.parse(Buffer.from(params.listCursor, "base64url").toString("utf8"));
-      if (cursor.version !== 2 || cursor.scope !== scope || typeof cursor.after !== "string" || !/^[0-9]:[a-f0-9]{64}$/u.test(cursor.after)) throw new Error();
+      if (cursor.version !== cursorVersion || cursor.scope !== scope || typeof cursor.after !== "string" || !/^[0-9]:[a-f0-9]{64}$/u.test(cursor.after)) throw new Error();
       after = cursor.after;
     } catch { throw new Error("Invalid List cursor or changed filters; restart List without listCursor"); }
   }
-  return { view, limit: Number(limit), scope, after, filters };
+  return { view, limit: Number(limit), scope, after, filters, projectionVersion, cursorVersion };
 }
 
 /** Healthy ended observations are history. Unknown/failed delivery and pending interaction stay current. */
@@ -77,7 +81,7 @@ export function paginateHostList(projected: Row, params: Row = {}): Row {
   for (const entry of remaining) {
     if (returned >= options.limit) break;
     const row = bytes(entry.row) > ROW_MAX_BYTES || hostListWeightedChars(JSON.stringify(entry.row)) > 6_000
-      ? statusReference(entry.row) : entry.row;
+      ? statusReference(entry.row, options.projectionVersion) : entry.row;
     const rows = output[entry.field] as Row[];
     rows.push(row);
     updatePage(returned + 1, entry.key);
@@ -94,8 +98,9 @@ export function paginateHostList(projected: Row, params: Row = {}): Row {
     const hasMore = count < remaining.length;
     page.returned = count; page.has_more = hasMore;
     page.remaining = remaining.length - count;
-    page.next_cursor = hasMore && after ? Buffer.from(JSON.stringify({ version: 2, scope: options.scope, after })).toString("base64url") : null;
-    page.next_args = page.next_cursor ? { ...options.filters, listView: options.view, listLimit: options.limit, listCursor: page.next_cursor } : null;
+    page.next_cursor = hasMore && after ? Buffer.from(JSON.stringify({ version: options.cursorVersion, scope: options.scope, after })).toString("base64url") : null;
+    page.next_args = page.next_cursor ? { ...options.filters, listView: options.view, listLimit: options.limit,
+      listProjectionVersion: options.projectionVersion, listCursor: page.next_cursor } : null;
   }
 }
 
@@ -136,10 +141,13 @@ function collectHostListEntries(projected: Row) {
   return { entries, categoryCounts };
 }
 
-function statusReference(row: Row): Row {
+function statusReference(row: Row, version: HostListProjectionVersion): Row {
   const result: Row = {};
   for (const key of ["id", "conversation_id", "watch_id", "turn_id", "native_thread_id", "native_turn_id", "surface", "agent", "status", "activity_state", "connection_state",
     "management_state", "pending_interaction_count", "pending_manual_count", "pending_async_count", "callback_state", "callback_expected", "observation_active", "channel_delivery_state"]) {
+    if (row[key] !== undefined) result[key] = row[key];
+  }
+  if (version === 5) for (const key of ["title", "cwd", "workspace", "sidebar_project_id", "sidebar_project_name"]) {
     if (row[key] !== undefined) result[key] = row[key];
   }
   const delivery = recordValue(row.callback_delivery);
@@ -153,7 +161,7 @@ function statusReference(row: Row): Row {
   const id = row.watch_id ? { watch_id: row.watch_id } : row.turn_id ? { turn_id: row.turn_id } : { conversation_id: row.conversation_id ?? row.id };
   result.action_inputs = { status: { arguments: id } };
   result.next_action = "Read exact Status for current actions and interaction/callback details; omitted actions are not unsupported.";
-  return withConversationUsage(result);
+  return version === 5 ? compactListV5Row(result) : withConversationUsage(result);
 }
 function digest(text: string): string { return createHash("sha256").update(text).digest("hex"); }
 function bytes(value: unknown): number { return Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8"); }
