@@ -38,7 +38,12 @@ test("connector Skill sync creates exact artifacts and is idempotent", (t) => {
   assert.equal(created.canonical.sha256, expectedHash);
 
   const before = artifactStats(fixture.root);
-  assert.ok(before.every((stat) => stat.mode === 0o640n));
+  const sourceMode = BigInt(fs.statSync(path.join(fixture.root, CANONICAL_SKILL_PATH)).mode & 0o777);
+  // File creation is deliberately restricted by the caller's umask. A stricter
+  // artifact is correct; synchronizing must not chmod it back to broader access.
+  const expectedMode = sourceMode & ~BigInt(process.umask());
+  assert.ok(before.every((stat) => stat.mode === expectedMode));
+  assert.ok(before.every((stat) => (stat.mode & ~sourceMode) === 0n));
   for (const artifact of CONNECTOR_SKILL_ARTIFACTS) {
     assert.deepEqual(
       fs.readFileSync(path.join(fixture.root, artifact.path)),
@@ -62,6 +67,22 @@ test("connector Skill sync creates exact artifacts and is idempotent", (t) => {
       fs.readdirSync(directory).some((entry) => entry.endsWith(".tmp")),
       false
     );
+  }
+});
+
+test("Skill publication applies the caller mask without changing existing source permissions", (t) => {
+  const fixture = createFixture(t);
+  const sourcePath = path.join(fixture.root, CANONICAL_SKILL_PATH);
+  // Model an already checked-out group-readable template, solely in this fixture.
+  fs.chmodSync(sourcePath, 0o640);
+  const parentMask = process.umask();
+  synchronizeConnectorSkills({ repoRoot: fixture.root });
+  assert.equal(process.umask(), parentMask, "publication never changes the process umask");
+  assert.equal(fs.statSync(sourcePath).mode & 0o777, 0o640, "source permissions are not rewritten");
+  const expectedMode = BigInt(0o640 & ~parentMask);
+  assert.ok(artifactStats(fixture.root).every(stat => stat.mode === expectedMode), "publication must not expand access past the caller umask");
+  for (const artifact of CONNECTOR_SKILL_ARTIFACTS) {
+    assert.deepEqual(fs.readFileSync(path.join(fixture.root, artifact.path)), fixture.canonical);
   }
 });
 

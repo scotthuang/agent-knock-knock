@@ -4,13 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { listDesktopSessions } from "../src/desktop-list.js";
-import { createDesktopConversationId } from "../src/desktop-identity.js";
+import { createDesktopConversationId, parseDesktopConversationId } from "../src/desktop-identity.js";
 import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
 import type { DesktopRuntime } from "../src/desktop-runtime.js";
 import type { DesktopCatalogEntry, DesktopCatalogListOptions } from "../src/desktop-session-catalog.js";
+
+function exactHostRow(host: any, conversationId: string): any {
+  const matches = host.desktop_sessions.filter((row: any) => row.conversation_id === conversationId);
+  assert.equal(matches.length, 1, "each exact Desktop identity must appear once");
+  return matches[0];
+}
 
 test("Desktop List defaults to sidebar and retains an unloaded row and its reason in the Host result", async t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "akk-sidebar-list-"));
@@ -49,8 +55,10 @@ test("Desktop List defaults to sidebar and retains an unloaded row and its reaso
   assert.equal(result.desktop_scan.live_probe_scope, "returned_page");
   const host = compactAkkListModelProjection(result) as any;
   assert.equal(host.desktop_sessions.length, 2);
-  assert.equal(host.desktop_sessions[0].capabilities.send, true);
-  const unavailable = host.desktop_sessions[1];
+  // Host pagination orders opaque IDs, not catalog insertion order. Their encoded
+  // home prefix can change this order when TMPDIR changes; select by exact identity.
+  assert.equal(exactHostRow(host, rows[0].conversationId).capabilities.send, true);
+  const unavailable = exactHostRow(host, rows[1].conversationId);
   assert.equal(unavailable.conversation_id, rows[1].conversationId);
   assert.equal(unavailable.sidebar_project_name, "Avatar");
   assert.equal(unavailable.connection_state, "unconfirmed");
@@ -72,23 +80,57 @@ test("Desktop List defaults to sidebar and retains an unloaded row and its reaso
   assert.equal(requests.length, 2);
   runtime.compatibility = DESKTOP_CREATION_BUILD;
   const sendOnly = compactAkkListModelProjection(await listDesktopSessions(runtime, {})) as any;
-  assert.equal(sendOnly.desktop_sessions[0].capabilities.send, true);
-  assert.equal(sendOnly.desktop_sessions[0].capabilities.set_permissions, true);
-  assert.equal(sendOnly.desktop_sessions[0].available_actions.model_options, true);
-  assert.equal(sendOnly.desktop_sessions[0].capability_verification.nativeControls, false);
+  const sendOnlyReady = exactHostRow(sendOnly, rows[0].conversationId);
+  assert.equal(sendOnlyReady.capabilities.send, true);
+  assert.equal(sendOnlyReady.capabilities.set_permissions, true);
+  assert.equal(sendOnlyReady.available_actions.model_options, true);
+  assert.equal(sendOnlyReady.capability_verification.nativeControls, false);
   assert.equal(sendOnly.desktop_scan.write_contract_verified, false);
   assert.equal(sendOnly.desktop_scan.send_contract_verified, true);
   assert.equal(sendOnly.desktop_scan.approval_contract_verified, true);
   runtime.compatibility = { version: "future", build: "unverified" };
   const unknown = compactAkkListModelProjection(await listDesktopSessions(runtime, {})) as any;
-  const ready = unknown.desktop_sessions[0];
+  const ready = exactHostRow(unknown, rows[0].conversationId);
   assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.set_model, true);
   assert.equal(ready.compatibility_warning, true); assert.equal(ready.compatibility_policy, "attempt_native_contract");
   assert.equal(Object.values(ready.capability_verification).every(value => value === false), true);
   assert.equal(unknown.desktop_scan.compatibility_policy, "attempt_native_contract");
   assert.equal(unknown.desktop_scan.write_contract_verified, false); assert.equal(unknown.desktop_scan.send_contract_verified, false);
   assert.equal(unknown.desktop_scan.approval_contract_verified, false);
-  assert.equal(unknown.desktop_sessions[1].capabilities.send, false);
+  assert.equal(exactHostRow(unknown, rows[1].conversationId).capabilities.send, false);
+});
+
+test("Desktop capability assertions follow exact IDs across encoded home prefixes and both List formats", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-id-order-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const firstThreads = new Set<string>();
+  for (const suffix of ["h", "hh", "hhh"]) {
+    const codexHome = path.join(root, suffix);
+    fs.mkdirSync(codexHome);
+    const rows = ["ready-thread", "unloaded-thread"].map(threadId => {
+      const identity = { codexHome, hostId: "local", threadId };
+      const conversation_id = createDesktopConversationId(identity);
+      assert.deepEqual(parseDesktopConversationId(conversation_id), identity);
+      const live = threadId === "ready-thread";
+      return { conversation_id, source: "codex_desktop", agent: "codex", native_thread_id: threadId,
+        connection_state: live ? "live_owner_verified" : "unconfirmed", capabilities: { send: live },
+        ...(live ? {} : { can_send_reason: "no_live_owner" }) };
+    });
+    for (const listProjectionVersion of [4, 5]) {
+      const host = compactAkkListModelProjection({ desktop_sessions: rows }, { listProjectionVersion }) as any;
+      assert.equal(host.desktop_sessions.length, 2);
+      firstThreads.add(host.desktop_sessions[0].native_thread_id);
+      const ready = exactHostRow(host, rows[0].conversation_id);
+      assert.equal(ready.connection_state, "live_owner_verified");
+      assert.equal(ready.capabilities.send, true);
+      const unloaded = exactHostRow(host, rows[1].conversation_id);
+      assert.equal(unloaded.connection_state, "unconfirmed");
+      assert.equal(unloaded.capabilities.send, false);
+      assert.equal(unloaded.can_send_reason, "no_live_owner");
+      assert.equal(unloaded.available_actions?.send, undefined);
+    }
+  }
+  assert.equal(firstThreads.size, 2, "fixture exercises both opaque-ID sort orders, without Socket I/O");
 });
 
 test("unsupported Desktop sidebar metadata remains an explicit incomplete result, not all history or a successful empty sidebar", async () => {
