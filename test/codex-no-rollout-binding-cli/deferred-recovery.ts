@@ -181,7 +181,7 @@ for (const [label, acceptedNativeThreadId] of [
       });
       try {
         const source = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
-        const listed = await listFixtureTerminal(fixture);
+        const listed = await listFixtureTerminal(fixture, { approvalScan: true });
         assert.equal(listed.management_state, "managed");
         assert.equal(listed.managed.session_id, source.session_id);
         const action = listed.available_actions.send;

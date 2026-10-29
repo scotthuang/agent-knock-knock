@@ -752,6 +752,7 @@ test("approve sends y only when the terminal screen shows a primary Codex approv
 
     const listed = await runAgentCliInProcess([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--threads-json",

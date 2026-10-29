@@ -34,10 +34,12 @@ import {
 } from "./rollouts.js";
 
 export async function listFixtureTerminal(
-  fixture: NoRolloutFixture
+  fixture: NoRolloutFixture,
+  options: { approvalScan?: boolean } = {}
 ): Promise<Record<string, any>> {
   const listed = await runCli([
     "list",
+    ...(options.approvalScan ? ["--approval-scan"] : []),
     ...codexNoRolloutStoreArgs(fixture)
   ], fixture.environment);
   assert.equal(listed.status, 0, listed.stderr || listed.stdout);
@@ -49,7 +51,7 @@ export async function listFixtureTerminal(
 export async function deferredForegroundSendAction(
   fixture: NoRolloutFixture
 ): Promise<Record<string, any>> {
-  const terminal = await listFixtureTerminal(fixture);
+  const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
   return assertTerminalUserExplicitSendAction(terminal);
 }
 

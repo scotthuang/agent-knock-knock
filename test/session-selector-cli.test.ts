@@ -486,8 +486,23 @@ test("legacy unsupported executors do not break live terminal short refs", async
     assert.equal("delegated" in managedOnly, false);
     assert.equal("tasks" in managedOnly, false);
 
+    // Public discovery supplies a selector, not a stale physical input token.
+    const discovered = await runCliWithCodexInventory([
+      "list", "--store-dir", storeDir, ...runtimeArgs
+    ], { codexPid, nativeIdentity, workspace });
+    assert.equal(discovered.terminals[0].detail_scan, "deferred");
+    assert.equal(discovered.terminals[0].approval_state.scanned, false);
+    assert.equal(discovered.terminals[0].available_actions.send, undefined);
+    const status = await runCliWithCodexInventory([
+      "status", "--conversation", discovered.terminals[0].id,
+      "--store-dir", storeDir, ...runtimeArgs
+    ], { codexPid, nativeIdentity, workspace });
+    assert.equal(status.terminal_status.target, terminalTarget);
+    assert.equal(status.terminal_status.approval_state.scanned, true);
+
     const listed = await runCliWithCodexInventory([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -507,7 +522,7 @@ test("legacy unsupported executors do not break live terminal short refs", async
     const sent = await runCliWithCodexInventory([
       "send",
       "--conversation",
-      listed.terminals[0].short_ref,
+      discovered.terminals[0].short_ref,
       "--message",
       "Inspect the current git status",
       "--background",
@@ -597,6 +612,7 @@ test("an unsupported legacy record without a dispatch ledger does not hide its t
 
     const listed = await runCliWithCodexInventory([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -718,6 +734,7 @@ test("CLI keeps an owned terminal visible and routes its canonical actions to th
 
     const approvalListed = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...codexTerminalStaticArgs({
@@ -1171,6 +1188,7 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
 
     const listed = await runCliWithCodexInventory([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...runtimeArgs
@@ -1219,6 +1237,7 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
 
     const restarted = await runCliWithCodexInventory([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...codexTerminalStaticArgs({
@@ -1255,6 +1274,7 @@ test("multiple idle turns stay terminal history while user-priority Send keeps i
 
     const listedAll = await runCliWithCodexInventory([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...runtimeArgs

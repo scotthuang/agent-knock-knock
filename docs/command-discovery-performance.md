@@ -1,7 +1,8 @@
 # 单命令发现与定向检查性能记录
 
 日期：2026-10-29。基线为 `576f8c5` / core `0.16.6`；改动保留于
-`perf/command-scoped-discovery` 工作区，未提交、推送、安装或发布。
+`perf/command-scoped-discovery` 工作区；本记录采集时尚未提交、推送、安装或发布。
+以下数据与测试范围描述的是该开发验证时点，后续发布状态见 CHANGELOG 与对应 Release。
 
 ## 实测方法
 
@@ -141,3 +142,12 @@ Herdr 的 working/idle 取自最后一份已校验 snapshot，只用于展示，
 - `test/terminal-process-source.test.ts`
 - `test/terminal-runtime-cli-adapter.test.ts`
 - `test/test-tiers.json`
+
+## 发布复核补充（0.16.7）
+
+默认摘要投影曾遗漏空线程分类所需的历史证据，会让同目录的空后台候选重新出现。
+发行复核通过合成默认列表复现并补齐：只对同 Codex home/目录下有未命名 idle 候选的
+多线程组读取现有精确快照，列表仅保留分类所需 ID/status，不输出任务正文。
+未知或读取失败不会推断空历史，也不会隐藏候选；普通组保留摘要快速路径。
+这类歧义组的快照读取可能涉及最新 turn 的 items，因此上文修复前测量不构成该分支的性能保证。
+回归是隔离合成验证，本次未重新执行用户工作会话的派活或回调。

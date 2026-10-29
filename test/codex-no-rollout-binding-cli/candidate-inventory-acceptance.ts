@@ -305,7 +305,7 @@ test("abandoned deferred history blocks replay but not an explicit terminal send
 
     enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
     fs.writeFileSync(fixture.screenPath, codexTestComposerScreen());
-    const relisted = await listFixtureTerminal(fixture);
+    const relisted = await listFixtureTerminal(fixture, { approvalScan: true });
     const explicitSend = relisted.available_actions.send;
     assert.ok(explicitSend, JSON.stringify(relisted, null, 2));
     assert.equal(explicitSend.scope, "terminal_user_explicit");
@@ -601,7 +601,7 @@ for (const [label, acceptedNativeThreadId] of [
         persistReleasedCandidateSourceTurns(fixture, source);
         fixture.acceptanceNativeThreadIdsOnEnter = [acceptedNativeThreadId];
 
-        const terminal = await listFixtureTerminal(fixture);
+        const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
         assert.equal(
           terminal.native_agent_identity_observation.status,
           "unavailable"
@@ -1251,7 +1251,7 @@ for (const identityCase of ["resolved", "unavailable"] as const) {
           "fixture foreground identity is unavailable while inventory is exact";
       }
 
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(
         terminal.native_agent_identity_observation.status,
         "resolved"
@@ -1348,7 +1348,7 @@ for (const hintCase of ["absent", "aged"] as const) {
         );
       }
 
-      const listed = await listFixtureTerminal(fixture);
+      const listed = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(
         listed.native_agent_identity_observation.status,
         "resolved"
@@ -1419,7 +1419,7 @@ test("multi-root unavailable identity uses the exact inventory token and binds t
       "session-multi-root-unavailable-source"
     );
 
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(
       listed.native_agent_identity_observation.status,
       "unavailable"

@@ -1074,6 +1074,11 @@ async function terminalControlledListEntry(
     facts
   });
   const commands = actionDecisions.commands;
+  // Physical discovery runs before the asynchronous reader; reflect its verified
+  // exact-PID result in display metadata only, never in action authority.
+  const exactClaudeDiscovery = session.agent === "claude" &&
+    nativeIdentitySnapshot?.observation.status === "resolved" &&
+    nativeIdentitySnapshot.observation.identity.evidence === "claude_agents_exact_pid";
   const entry = {
     id: terminalId,
     short_ref: sessionShortRef(terminalId),
@@ -1114,8 +1119,10 @@ async function terminalControlledListEntry(
       ? { compatibility_warnings: compatibilityWarnings }
       : {}),
     lifecycle_binding_token: lifecycleBindingToken,
-    confidence: session.confidence,
-    reason: session.reason,
+    confidence: exactClaudeDiscovery ? "high" : session.confidence,
+    reason: exactClaudeDiscovery
+      ? "interactive Claude CLI matched a verified exact-PID reader snapshot"
+      : session.reason,
     terminal_control: terminalControl,
     approval_state: projectedTerminalState.approval_state,
     ...(options.listDiscoveryOnly ? { detail_scan: "deferred" } : {}),

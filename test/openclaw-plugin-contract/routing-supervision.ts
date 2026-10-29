@@ -563,7 +563,7 @@ test("OpenClaw send retry uses only the currently advertised exact Turn form", a
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls[0], ["list", "--reconcile"]);
+    assert.deepEqual(calls[0], ["list", "--approval-scan", "--reconcile"]);
     assert.deepEqual(calls[1], ["send", "--turn", turnId]);
     for (const forbidden of [
       "--message",

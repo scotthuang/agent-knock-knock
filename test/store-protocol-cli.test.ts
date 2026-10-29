@@ -292,6 +292,7 @@ test("explicit physical send bypasses a newer writer protocol without mutating S
     });
     const listed = await runInProcessCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir
     ], dependencies);
@@ -453,6 +454,7 @@ test("managed-first physical Send revalidates process birth under its terminal l
           });
           const listed = await runInProcessCli([
             "list",
+            "--approval-scan",
             "--store-dir",
             storeDir
           ], dependencies);

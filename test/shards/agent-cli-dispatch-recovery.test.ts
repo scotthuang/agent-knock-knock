@@ -195,6 +195,7 @@ test("safe-aborted strict managed retry rejects binding drift while user-priorit
 
     const listed = await runAgentCliInProcess([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...nativeIdentityArgs
@@ -1250,6 +1251,7 @@ test("monitor supervision repairs only an exact legacy idle collateral stall whi
     });
     const before = await runAgentCliInProcess([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       ...terminalFixtures

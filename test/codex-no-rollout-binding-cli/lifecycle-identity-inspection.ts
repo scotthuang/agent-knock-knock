@@ -455,7 +455,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
   const fixture = createNoRolloutFixture({ codexVersion: "0.147.0" });
   try {
     assert.equal(fs.existsSync(fixture.storeDir), false);
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(listed.native_inspection.status, "supported");
     assert.equal(listed.native_inspection.agentVersion, "0.147.0");
     assert.deepEqual(
@@ -494,7 +494,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
       "\u001b[1m›\u001b[0m \u001b[2mImprove documentation in @filename\u001b[0m",
       "  \u001b[38;2;246;226;183mgpt-5.6-sol high\u001b[2m\u001b[39m · \u001b[0m/workspace"
     ].join("\n"));
-    const suggested = await listFixtureTerminal(fixture);
+    const suggested = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(suggested.activity_state, "idle");
     assert.deepEqual(
       suggested.available_actions.native_inspect.arguments,
@@ -510,7 +510,7 @@ test("native status inspection is snapshot-bound, settles the slash composer, an
       "› human draft",
       "gpt-5.6-sol high · /workspace"
     ].join("\n"));
-    const drafted = await listFixtureTerminal(fixture);
+    const drafted = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(drafted.activity_state, "idle");
     assert.equal(drafted.available_actions.native_inspect, undefined);
     const nonempty = await runCli(
@@ -590,7 +590,7 @@ for (const [label, viewportColumns] of [
         viewportColumns
       });
       try {
-        const listed = await listFixtureTerminal(fixture);
+        const listed = await listFixtureTerminal(fixture, { approvalScan: true });
         const inspected = await runCli([
           "native-inspect",
           "--terminal",
@@ -634,7 +634,7 @@ test("Herdr zoomed focused effective area gates closed Codex status at the exact
     ttyViewportRows: 38
   });
   try {
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     const nativeInspectArguments = [
       "native-inspect",
       "--terminal",
@@ -765,7 +765,7 @@ test("Herdr zoomed focused effective area gates closed Codex status at the exact
 test("Codex 0.146.0 native status inspection remains backward compatible", async () => {
   const fixture = createNoRolloutFixture({ codexVersion: "0.146.0" });
   try {
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(listed.native_inspection.status, "supported");
     assert.equal(listed.native_inspection.agentVersion, "0.146.0");
     const inspected = await runCli([
@@ -791,7 +791,7 @@ test("Codex 0.146.0 native status inspection remains backward compatible", async
 test("native status inspection sends no Enter after post-injection process drift", async () => {
   const fixture = createNoRolloutFixture();
   try {
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     const inspected = await runCli([
       "native-inspect",
       "--terminal",
@@ -827,7 +827,7 @@ test("native status inspection is withheld and rejects a cached action while man
     try {
       fs.writeFileSync(fixture.materializedPath, "ready");
       const session = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);
-      const listed = await listFixtureTerminal(fixture);
+      const listed = await listFixtureTerminal(fixture, { approvalScan: true });
       const advertised = listed.available_actions.native_inspect;
       assert.ok(advertised, blocker);
 
@@ -837,7 +837,7 @@ test("native status inspection is withheld and rejects a cached action while man
         persistUnresolvedTransition(fixture, session);
       }
 
-      const blocked = await listFixtureTerminal(fixture);
+      const blocked = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(
         blocked.available_actions.native_inspect,
         undefined,

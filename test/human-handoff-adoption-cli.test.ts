@@ -138,7 +138,7 @@ test("a terminal-scoped Codex send adopts an exact unknown human-switched thread
       generation: 1
     });
 
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(listed.management_state, "conflict");
     assert.equal(
       listed.handoff_state,
@@ -285,7 +285,7 @@ test("an explicit Claude Send protects an existing draft and submits once after 
     });
     const oldDraft = "Preserve this user-authored draft.";
     fixture.setComposerText(oldDraft);
-    const draftListed = await fixture.listTerminal();
+    const draftListed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(draftListed.handoff_state, "external_handoff_blocked");
     assert.equal(draftListed.available_actions?.send, undefined);
     assert.equal(draftListed.physical_send_readiness?.reason, "composer_not_empty");
@@ -299,7 +299,7 @@ test("an explicit Claude Send protects an existing draft and submits once after 
     // Composer still admits the separately chosen physical input path.
     fixture.setComposerText("");
     fixture.persistBlockingTurn(source);
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const action = assertTerminalUserExplicitSendAction(listed);
     const expectedTerminalToken = String(
       action.arguments?.expected_terminal_token ?? ""
@@ -343,7 +343,7 @@ test("capture failure after a Claude restore probe returns structured do-not-ret
     fixture.setComposerText("");
     fixture.persistBlockingTurn(source);
     fixture.setClaudeRestoreProbeCaptureUncertain(true);
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const action = assertTerminalUserExplicitSendAction(listed);
     const expectedTerminalToken = String(
       action.arguments?.expected_terminal_token ?? ""
@@ -647,7 +647,7 @@ test("Herdr Claude explicit Send protects drafts and uses an empty Composer whil
     pendingText = oldDraft;
     screen = claudeComposerScreen(oldDraft);
     const draftListedResult = await runInProcessCli(
-      ["list", ...storeArgs],
+      ["list", "--approval-scan", ...storeArgs],
       dependencies
     );
     assert.equal(draftListedResult.status, 0, draftListedResult.stderr);
@@ -666,7 +666,7 @@ test("Herdr Claude explicit Send protects drafts and uses an empty Composer whil
     pendingText = "";
     screen = ["Ready", "❯\u00a0"].join("\n");
     const unframedListedResult = await runInProcessCli(
-      ["list", ...storeArgs],
+      ["list", "--approval-scan", ...storeArgs],
       dependencies
     );
     assert.equal(unframedListedResult.status, 0, unframedListedResult.stderr);
@@ -683,7 +683,7 @@ test("Herdr Claude explicit Send protects drafts and uses an empty Composer whil
 
     screen = claudeHerdrClearedComposerScreen();
     const listedResult = await runInProcessCli(
-      ["list", ...storeArgs],
+      ["list", "--approval-scan", ...storeArgs],
       dependencies
     );
     assert.equal(listedResult.status, 0, listedResult.stderr);
@@ -773,7 +773,7 @@ test("Herdr Claude explicit Send protects drafts and uses an empty Composer whil
     pendingText = "";
     screen = claudeComposerScreen();
     const replacementListedResult = await runInProcessCli(
-      ["list", ...storeArgs],
+      ["list", "--approval-scan", ...storeArgs],
       dependencies
     );
     assert.equal(
@@ -864,7 +864,7 @@ for (const agent of ["codex", "claude"] as const) {
 
       let expectedTerminalToken: string | undefined;
       if (agent === "codex") {
-        const listed = await fixture.listTerminal();
+        const listed = await fixture.listTerminal({ approvalScan: true });
         assert.equal(listed.handoff_state, "external_handoff_adoptable");
         expectedTerminalToken = String(
           listed.available_actions?.send?.arguments
@@ -998,7 +998,7 @@ test("a handoff send token rejects an alias or omitted selector before mutation"
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -1048,7 +1048,7 @@ for (const drift of ["source revision", "target snapshot"] as const) {
         status: "detached",
         generation: 5
       });
-      const listed = await fixture.listTerminal();
+      const listed = await fixture.listTerminal({ approvalScan: true });
       assert.equal(listed.handoff_state, "external_handoff_adoptable");
       const expectedTerminalToken = String(
         listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
@@ -1063,7 +1063,7 @@ for (const drift of ["source revision", "target snapshot"] as const) {
           Date.parse(selected.updated_at) + 1_000
         ).toISOString()
       }, { expectedRevision: selected.revision as number });
-      const relisted = await fixture.listTerminal();
+      const relisted = await fixture.listTerminal({ approvalScan: true });
       assert.equal(
         assertTerminalUserExplicitSendAction(relisted).arguments
           .expected_terminal_token,
@@ -1100,7 +1100,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
       generation: 1
     });
     const oldTurn = fixture.persistBlockingTurn(source);
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.blocking_turns?.length, 1);
@@ -1173,7 +1173,7 @@ test("an active source Turn exposes an exact supersede decision before handoff",
       false
     );
 
-    const refreshed = await fixture.listTerminal();
+    const refreshed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(refreshed.handoff_state, "external_handoff_adoptable");
     const freshToken = String(
       refreshed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
@@ -1339,7 +1339,7 @@ for (const agent of ["codex", "claude"] as const) {
       fixture.setCurrentNativeThreadId(NATIVE_A);
       let expectedTerminalToken: string | undefined;
       if (agent === "codex") {
-        const initial = await fixture.listTerminal();
+        const initial = await fixture.listTerminal({ approvalScan: true });
         expectedTerminalToken = String(
           initial.available_actions?.send?.arguments
             ?.expected_terminal_token ?? ""
@@ -1658,7 +1658,7 @@ test("reconciliation stalls a verified-dead accepted Turn once and keeps it clos
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -1835,7 +1835,7 @@ test("verified-dead reconciliation resumes after events-before-state crash witho
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -1959,7 +1959,7 @@ test("explicit Close ignores the obsolete verified-dead crash seam and commits S
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -2043,7 +2043,7 @@ test("exact durable Codex completion wins over verified process death", async ()
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -2132,7 +2132,7 @@ test("partial Codex rollout stalls with unverifiable completion evidence", async
       status: "bound",
       generation: 1
     });
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -2649,7 +2649,7 @@ test("a target native thread already bound in Store remains a blocked handoff", 
     const sourceTurn = fixture.persistBlockingTurn(source);
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
 
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.handoff_decision, undefined);
@@ -2703,7 +2703,7 @@ test("ambiguous source claims block automatic handoff before terminal input", as
     });
     const sourceTurn = fixture.persistBlockingTurn(sourceA);
     const before = JSON.stringify(listManagedSessions(fixture.storeDir));
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     assert.equal(listed.handoff_state, "external_handoff_blocked");
     assertTerminalUserExplicitSendAction(listed);
     assert.equal(listed.handoff_decision, undefined);
@@ -2745,14 +2745,14 @@ test("a competing native owner cannot veto physical user Send", async () => {
       status: "bound",
       generation: 1
     });
-    const listedBeforeOwner = await fixture.listTerminal();
+    const listedBeforeOwner = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listedBeforeOwner.available_actions?.send?.arguments
         ?.expected_terminal_token ?? ""
     );
     assert.ok(expectedTerminalToken);
     fixture.addActiveOwnerForCurrentThread();
-    const relisted = await fixture.listTerminal();
+    const relisted = await fixture.listTerminal({ approvalScan: true });
     assert.equal(
       assertTerminalUserExplicitSendAction(relisted).arguments
         .expected_terminal_token,
@@ -2850,7 +2850,7 @@ test("Codex pre-text managed identity drift falls back to the same physical pane
       generation: 1
     });
 
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -2899,7 +2899,7 @@ test("Codex drift from B to C after task text never presses Enter and stays unce
       generation: 1
     });
 
-    const listed = await fixture.listTerminal();
+    const listed = await fixture.listTerminal({ approvalScan: true });
     const expectedTerminalToken = String(
       listed.available_actions?.send?.arguments?.expected_terminal_token ?? ""
     );
@@ -3093,7 +3093,7 @@ interface HandoffFixture {
   terminalId: string;
   terminalControl: TerminalControlRef;
   persistSession(options: PersistSessionOptions): ManagedSessionState;
-  listTerminal(): Promise<Record<string, any>>;
+  listTerminal(options?: { approvalScan?: boolean }): Promise<Record<string, any>>;
   listMonitoring(): Promise<Record<string, any>>;
   reconcileMonitors(options?: {
     terminalMonitorsOnly?: boolean;
@@ -3691,9 +3691,9 @@ function createHandoffFixture({
           : {})
       }, { expectedRevision: null });
     },
-    async listTerminal() {
+    async listTerminal(options: { approvalScan?: boolean } = {}) {
       const result = await runInProcessCli(
-        ["list", ...storeArgs],
+        ["list", ...(options.approvalScan ? ["--approval-scan"] : []), ...storeArgs],
         dependencies(baseEnv)
       );
       assert.equal(result.status, 0, result.stderr || result.stdout);

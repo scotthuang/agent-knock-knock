@@ -148,7 +148,7 @@ for (const claudeVersion of [
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     };
 
-    const listed = await runAgentCliInProcess(["list", ...commonArgs], environment);
+    const listed = await runAgentCliInProcess(["list", "--approval-scan", ...commonArgs], environment);
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
     const row = JSON.parse(listed.stdout).terminals.find(
       (entry: Record<string, unknown>) => entry.id === terminalId
@@ -221,7 +221,7 @@ for (const claudeVersion of [
     );
     fs.writeFileSync(screenPath, initialScreen);
     const unverified = await runAgentCliInProcess(
-      ["list", ...unverifiedArgs],
+      ["list", "--approval-scan", ...unverifiedArgs],
       environment
     );
     assert.equal(unverified.status, 0, unverified.stderr || unverified.stdout);

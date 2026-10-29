@@ -2516,12 +2516,14 @@ test("Claude List rechecks one shared fresh reader snapshot before leaving exact
     { name: "missing process incarnation", scans: [[], rows.map(row => ({ ...row, startedAt: undefined }))],
       result: "unavailable", recheck: "unresolved" },
     { name: "reader fails twice", scans: [new Error("reader unavailable"), new Error("reader timed out")],
+      result: "unavailable", recheck: "failed" },
+    { name: "reader rejects conflicting scope", scans: [new Error("reader scope conflict"), new Error("reader scope conflict")],
       result: "unavailable", recheck: "failed" }
   ];
   for (const scenario of scenarios) {
     let reads = 0, roleReads = 0;
     const f = await createCodexRolloutListFixture(path.join(root, scenario.name), "pending", true,
-      {}, "human-only", false, false, "❯ ", { agent: "claude", agentVersion: "2.1.296",
+      {}, "human-only", false, false, "❯ ", { agent: "claude", agentVersion: "2.1.296", processConfidence: "medium",
         claudeReader: () => {
           const snapshot = scenario.scans[reads++];
           assert.ok(snapshot, `${scenario.name}: no unbounded additional reader calls`);
@@ -2540,6 +2542,9 @@ test("Claude List rechecks one shared fresh reader snapshot before leaving exact
     for (const terminal of f.scan.terminalControlled) {
       const observed = terminal.native_agent_identity_observation as Record<string, unknown>;
       assert.equal(observed.status, scenario.result, scenario.name);
+      assert.equal(terminal.confidence, scenario.result === "resolved" ? "high" : "medium", scenario.name);
+      assert.equal(terminal.reason, scenario.result === "resolved"
+        ? "interactive Claude CLI matched a verified exact-PID reader snapshot" : "fixture", scenario.name);
       assert.deepEqual(observed.recheck, scenario.recheck
         ? { attempted: true, status: scenario.recheck } : undefined, scenario.name);
       assert.equal(observed.window_role, scenario.role, scenario.name);
@@ -2791,6 +2796,7 @@ async function createCodexRolloutListFixture(
     statusScreen?: () => string | undefined;
     statusError?: () => Error | undefined;
     providerActivity?: "idle" | "working";
+    processConfidence?: "low" | "medium" | "high";
   } = {}
 ) {
   const agent = fixtureOptions.agent ?? "codex";
@@ -2985,7 +2991,7 @@ async function createCodexRolloutListFixture(
     elapsed: "00:30",
     agent,
     kind: agent === "claude" ? "claude_cli" : "codex_cli",
-    confidence: "high" as const,
+    confidence: fixtureOptions.processConfidence ?? "high" as const,
     reason: "fixture",
     terminalControl
   };
