@@ -343,7 +343,7 @@ test(`in-process CLI closes Codex ${version} List to one-shot model control with
     "--codex-home", codexHome
   ];
 
-  const listed = await runInProcessCli(["list", ...storeArgs], dependencies);
+  const listed = await runInProcessCli(["list", "--approval-scan", ...storeArgs], dependencies);
   assert.equal(listed.status, 0, listed.stderr || listed.stdout);
   const listOutput = JSON.parse(listed.stdout) as {
     terminals: Array<Record<string, any>>;

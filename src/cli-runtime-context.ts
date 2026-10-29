@@ -80,6 +80,7 @@ interface CliExecutionContext {
   commandDependencies: Readonly<object>;
   exitCode: number;
   stdout: string[];
+  discovery: Map<string, Map<unknown, unknown>>;
 }
 
 const cliExecutionStorage = new AsyncLocalStorage<CliExecutionContext>();
@@ -93,13 +94,15 @@ export function runCliCommandExecution<Options extends CliDependencyOptions>(
   commandName: string | undefined,
   options: Options,
   dependencies: CliCommandDependencies<Options>,
-  command: () => Promise<void>
+  command: () => Promise<void>,
+  scope: { inheritDiscovery?: boolean } = {}
 ): Promise<CliCommandExecutionResult> {
   const context: CliExecutionContext = {
     executionDependencies: dependencies,
     commandDependencies: dependencies,
     exitCode: 0,
-    stdout: []
+    stdout: [],
+    discovery: scope.inheritDiscovery ? cliContext()?.discovery ?? new Map() : new Map()
   };
   return cliExecutionStorage.run(context, async () => {
     cliRuntimeLog("info", "cli_start", {
@@ -130,6 +133,31 @@ export function runCliCommandExecution<Options extends CliDependencyOptions>(
 
 export function cliDependencies<Options extends CliDependencyOptions = CliDependencyOptions>(): Readonly<CliCommandDependencies<Options>> {
   return cliContext()?.commandDependencies ?? {};
+}
+
+/** Read-only discovery snapshots belong to one command, never to a mutation's identity fence. */
+export function cliExecutionMemo<T>(namespace: string, key: unknown, load: () => T): T {
+  const context = cliContext();
+  if (!context) return load();
+  let entries = context.discovery.get(namespace);
+  if (!entries) context.discovery.set(namespace, entries = new Map());
+  if (entries.has(key)) return entries.get(key) as T;
+  const value = load();
+  entries.set(key, value);
+  return value;
+}
+
+/** Concurrent discovery callers share work; failed probes remain retryable. */
+export function cliExecutionMemoAsync<T>(namespace: string, key: unknown, load: () => Promise<T>): Promise<T> {
+  const context = cliContext();
+  return cliExecutionMemo(namespace, key, () => {
+    const pending = Promise.resolve().then(load).catch(error => {
+      const entries = context?.discovery.get(namespace);
+      if (entries?.get(key) === pending) entries.delete(key);
+      throw error;
+    });
+    return pending;
+  });
 }
 
 export function writeCliStdout(text: string): void {

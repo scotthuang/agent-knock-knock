@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type {
@@ -61,6 +61,8 @@ export interface TerminalControlProvider {
   readonly providerCapabilities: readonly TerminalProviderCapability[];
   diagnostics(): Promise<Record<string, unknown>>;
   listTerminals(): Promise<TerminalEndpointRef[]>;
+  /** Display-only metadata from this discovery; never input or approval authority. */
+  discoveryActivity?(terminal: TerminalEndpointRef, agent: string): "idle" | "working" | undefined;
   endpoint(terminalControl: TerminalControlRef): TerminalEndpointRef;
   toControlRef(
     terminal: TerminalEndpointRef,
@@ -241,6 +243,10 @@ class RegistryTerminalControlProvider implements TerminalControlProvider {
     const terminal = provider.endpoint(terminalControl);
     assertEndpointKind(terminal, provider.kind);
     return terminal;
+  }
+
+  discoveryActivity(terminal: TerminalEndpointRef, agent: string): "idle" | "working" | undefined {
+    return this.providerForEndpoint(terminal).discoveryActivity?.(terminal, agent);
   }
 
   toControlRef(
@@ -446,18 +452,19 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     "process_inspection",
     "stable_resource_resolution"
   ];
-  private readonly runCommand: (command: string, args: string[]) => CommandResult;
+  private readonly runCommand: (command: string, args: string[]) => CommandResult | Promise<CommandResult>;
   private readonly socketPaths: string[];
   private readonly commands: string[];
 
   constructor(options: {
-    runCommand?: (command: string, args: string[]) => CommandResult;
+    runCommand?: (command: string, args: string[]) => CommandResult | Promise<CommandResult>;
     socketPaths?: string[];
     commands?: string[];
   } = {}) {
     this.runCommand = options.runCommand ?? runCommand;
     this.socketPaths = options.socketPaths ?? defaultTmuxSocketPaths();
-    this.commands = uniqueStrings(options.commands ?? defaultTmuxCommands());
+    this.commands = uniqueStrings(options.commands ?? (options.runCommand
+      ? defaultTmuxCommands() : existingTmuxCommands()));
   }
 
   async listPanes(): Promise<TerminalPane[]> {
@@ -542,41 +549,44 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     const diagnosticAttempts: TmuxTerminalControlDiagnostics["attempts"] = [];
     const seenTargets = new Set<string>();
     const attempts: (string | undefined)[] = [undefined, ...this.socketPaths];
-    for (const command of this.commands) {
-      for (const socketPath of attempts) {
-        const result = this.runCommand(command, tmuxArgs(socketPath, [
+    const observations = await Promise.all(this.commands.flatMap(command =>
+      attempts.map(async socketPath => ({ command, socketPath,
+        result: await this.runCommand(command, tmuxArgs(socketPath, [
           "list-panes",
           "-a",
           "-F",
           "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{socket_path}\t#{pane_id}"
-        ]));
-        const parsedPanes = result.status === 0 ? parseTmuxListPanes(result.stdout, socketPath) : [];
-        diagnosticAttempts.push({
-          command,
-          socketPath,
-          status: result.status,
-          stdoutBytes: (result.stdout ?? "").length,
-          stdoutPreview: cleanDiagnosticText(result.stdout),
-          stderr: cleanDiagnosticText(result.stderr),
-          error: cleanDiagnosticText(result.error?.message),
-          paneCount: parsedPanes.length
-        });
-        if (result.status !== 0) {
+        ]))
+      }))));
+    // Preserve candidate priority and diagnostics even when independent probes
+    // finish out of order. This inventory is never reused by resolve().
+    for (const { command, socketPath, result } of observations) {
+      const parsedPanes = result.status === 0 ? parseTmuxListPanes(result.stdout, socketPath) : [];
+      diagnosticAttempts.push({
+        command,
+        socketPath,
+        status: result.status,
+        stdoutBytes: (result.stdout ?? "").length,
+        stdoutPreview: cleanDiagnosticText(result.stdout),
+        stderr: cleanDiagnosticText(result.stderr),
+        error: cleanDiagnosticText(result.error?.message),
+        paneCount: parsedPanes.length
+      });
+      if (result.status !== 0) {
+        continue;
+      }
+      for (const pane of parsedPanes) {
+        // A default-server query and its discovered socket path can describe
+        // the same pane. Prefer tmux's server-scoped stable pane identity; the
+        // complete legacy route+PID tuple is the safe fallback for old tmux.
+        const key = pane.serverSocketPath && pane.paneId
+          ? `${pane.serverSocketPath}\t${pane.paneId}`
+          : `${pane.target}\t${pane.panePid}`;
+        if (seenTargets.has(key)) {
           continue;
         }
-        for (const pane of parsedPanes) {
-          // A default-server query and its discovered socket path can describe
-          // the same pane. Prefer tmux's server-scoped stable pane identity; the
-          // complete legacy route+PID tuple is the safe fallback for old tmux.
-          const key = pane.serverSocketPath && pane.paneId
-            ? `${pane.serverSocketPath}\t${pane.paneId}`
-            : `${pane.target}\t${pane.panePid}`;
-          if (seenTargets.has(key)) {
-            continue;
-          }
-          seenTargets.add(key);
-          panes.push(pane);
-        }
+        seenTargets.add(key);
+        panes.push(pane);
       }
     }
     return {
@@ -610,7 +620,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     const scrollbackLines = Math.max(0, Math.floor(options.scrollbackLines ?? 200));
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      const result = this.runCommand(command, tmuxArgs(socketPath, [
+      const result = await this.runCommand(command, tmuxArgs(socketPath, [
         "capture-pane",
         ...(options.preserveEscapes ? ["-e"] : []),
         "-t",
@@ -645,7 +655,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     const { socketPath } = tmuxIoRoute(resolved);
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      const result = this.runCommand(command, tmuxArgs(socketPath, [
+      const result = await this.runCommand(command, tmuxArgs(socketPath, [
         "display-message",
         "-p",
         "-t",
@@ -703,7 +713,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     const { target, socketPath } = tmuxIoRoute(terminal);
     let lastResult: CommandResult | undefined;
     for (const command of this.commands) {
-      const result = this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, ...keys]));
+      const result = await this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, ...keys]));
       if (result.status === 0) {
         return;
       }
@@ -751,7 +761,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
     for (const command of this.commands) {
       if (options.bracketedPaste || /[\r\n]/u.test(text)) {
         const bufferName = `akk-${process.pid}-${randomUUID()}`;
-        const setBuffer = this.runCommand(command, tmuxArgs(socketPath, [
+        const setBuffer = await this.runCommand(command, tmuxArgs(socketPath, [
           "set-buffer",
           "-b",
           bufferName,
@@ -762,7 +772,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
           lastResult = setBuffer;
           continue;
         }
-        const pasteBuffer = this.runCommand(command, tmuxArgs(socketPath, [
+        const pasteBuffer = await this.runCommand(command, tmuxArgs(socketPath, [
           "paste-buffer",
           "-p",
           "-d",
@@ -774,7 +784,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         if (pasteBuffer.status === 0) {
           return;
         }
-        this.runCommand(command, tmuxArgs(socketPath, [
+        await this.runCommand(command, tmuxArgs(socketPath, [
           "delete-buffer",
           "-b",
           bufferName
@@ -791,7 +801,7 @@ export class TmuxTerminalControlProvider implements TerminalControlProvider {
         lastResult = pasteBuffer;
         continue;
       }
-      const result = this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, "-l", text]));
+      const result = await this.runCommand(command, tmuxArgs(socketPath, ["send-keys", "-t", target, "-l", text]));
       if (result.status === 0) {
         return;
       }
@@ -1527,17 +1537,16 @@ export function terminalPaneContainsProcess(
   return false;
 }
 
-function runCommand(command: string, args: string[]): CommandResult {
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10
+function runCommand(command: string, args: string[]): Promise<CommandResult> {
+  return new Promise(resolve => {
+    execFile(command, args, {
+      encoding: "utf8", maxBuffer: 1024 * 1024 * 10
+    }, (error, stdout, stderr) => resolve({
+      status: error ? typeof error.code === "number" ? error.code : null : 0,
+      stdout, stderr,
+      ...(error && typeof error.code !== "number" ? { error } : {})
+    }));
   });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error
-  };
 }
 
 function tmuxArgs(socketPath: string | undefined, args: string[]): string[] {
@@ -1553,7 +1562,7 @@ function defaultTmuxSocketPaths(): string[] {
     ...discoverTmuxSocketPaths("/private/tmp"),
     ...discoverTmuxSocketPaths("/tmp")
   ].filter((value): value is string => Boolean(value));
-  return [...new Set(paths)];
+  return uniqueExistingPaths(paths);
 }
 
 export function discoverTmuxSocketPaths(root: string): string[] {
@@ -1574,6 +1583,32 @@ function defaultTmuxCommands(): string[] {
     "/usr/local/bin/tmux",
     "/usr/bin/tmux"
   ];
+}
+
+/** PATH aliases and /private/tmp aliases identify one binary/server, not extra probes. */
+function uniqueExistingPaths(paths: readonly string[]): string[] {
+  const identities = new Set<string>();
+  return paths.filter(candidate => {
+    try {
+      const identity = fs.realpathSync(candidate);
+      if (identities.has(identity)) return false;
+      identities.add(identity);
+      return true;
+    } catch { return false; }
+  });
+}
+
+function existingTmuxCommands(): string[] {
+  const pathCommand = (process.env.PATH ?? "").split(path.delimiter)
+    .map(directory => path.resolve(directory, "tmux"))
+    .find(candidate => {
+      try { fs.accessSync(candidate, fs.constants.X_OK); return true; }
+      catch { return false; }
+    });
+  const commands = uniqueExistingPaths([
+    ...(pathCommand ? [pathCommand] : []), ...defaultTmuxCommands().slice(1)
+  ]);
+  return commands.length > 0 ? commands : ["tmux"];
 }
 
 function uniqueStrings(values: string[]): string[] {

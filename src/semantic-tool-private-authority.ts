@@ -56,10 +56,11 @@ interface DisplayedModelOptionsOfferPayload
 
 async function privateList(
   api,
-  options: { reconcile?: boolean } = {}
+  options: { reconcile?: boolean; terminalId?: string } = {}
 ): Promise<Record<string, unknown>> {
   const config = isRecord(api.pluginConfig) ? api.pluginConfig : {};
-  const args = ["list"];
+  const args = ["list", "--approval-scan"];
+  pushOptional(args, "--terminal", options.terminalId);
   if (options.reconcile !== false) args.push("--reconcile");
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(
@@ -338,7 +339,7 @@ export async function privateActionArguments(
     matches: (argumentsValue: Record<string, unknown>) => boolean;
   }
 ): Promise<Record<string, unknown>> {
-  const result = await privateList(api, { reconcile: input.reconcile });
+  const result = await privateList(api, { reconcile: input.reconcile, terminalId: input.terminalId });
   const terminals = input.terminalId
     ? terminalRows(result).filter((terminal) =>
         stringValue(terminal.id) === input.terminalId

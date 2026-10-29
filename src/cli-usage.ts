@@ -7,7 +7,7 @@ export function usage() {
   agent-knock-knock --help
   agent-knock-knock --version
   agent-knock-knock delegate --request <text> [--agent ${agentList}] [--workspace <path>] [--store-dir <dir>]
-  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--reconcile] [--no-approval-scan] [--terminal-debug] [--desktop-view sidebar|history] [--desktop-search <text>] [--desktop-project <id|path>] [--desktop-limit <1-100>] [--desktop-cursor <cursor>]
+  agent-knock-knock list [--store-dir <dir>] [--agent ${agentList}] [--status <status>] [--reconcile] [--approval-scan | --no-approval-scan] [--terminal-debug] [--desktop-view sidebar|history] [--desktop-search <text>] [--desktop-project <id|path>] [--desktop-limit <1-100>] [--desktop-cursor <cursor>]
   agent-knock-knock watches [--hours <1-48>] [--limit <1-100>] [--cursor <cursor>] [--agent codex|claude] [--status <status>] [--conversation <exact-id>] [--store-dir <dir>]
   agent-knock-knock watch-terminal --terminal <exact-terminal-id> --openclaw-session <session> [--hard-timeout-minutes <minutes>] [--store-dir <dir>] [--openclaw-bin <path>]
   agent-knock-knock watch-status --watch <terminal-watch-id> [--store-dir <dir>]

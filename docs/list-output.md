@@ -109,15 +109,24 @@ controls or an unrecognized input box stop automatic input and explain what
 AKK could not verify. These explanations take precedence over native-identity
 uncertainty. Codex readiness and managed Send rules are unchanged.
 
+List defaults to discovery plus current native activity. It defers per-window
+approval, Composer and transcript-boundary checks to Status and execution
+preflight; rows identify this with `detail_scan: "deferred"`. A native Send
+offer with `send_preflight_required: true` is callable but is not a cached grant
+of terminal-input authority. Send still checks the selected live process,
+ownership, transcript boundary and input surface before writing text. Missing
+terminal controls in this mode mean unscanned, not unsupported.
+
 Missing screen evidence is separate from an unsafe or unrecognized Composer.
-When List uses `noApprovalScan: true` (CLI `--no-approval-scan`), it skips pane
-reading, including input-readiness checks. Claude physical readiness reports
-`screen_not_scanned`; call List again with `noApprovalScan: false` or omit the
-option to obtain current action offers. If pane capture fails or returns no
+Explicit `noApprovalScan: false` (CLI `--approval-scan`) requests the detailed
+scan and current terminal action offers. `noApprovalScan: true` (CLI
+`--no-approval-scan`) continues to disable pane reading, including input-readiness
+checks. Claude physical readiness reports `screen_not_scanned`; use Status or
+the explicit detailed scan to obtain current action offers. If pane capture fails or returns no
 screen excerpt, readiness reports `screen_unavailable`; inspect Status for the
 capture error, restore terminal-provider access, then refresh List. Neither
-case proves that a draft, menu or malformed Composer exists. Send remains
-unavailable until the existing input checks pass. These reasons and their
+case proves that a draft, menu or malformed Composer exists. Physical-terminal
+Send offers remain omitted until the existing input checks pass. These reasons and their
 guidance are additive diagnostics, with no action-contract, projection or
 Store-protocol version change.
 

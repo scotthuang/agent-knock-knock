@@ -127,6 +127,8 @@ interface HerdrPaneInfo {
   tabId: string;
   cwd?: string;
   foregroundCwd?: string;
+  discoveredAgent?: "codex" | "claude";
+  discoveredActivity?: "idle" | "working";
 }
 
 interface HerdrForegroundProcess {
@@ -149,6 +151,7 @@ interface HerdrEndpointObservation {
   socketIdentity: HerdrSocketIdentity;
   server: HerdrServerObservation;
   capabilities: HerdrOperationCapabilities;
+  activity?: { agent: "codex" | "claude"; state: "idle" | "working" };
 }
 
 interface HerdrSessionInspection {
@@ -405,6 +408,11 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
       );
     }
     return terminalEndpointFromControlRef(terminalControl);
+  }
+
+  discoveryActivity(terminal: TerminalEndpointRef, agent: string): "idle" | "working" | undefined {
+    const activity = this.endpointObservations.get(terminal)?.activity;
+    return activity?.agent === agent ? activity.state : undefined;
   }
 
   toControlRef(
@@ -1178,7 +1186,10 @@ export class HerdrTerminalControlProvider implements TerminalControlProvider {
         herdrControlCapabilities(operations[index]!)
       );
       this.endpointObservations.set(endpoint, {
-        socketIdentity, server: profile, capabilities: operations[index]!
+        socketIdentity, server: profile, capabilities: operations[index]!,
+        ...(verifiedPane.discoveredAgent && verifiedPane.discoveredActivity ? {
+          activity: { agent: verifiedPane.discoveredAgent, state: verifiedPane.discoveredActivity }
+        } : {})
       });
       endpoints.push(endpoint);
       this.logDiagnostic("herdr_pane_endpoint_observation", {
@@ -1516,7 +1527,12 @@ function parsePaneInfo(value: unknown, label: string): HerdrPaneInfo {
     workspaceId,
     tabId,
     cwd: nonEmptyString(value.cwd),
-    foregroundCwd: nonEmptyString(value.foreground_cwd)
+    foregroundCwd: nonEmptyString(value.foreground_cwd),
+    // Only the closed idle/working display vocabulary is shared. "blocked"
+    // is not proof of an approval and must not synthesize approval authority.
+    discoveredAgent: value.agent === "codex" || value.agent === "claude" ? value.agent : undefined,
+    discoveredActivity: value.agent_status === "idle" || value.agent_status === "working"
+      ? value.agent_status : undefined
   };
 }
 

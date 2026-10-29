@@ -5,7 +5,11 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, u
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { observeClaudeTerminalRegistry, observeClaudeTerminalWindow, type ClaudeTerminalRegistryRow } from "../src/claude-terminal-registry-observation.js";
+import { readClaudeTerminalAgent } from "../src/claude-terminal-agent-observation.js";
+import { createTerminalRuntimeCliAdapter } from "../src/terminal-runtime-cli-adapter.js";
+import { createClaudeNativeConversationId } from "../src/claude-native-identity.js";
+import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { observeClaudeTerminalRegistry, observeClaudeTerminalRegistryRow, observeClaudeTerminalWindow, type ClaudeTerminalRegistryRow } from "../src/claude-terminal-registry-observation.js";
 
 async function fixture() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "akk-terminal-registry-")));
@@ -129,5 +133,68 @@ test("background-view evidence belongs only to this owned live foreground proces
     assert.deepEqual(read(), { state: "invalid", reason: "unsafe_metadata" });
     assert.deepEqual(observeClaudeTerminalWindow({ configDir: f.configDir, pid: f.pid }),
       { state: "invalid", reason: "invalid_identity" });
+  } finally { await f.cleanup(); }
+});
+
+test("targeted registry metadata is fresh and preserves legacy absence separately from invalid identity", async () => {
+  const f = await fixture(), read = () => observeClaudeTerminalRegistryRow({ configDir: f.configDir, pid: f.pid });
+  try {
+    let observed = read(); assert.equal(observed.state, "verified");
+    if (observed.state !== "verified") assert.fail("fixture metadata should be verified");
+    assert.equal(observed.row.status, "idle"); assert.equal(observed.row.version, "2.1.295");
+    f.registry.status = "waiting"; f.registry.waitingFor = "dialog open"; f.save();
+    observed = read(); assert.equal(observed.state, "verified");
+    if (observed.state !== "verified") assert.fail("fresh waiting metadata should be verified");
+    assert.equal(observed.row.status, "waiting"); assert.equal(observed.row.waitingFor, "dialog open");
+    const original = { ...f.registry };
+    for (const change of [{ parkedJobId: "background-job" }, { kind: "bg" }, { kind: null },
+      { pidDomain: "other-platform" }, { pid: f.pid + 1 }, { startedAt: undefined }, { sessionId: "invalid" },
+      { procStart: "Mon Jan 1 00:00:00 2001" }]) {
+      for (const key of Object.keys(f.registry)) delete f.registry[key];
+      Object.assign(f.registry, original, change); f.save();
+      assert.equal(read().state, "invalid", JSON.stringify(change));
+    }
+    Object.assign(f.registry, original); delete f.registry.kind; f.save();
+    assert.deepEqual(read(), { state: "legacy" });
+    chmodSync(f.file, 0o666);
+    assert.deepEqual(read(), { state: "invalid", reason: "unsafe_metadata" }, "legacy kind cannot bypass owner checks");
+    chmodSync(f.file, 0o600); unlinkSync(f.file);
+    assert.deepEqual(read(), { state: "absent" });
+  } finally { await f.cleanup(); }
+});
+
+test("exact Claude runtime rows and versions avoid enumeration but never fall back from an invalid present registry", async () => {
+  const f = await fixture();
+  const nativeId = createClaudeNativeConversationId({ configDir: f.configDir, pid: f.pid,
+    sessionId: f.row.sessionId!, processStart: f.processStart });
+  try {
+    for (const conversation of [nativeId, `terminal:v2:tmux:claude:akk:0.0:${f.pid}`]) {
+      const runtime = createTerminalRuntimeCliAdapter({ options: {
+        conversation, claudeHome: f.configDir, claudeBin: path.join(f.root, "nonexistent-reader")
+      }, dependencies: {}, completion: { detectExactBound: () => ({ handled: false }), loadCodexContexts: async () => [] },
+      identity: { resolveCurrent: async () => undefined, assertRuntime() {} }, workspace: { assertConfigured() {} } });
+      assert.equal(runtime.loadClaudeAgentRows({ required: true })[0].sessionId, f.row.sessionId);
+      assert.equal(runtime.agentVersionForRunningProcess("claude", f.pid), "2.1.295");
+      f.registry.status = "busy"; f.save();
+      assert.equal(runtime.loadClaudeAgentRows({ required: true })[0].status, "busy");
+      f.registry.procStart = "Mon Jan 1 00:00:00 2001"; f.save();
+      assert.throws(() => runtime.loadClaudeAgentRows({ required: true }), /claude_registry_process_changed/u);
+      assert.equal(runtime.agentVersionForRunningProcess("claude", f.pid), undefined);
+      f.registry.procStart = f.processStart; f.registry.status = "idle"; f.save();
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("targeted terminal metadata rejects duplicate configured roots without choosing one authority", async () => {
+  const f = await fixture(), other = path.join(f.root, "other-config");
+  try {
+    mkdirSync(path.join(other, "sessions"), { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(other, "sessions", `${f.pid}.json`), JSON.stringify(f.registry), { mode: 0o600 });
+    await runCliCommandExecution("status", {}, { runtimeLog() {}, env: { ...process.env,
+      AKK_NATIVE_CLAUDE_CONFIG_DIRS: JSON.stringify([f.configDir, other]) } }, async () => {
+      const observed = readClaudeTerminalAgent({}, f.pid);
+      assert.deepEqual(observed?.errors, ["claude_registry_conflicting_roots"]);
+      assert.deepEqual(observed?.rejectedPids, [f.pid]); assert.deepEqual(observed?.rows, []);
+    });
   } finally { await f.cleanup(); }
 });

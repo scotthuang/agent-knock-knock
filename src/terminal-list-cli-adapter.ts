@@ -49,6 +49,7 @@ import {
 import {
   type TerminalAgentAdapterRegistry,
   type ActiveTerminalProcess,
+  parseTerminalConversationId,
   type TerminalControlRef,
   type TerminalRuntimeIdentity
 } from "./terminal-agent-adapter.js";
@@ -112,7 +113,7 @@ import {
   type TerminalListInventoryScan
 } from "./terminal-list-inventory.js";
 import {
-  claudePhysicalSendReadinessFromListState,
+  claudePhysicalSendReadinessFromListState, observeTerminalListState,
   claudeListAdmissionProjection,
   collectTerminalListTerminalFacts,
   type EffectiveTerminalListState,
@@ -157,6 +158,11 @@ export interface TerminalListCliOptions {
   logDir?: string;
   managedOnly?: boolean;
   noApprovalScan?: boolean;
+  approvalScan?: boolean;
+  /** Standalone inventory only; execution and exact Status never set this. */
+  listDiscoveryOnly?: boolean;
+  /** Reuse this read-only List's reader enumeration, including detailed scans. */
+  listDiscoverySnapshot?: boolean;
   reconcile?: boolean;
   scrollbackLines?: number | string;
   session?: string;
@@ -245,6 +251,7 @@ export interface TerminalListDiscoveryPorts {
   localCodexList?(options: TerminalListCliOptions): Promise<Record<string, unknown>>;
   loadClaudeAgentRows?(options: TerminalListCliOptions,
     observation: { required: true }): readonly ClaudeIdentityRow[];
+  loadClaudeAgentRowsForDiscovery?(options: TerminalListCliOptions): Promise<readonly ClaudeIdentityRow[]>;
   observeClaudeWindowRole?(options: TerminalListCliOptions, pid: number, cwd?: string): "background_view" | undefined;
   createRuntimeTerminalAgentRegistry(
     options: TerminalListCliOptions
@@ -422,6 +429,7 @@ export interface TerminalListCliFacade {
     agentFilter?: ExecutorKind;
     statusFilter?: string;
     terminalId?: string;
+    processPid?: number;
     /** Combine current managed action offers with the same raw physical observation. */
     includeManagedActions?: boolean;
   }): Promise<TerminalListScan>;
@@ -608,9 +616,16 @@ async function runList(options: TerminalListCliOptions) {
       reason: "standalone list is read-only unless --reconcile is supplied"
     };
   }
+  options = { ...options, listDiscoverySnapshot: true,
+    listDiscoveryOnly: options.noApprovalScan === true || options.noApprovalScan === undefined && options.approvalScan !== true };
   const agentFilter = options.agent ? resolveExecutor({ kind: options.agent }).kind : undefined;
+  const terminalId = stringValue(options.terminal);
+  if (terminalId && !parseTerminalConversationId(terminalId)) throw new Error("List --terminal requires one complete terminal ID");
   const statusFilter = options.status;
-  const terminalScan = await buildTerminalListGroup({ options, agentFilter, statusFilter });
+  const [terminalScan, localList] = await Promise.all([
+    buildTerminalListGroup({ options, agentFilter: agentFilter ?? (terminalId ? parseTerminalConversationId(terminalId)?.agent : undefined), statusFilter, terminalId }),
+    terminalId ? undefined : terminalListRuntime().localCodexList?.(options)
+  ]);
   const projected = projectTerminalListScan({
     options,
     storeDir,
@@ -620,7 +635,7 @@ async function runList(options: TerminalListCliOptions) {
     statusFilter
   });
   printJson(withoutListHistory(unifiedConversationList({
-    ...await terminalListRuntime().localCodexList?.(options),
+    ...localList,
     store_dir: storeDir,
     store,
     reconciliation,
@@ -925,12 +940,14 @@ async function buildTerminalListGroup({
   agentFilter,
   statusFilter: _statusFilter,
   terminalId,
+  processPid,
   includeManagedActions
 }: {
   options: TerminalListCliOptions;
   agentFilter?: ExecutorKind;
   statusFilter?: string;
   terminalId?: string;
+  processPid?: number;
   includeManagedActions?: boolean;
 }): Promise<TerminalListScan> {
   const runtime = terminalListRuntime();
@@ -938,6 +955,7 @@ async function buildTerminalListGroup({
     options,
     agentFilter,
     terminalId,
+    processPid,
     ports: {
       createRegistry: (currentOptions) =>
         runtime.createRuntimeTerminalAgentRegistry(currentOptions),
@@ -948,7 +966,8 @@ async function buildTerminalListGroup({
       createProcessSource: (currentOptions) =>
         runtime.createTerminalProcessSource(currentOptions),
       projectTerminal: withClaudeListIdentityRecheck({
-        loadRows: runtime.loadClaudeAgentRows,
+        loadRows: (options.listDiscoverySnapshot || options.listDiscoveryOnly) && runtime.loadClaudeAgentRowsForDiscovery
+          ? current => runtime.loadClaudeAgentRowsForDiscovery!(current) : runtime.loadClaudeAgentRows,
         observeWindowRole: runtime.observeClaudeWindowRole,
         observe: runtime.observeCurrentNativeAgentSessionIdentity,
         project: ({ session, activeSessions, options: currentOptions, bridge }, snapshot) =>
@@ -1099,6 +1118,7 @@ async function terminalControlledListEntry(
     reason: session.reason,
     terminal_control: terminalControl,
     approval_state: projectedTerminalState.approval_state,
+    ...(options.listDiscoveryOnly ? { detail_scan: "deferred" } : {}),
     activity_state: projectedTerminalState.activity_state,
     activity_reason: projectedTerminalState.activity_reason,
     screen_state: projectedTerminalState.screen_state,
@@ -1116,7 +1136,7 @@ async function terminalControlledListEntry(
     // service strips this field after gating every automated-input action that
     // can follow a human native-thread switch.
     _automated_input_composer_ready: automatedInputComposerReady,
-    ...claudeListAdmissionProjection(session.agent, facts, commands.send),
+    ...claudeListAdmissionProjection(session.agent, facts, commands.send, options.listDiscoveryOnly === true),
     _user_explicit_composer_ready: userExplicitComposerReady,
     ...(physicalReadiness ? { physical_send_readiness: physicalReadiness } : {}),
     _native_identity_authority: {
@@ -1294,21 +1314,20 @@ function terminalListFactPortsFor(input: {
 }): TerminalListTerminalFactPorts {
   const { session, terminalControl, terminalId, options, bridge } = input;
   return {
-    observeStatus: (agentVersion) => listStateForTerminal(
-      session.agent,
-      terminalControl,
-      options,
-      bridge,
-      {
-        pid: session.pid, agentVersion,
-        cwd: session.cwd,
-        // Status and approval share this exact full terminal identity.
-        ...(session.agent === "codex"
-          ? { conversationId: terminalId }
-          : { sessionId: session.sessionId }),
-        terminalTarget: terminalControl.target
-      }
-    ),
+    observeStatus: (agentVersion) => observeTerminalListState({
+      noApprovalScan: options.noApprovalScan, listDiscoveryOnly: options.listDiscoveryOnly,
+      discoveredActivity: input.nativeIdentitySnapshot?.activityState ??
+        bridge.terminalProvider?.discoveryActivity?.(bridge.terminalProvider.endpoint(terminalControl), session.agent),
+      observe: () => bridge.status(session.agent, terminalControl, {
+        scrollbackLines: Number(options.scrollbackLines ?? 120),
+        runtime: {
+          pid: session.pid, agentVersion, cwd: session.cwd,
+          // Status and approval share this exact full terminal identity.
+          ...(session.agent === "codex" ? { conversationId: terminalId } : { sessionId: session.sessionId }),
+          terminalTarget: terminalControl.target
+        }
+      })
+    }),
     observeNativeIdentity: (observedTerminalId) =>
       observeTerminalNativeListIdentity(
         session,
@@ -1321,6 +1340,7 @@ function terminalListFactPortsFor(input: {
     projectEffectiveState: ({ terminalState, native }) =>
       effectiveTerminalListState({
         session,
+        discoveryOnly: options.listDiscoveryOnly,
         terminalState,
         nativeIdentityObservation: native.nativeIdentityObservation,
         nativeAgentIdentity: native.nativeAgentIdentity,
@@ -1330,8 +1350,9 @@ function terminalListFactPortsFor(input: {
         nativeProcessUuid: native.nativeProcessUuid,
         nativeProcessBirth: native.nativeProcessBirth
       }),
-    observeAgentVersion: () =>
-      terminalListRuntime().agentVersionForRunningProcess(
+    observeAgentVersion: () => options.listDiscoveryOnly
+      ? input.nativeIdentitySnapshot?.agentVersion
+      : terminalListRuntime().agentVersionForRunningProcess(
         session.agent,
         session.pid,
         options
@@ -1358,7 +1379,7 @@ function terminalListFactPortsFor(input: {
         terminalHasInteraction,
         terminalHasBlockingTurn,
         hasOrphanedDispatch
-      }) => observeModelControlResidualForList({
+      }) => options.listDiscoveryOnly ? Promise.resolve(undefined) : observeModelControlResidualForList({
       bridge,
       session,
       terminalControl,
@@ -1509,6 +1530,7 @@ async function observeModelControlResidualForList(input: {
 
 function effectiveTerminalListState(input: {
   session: ActiveTerminalProcess;
+  discoveryOnly?: boolean;
   terminalState: TerminalListState;
   nativeIdentityObservation: TerminalNativeIdentityObservation;
   nativeAgentIdentity?: TerminalNativeIdentity;
@@ -1531,7 +1553,7 @@ function effectiveTerminalListState(input: {
     observation: nativeIdentityAuthorityObservation,
     codexOpenRootRolloutInventory
   });
-  if (session.agent !== "codex") {
+  if (session.agent !== "codex" || input.discoveryOnly) {
     return terminalListStateWithStatusAxes({
       terminalState,
       legacyState: terminalState,
@@ -1910,7 +1932,7 @@ async function observeAutomatedInputComposerReady({
 }: {
   session: ActiveTerminalProcess;
   terminalControl: TerminalControlRef;
-  terminalState: Awaited<ReturnType<typeof listStateForTerminal>>;
+  terminalState: TerminalListState;
   options: TerminalListCliOptions; agentVersion?: string;
 }): Promise<TerminalListComposerFacts> {
   let ready = terminalListRuntime().nativeInspectionComposerEmpty(
@@ -1926,6 +1948,7 @@ async function observeAutomatedInputComposerReady({
     ? physicalReadiness.ready && userExplicitPromptSafe : userExplicitPromptSafe;
   const inputOwnerBlocked = terminalUserExplicitInputOwnerBlocked(terminalState.screen_excerpt);
   if (
+    options.listDiscoveryOnly || options.noApprovalScan ||
     session.agent !== "codex" ||
     terminalState.approval_state.blocked === true ||
     !terminalControl.capabilities.includes("send_keys") ||
@@ -2289,62 +2312,6 @@ async function resolveTerminalScopedCodexApproval({
   }
 }
 
-async function listStateForTerminal(
-  agent: ExecutorKind,
-  terminalControl: TerminalControlRef,
-  options,
-  bridge: TerminalAgentBridge = terminalListRuntime().createTerminalAgentBridge(options),
-  runtime?: TerminalRuntimeIdentity
-): Promise<TerminalListState> {
-  if (options.noApprovalScan) {
-    return {
-      approval_state: {
-        scanned: false,
-        blocked: false,
-        approvable: false,
-        reason: "approval scan disabled"
-      },
-      activity_state: "unknown",
-      activity_reason: "terminal screen scan disabled",
-      screen_state: "unknown",
-      screen_reason: "terminal screen scan disabled"
-    };
-  }
-  try {
-    const status = await bridge.status(agent, terminalControl, {
-      scrollbackLines: Number(options.scrollbackLines ?? 120),
-      runtime
-    });
-    return {
-      approval_state: {
-        ...status.approval_state,
-        screen_excerpt: status.approval_state.blocked ? status.screen.excerpt?.slice(-1000) : undefined
-      },
-      activity_state: status.activity_state,
-      activity_reason: status.activity_reason,
-      screen_state: status.screen_state ?? status.activity_state,
-      screen_reason: status.screen_reason ?? status.activity_reason,
-      capability_limitation: status.capability_limitation,
-      _terminal_status_snapshot: status,
-      // Internal projection evidence; terminalControlledListEntry selects all
-      // public fields explicitly and never exposes the pane excerpt itself.
-      screen_excerpt: status.screen.excerpt
-    };
-  } catch (error) {
-    return {
-      approval_state: {
-        scanned: false,
-        blocked: false,
-        approvable: false,
-        error: error instanceof Error ? error.message : String(error)
-      },
-      activity_state: "unknown",
-      activity_reason: error instanceof Error ? error.message : String(error),
-      screen_state: "unknown",
-      screen_reason: error instanceof Error ? error.message : String(error)
-    };
-  }
-}
 
 async function resolveConversationSelectorOption(commandName, options): Promise<void> {
   const sendOperation = commandName === "send";

@@ -124,7 +124,9 @@ function facadeDependencies(
 
   return {
     reconciliation: {
-      reconcileMonitors: async () => {
+      reconcileMonitors: async options => {
+        assert.equal(options.listDiscoveryOnly, undefined, "monitor reconciliation cannot inherit deferred List checks");
+        assert.equal(options.listDiscoverySnapshot, undefined, "monitor reconciliation must use fresh execution evidence");
         events.push(`${marker}:monitor:before`);
         await monitorGate.promise;
         events.push(`${marker}:monitor:after`);
@@ -140,7 +142,9 @@ function facadeDependencies(
           items: []
         };
       },
-      reconcileIdleConversations: () => {
+      reconcileIdleConversations: (_storeDir, options) => {
+        assert.equal(options.listDiscoveryOnly, undefined, "idle reconciliation cannot inherit deferred List checks");
+        assert.equal(options.listDiscoverySnapshot, undefined, "idle reconciliation must use fresh execution evidence");
         events.push(`${marker}:idle`);
         return {
           checked: 0,
@@ -191,9 +195,13 @@ test("terminal list facade isolates concurrent async runtimes and exports only i
   diagnosticsA.release();
   monitorB.release();
 
-  const facadeA = terminalListCliAdapter.createTerminalListCliFacade(
-    facadeDependencies("A", events, monitorA, diagnosticsA)
-  );
+  const dependenciesA = facadeDependencies("A", events, monitorA, diagnosticsA);
+  const discoveryModes: unknown[] = [];
+  dependenciesA.discovery.localCodexList = async options => {
+    discoveryModes.push([options.listDiscoveryOnly, options.listDiscoverySnapshot]);
+    return {};
+  };
+  const facadeA = terminalListCliAdapter.createTerminalListCliFacade(dependenciesA);
   const facadeB = terminalListCliAdapter.createTerminalListCliFacade(
     facadeDependencies("B", events, monitorB, diagnosticsB)
   );
@@ -232,6 +240,7 @@ test("terminal list facade isolates concurrent async runtimes and exports only i
   await selectorPromise;
   monitorA.release();
   await listPromise;
+  assert.deepEqual(discoveryModes, [[true, true]], "read-only discovery reuse starts only after reconciliation");
 
   assert.deepEqual(events, [
     "A:monitor:before",
@@ -2098,7 +2107,7 @@ test("unified Send consumes List's fresh explicit authority without promoting un
     "Historical status output\nNew activity\nBack to bottom", {
       agentVersion: "0.162.1", nativeIdentityObservation: "verified_absent", screenActivityState: "unknown"
     });
-  const options = { storeDir: fixture.storeDir };
+  const options = { storeDir: fixture.storeDir, approvalScan: true };
   const listResult = await runCliCommandExecution("list", options, { runtimeLog: () => undefined }, () => fixture.facade.runList(options));
   assert.equal(listResult.exitCode, 0);
   const listed = JSON.parse(listResult.stdout).terminals.find((row: Record<string, unknown>) => row.id === fixture.terminalId);
@@ -2562,6 +2571,90 @@ test("Claude managed Send eligibility uses the observed empty composer and remai
   }
 });
 
+test("standalone List defers detailed observations while explicit scans and exact Status retain them", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-deferred-observations-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const screen = ["─".repeat(80), "❯", "─".repeat(80),
+    "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"].join("\n");
+  let registryState = "idle";
+  let discoveryReads = 0, freshReads = 0;
+  const readerRows = () => [{
+    pid: 4242, kind: "interactive", sessionId: "019f0000-0000-7000-8000-000000000777",
+    startedAt: Date.parse("2026-10-11T01:00:00Z"), cwd: path.join(root, "completed"),
+    configDir: fs.realpathSync(path.join(root, ".claude")), status: registryState
+  }];
+  const fixture = await createCodexRolloutListFixture(root, "completed", false, {}, "human-only", true,
+    false, screen, { agent: "claude", agentVersion: "2.1.295",
+      claudeReader: () => { freshReads++; return readerRows(); },
+      claudeDiscoveryReader: async () => { discoveryReads++; return readerRows(); } });
+  const before = { ...fixture.observationCounts };
+  const options = { storeDir: fixture.storeDir };
+  const listed = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+    () => fixture.facade.runList(options));
+  const result = JSON.parse(listed.stdout);
+  assert.equal(result.terminal_scan.approval_scan, "deferred");
+  assert.equal(fixture.observationCounts.status, before.status);
+  assert.equal(fixture.observationCounts.styledComposer, before.styledComposer);
+  assert.equal(fixture.observationCounts.agentVersion, before.agentVersion);
+  assert.equal(fixture.observationCounts.modelControlResidual, before.modelControlResidual);
+  const terminal = result.terminals.find((row: Record<string, unknown>) => row.id === fixture.terminalId);
+  assert.equal(terminal.detail_scan, "deferred");
+  assert.equal(terminal.activity_state, "idle", "native registry supplies activity without reading the pane");
+  assert.equal(terminal.approval_state.scanned, false);
+  assert.equal(terminal.managed_send_readiness, undefined, "deferred transcript proof is not reported as a failed proof");
+  assert.equal(terminal.available_actions.send, undefined, "inventory does not forge private physical-input authority");
+  const disabled = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+    () => fixture.facade.runList({ ...options, noApprovalScan: true }));
+  assert.equal(JSON.parse(disabled.stdout).terminal_scan.approval_scan, "disabled");
+  assert.equal(fixture.observationCounts.status, before.status);
+  assert.equal(fixture.observationCounts.agentVersion, before.agentVersion, "explicit no-scan does not restore per-session detail probes");
+  for (const [state, expected] of [["busy", "working"], ["working", "working"], ["waiting", "awaiting_approval"]]) {
+    registryState = state;
+    const activity = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+      () => fixture.facade.runList(options));
+    assert.equal(JSON.parse(activity.stdout).terminals[0].activity_state, expected);
+    assert.equal(fixture.observationCounts.status, before.status, "registry state does not trigger screen scanning");
+  }
+  registryState = "idle";
+  for (const scanOptions of [{ approvalScan: true }, { noApprovalScan: false }]) {
+    const previousDiscovery = discoveryReads, previousFresh = freshReads;
+    const output = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+      () => fixture.facade.runList({ ...options, ...scanOptions }));
+    assert.equal(JSON.parse(output.stdout).terminal_scan.approval_scan, "enabled");
+    assert.equal(discoveryReads, previousDiscovery + 1, "detailed List still uses its shared asynchronous discovery snapshot");
+    assert.equal(freshReads, previousFresh, "read-only enrichment does not invoke another full enumeration");
+  }
+  assert.equal(fixture.observationCounts.status, before.status + 2);
+  const previousFresh = freshReads;
+  await fixture.facade.observeExactTerminal({ options, terminalId: fixture.terminalId });
+  assert.ok(freshReads > previousFresh, "exact execution preflight does not reuse a List discovery snapshot");
+  assert.equal(fixture.observationCounts.status, before.status + 3, "exact Status/Send preflight still captures fresh input evidence");
+  const absent = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+    () => fixture.facade.runList({ ...options, approvalScan: true,
+      terminal: fixture.terminalId.replace(/:4242$/u, ":9999") }));
+  assert.deepEqual(JSON.parse(absent.stdout).terminals, [], "private exact List cannot select a different process");
+  assert.equal(fixture.observationCounts.status, before.status + 3, "missing target does not inspect an unrelated pane");
+});
+
+test("default Codex List uses provider activity metadata without treating it as input authority", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-list-provider-activity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const activity of ["working", "idle"] as const) {
+    const fixture = await createCodexRolloutListFixture(path.join(root, activity), "completed", false,
+      {}, "human-only", true, false, "› ", { providerActivity: activity });
+    const before = { ...fixture.observationCounts }, options = { storeDir: fixture.storeDir };
+    const output = await runCliCommandExecution("list", options, { runtimeLog: () => undefined },
+      () => fixture.facade.runList(options));
+    const row = JSON.parse(output.stdout).terminals[0];
+    assert.equal(row.activity_state, activity);
+    assert.equal(row.approval_state.scanned, false);
+    assert.equal(row.screen_state, "unknown");
+    assert.equal(row.available_actions.send, undefined);
+    assert.equal(fixture.observationCounts.status, before.status);
+    assert.equal(fixture.observationCounts.styledComposer, before.styledComposer);
+  }
+});
+
 test("Claude List distinguishes missing screen observations from unsafe Composer frames and recovers on refresh", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-list-screen-evidence-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -2693,9 +2786,11 @@ async function createCodexRolloutListFixture(
     nativeIdentityObservation?: "resolved" | "verified_absent";
     modelControlResidual?: "popup" | "bare" | "surface" | "unsafe";
     claudeReader?: () => readonly ClaudeIdentityRow[];
+    claudeDiscoveryReader?: () => Promise<readonly ClaudeIdentityRow[]>;
     claudeWindowRole?: () => "background_view" | undefined;
     statusScreen?: () => string | undefined;
     statusError?: () => Error | undefined;
+    providerActivity?: "idle" | "working";
   } = {}
 ) {
   const agent = fixtureOptions.agent ?? "codex";
@@ -2947,6 +3042,7 @@ async function createCodexRolloutListFixture(
     }
   }]);
   const provider = {
+    discoveryActivity: () => fixtureOptions.providerActivity,
     diagnostics: async () => ({}),
     endpoint: (value: unknown) =>
       terminalEndpointFromControlRef(value as TerminalControlRef),
@@ -2957,6 +3053,7 @@ async function createCodexRolloutListFixture(
     }
   };
   const bridge = {
+    terminalProvider: provider,
     registry,
     listProcesses: async () => includeBrokenSibling
       ? [brokenSession, session]
@@ -3037,6 +3134,7 @@ async function createCodexRolloutListFixture(
     ...base,
     discovery: {
       ...(claudeReader ? { loadClaudeAgentRows: claudeReader } : {}),
+      ...(fixtureOptions.claudeDiscoveryReader ? { loadClaudeAgentRowsForDiscovery: fixtureOptions.claudeDiscoveryReader } : {}),
       ...(fixtureOptions.claudeWindowRole ? { observeClaudeWindowRole: fixtureOptions.claudeWindowRole } : {}),
       createRuntimeTerminalAgentRegistry: () => registry,
       createTerminalControlProvider: () => provider,

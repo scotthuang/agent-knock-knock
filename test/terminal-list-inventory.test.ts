@@ -123,6 +123,32 @@ test("terminal inventory scans and projects each selected physical pane once", a
   assert.deepEqual(fixture.log, []);
 });
 
+test("independent terminal projections overlap without changing discovery order", { timeout: 1000 }, async () => {
+  const fixture = inventoryFixture();
+  const sessions = [active, { ...active, pid: 102, terminalControl: { ...terminalControl, panePid: 102, target: "demo:0.1", pane: 1 } }];
+  fixture.ports.createBridge = () => ({ listProcesses: async () => sessions,
+    terminalConversationId: (session: ActiveTerminalProcess) => `terminal-${session.pid}` }) as unknown as TerminalAgentBridge;
+  let release: (() => void) | undefined;
+  const secondStarted = new Promise<void>(resolve => { release = resolve; });
+  fixture.ports.projectTerminal = async ({ session }) => {
+    if (session.pid === active.pid) await secondStarted;
+    else release!();
+    return { id: `terminal-${session.pid}` };
+  };
+  const result = await collectTerminalListInventory({ options: {}, ports: fixture.ports });
+  assert.deepEqual(result.terminalControlled.map(row => row.id), ["terminal-101", "terminal-102"]);
+});
+
+test("native target PID limits detail projection without substituting another live pane", async () => {
+  const fixture = inventoryFixture();
+  const missing = await collectTerminalListInventory({ options: {}, processPid: 999, ports: fixture.ports });
+  assert.deepEqual(missing.terminalControlled, []);
+  assert.equal(fixture.counts().projected, 0);
+  const selected = await collectTerminalListInventory({ options: {}, processPid: 101, ports: fixture.ports });
+  assert.equal(selected.terminalControlled.length, 1);
+  assert.equal(fixture.counts().projected, 1);
+});
+
 test("exact inventory keeps all diagnostic stages on the same discovery snapshot", async () => {
   const fixture = inventoryFixture();
   const terminalId = "terminal:v2:tmux:codex:demo:0.0:101";

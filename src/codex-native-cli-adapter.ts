@@ -11,7 +11,7 @@ import { isCodexNativeWatchId, type PersistedNativeInteraction, type CodexNative
 import { codexNativeTaskNeedsReconciliation, nativeDigest, nativeErrorCode } from "./codex-native-task-service.js";
 import { createCodexNativeRuntime, type CodexNativeRuntimeOptions } from "./codex-native-runtime.js";
 import { launchCodexNativeMonitor, runCodexNativeMonitor } from "./codex-native-monitor.js";
-import { codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
+import { codexNativeDiscoveryProjection, codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
 import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { CodexNativeError, type CodexNativeIdentity, type CodexNativePermissionPreset, type NativeInteractionResponse } from "./codex-native-types.js";
 
@@ -48,10 +48,17 @@ export async function codexNativeListForCli(options: Options): Promise<Record<st
   const runtime = runtimeFor(options);
   try {
     const discovery = await runtime.catalog.discover();
-    const rows: ReturnType<typeof codexNativeSessionProjection>[] = [];
+    const rows: Array<ReturnType<typeof codexNativeSessionProjection> | ReturnType<typeof codexNativeDiscoveryProjection>> = [];
     const errors = [...discovery.errors];
     for (const entry of discovery.sessions) {
       try {
+        if (options.approvalScan !== true && options.noApprovalScan !== false) {
+          if (!options.status || options.status === entry.thread.status.type ||
+              options.status === "working" && entry.thread.status.type === "active") {
+            rows.push(codexNativeDiscoveryProjection(entry, entry.thread, entry.backendVersion));
+          }
+          continue;
+        }
         const client = await runtime.clientFor(entry);
         const snapshot = await client.readSnapshot(entry.threadId);
         if (options.status && options.status !== snapshot.thread.status.type &&

@@ -170,6 +170,7 @@ function runtime(
     createControlProvider: unexpected,
     createProcessSource: unexpected,
     loadClaudeAgentRows: () => [],
+    loadClaudeAgentRowsForDiscovery: unexpected,
     observeClaudeWindowRole: unexpected,
     createAgentRegistry: () => ({
       require: () => {

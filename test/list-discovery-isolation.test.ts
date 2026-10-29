@@ -25,7 +25,8 @@ test("Codex conversation discovery never enumerates retained Watches and keeps n
   const home = isolatedHome(t), identity = { codexHome: path.join(home, ".codex"), threadId: "fixture-thread" };
   let watchReads = 0, closes = 0, nativeReads = 0;
   const runtime = {
-    catalog: { async discover() { return { sessions: [{ ...identity, backendVersion: "0.162.1" }], errors: [] }; } },
+    catalog: { async discover() { return { sessions: [{ ...identity, backendVersion: "0.162.1",
+      thread: { id: identity.threadId, cwd: home, status: { type: "idle" } } }], errors: [] }; } },
     async clientFor() { return { async readSnapshot() {
       nativeReads++;
       return { threadId: identity.threadId, thread: { id: identity.threadId, cwd: home, status: { type: "idle" } },
@@ -39,7 +40,7 @@ test("Codex conversation discovery never enumerates retained Watches and keeps n
     cwd: home, env: { HOME: home }, runtimeLog() {},
     createCodexNativeRuntime: (() => runtime) as unknown as CliCommandDependencies["createCodexNativeRuntime"]
   }, async () => { result = await codexNativeListForCli({}); });
-  assert.equal(watchReads, 0); assert.equal(nativeReads, 1); assert.equal(closes, 1);
+  assert.equal(watchReads, 0); assert.equal(nativeReads, 0, "List uses discovery summaries without hydrating task details"); assert.equal(closes, 1);
   assert.equal(result.codex_cli_scan.status, "ok");
   assert.equal(result.codex_cli_watches, undefined);
   assert.equal(result.codex_cli_scan.watch_error, undefined);

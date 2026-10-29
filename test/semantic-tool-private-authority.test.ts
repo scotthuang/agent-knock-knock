@@ -114,8 +114,12 @@ test("private Send refusal explains only the selected Claude physical readiness 
   const diagnostic = "PRIVATE_READINESS_DETAIL";
   let rows: Record<string, unknown>[] = [];
   const commands: string[] = [];
+  const commandArgs: string[][] = [];
   const spawn = t.mock.method(childProcess, "spawnSync", (...callArgs: unknown[]) => {
-    if (callArgs[0] === process.execPath) commands.push(String((callArgs[1] as string[] | undefined)?.[1]));
+    if (callArgs[0] === process.execPath) {
+      commands.push(String((callArgs[1] as string[] | undefined)?.[1]));
+      commandArgs.push((callArgs[1] as string[]).slice(1));
+    }
     return { status: 0, stdout: JSON.stringify({ terminals: rows }), stderr: "" } as
       unknown as ReturnType<typeof childProcess.spawnSync>;
   });
@@ -157,6 +161,12 @@ test("private Send refusal explains only the selected Claude physical readiness 
     !error.message.includes("\n") && error.message.endsWith((diagnostic + " " + "x".repeat(1_100)).slice(0, 1_000)));
   assert.ok(commands.length > 0);
   assert.ok(commands.every(command => command === "list"), "a blocked action performs only private discovery, never Send");
+  assert.ok(commandArgs.every(args => args.includes("--approval-scan")), "private action resolution always requests fresh full input checks");
+  assert.equal(commandArgs[0][commandArgs[0].indexOf("--terminal") + 1], terminalId,
+    "an exact target does not scan every other window before invocation");
+  assert.ok(commandArgs.some(args => !args.includes("--terminal")), "untargeted selectors retain complete inventory");
+  rows = [];
+  await assert.rejects(call(), /not uniquely present/u, "missing exact target cannot substitute another pane");
 });
 
 test("runtime composes private authority without a reverse dependency", () => {

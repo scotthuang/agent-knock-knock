@@ -51,10 +51,35 @@ function fixture(t: { after(fn: () => void): void }) {
   };
 }
 
+test("native List discovery reads no task snapshots and Status retains fresh detailed reads", async t => {
+  const f = fixture(t);
+  f.failReads();
+  for (const state of ["idle", "active"] as const) {
+    f.snapshot.thread.status = state === "idle" ? { type: state } : { type: state, activeFlags: ["waitingOnApproval"] };
+    const result = await f.run("codex-cli-list");
+    assert.equal(result.codex_cli_scan.complete, true, "broken task-history reads do not erase discovered loaded sessions");
+    const row = result.codex_cli_sessions[0];
+    assert.equal(row.activity_state, state);
+    assert.equal(row.capabilities.send, state === "idle");
+    assert.equal(row.capabilities.watch, state === "active");
+    assert.equal(row.detail_scan, "deferred");
+    assert.equal(row.interaction_requests_scanned, false);
+    assert.equal(row.pending_interaction_count, null);
+    assert.equal(row.native_turn_id, undefined, "a thread activity flag is not an exact task anchor");
+    assert.equal(row.latest_turn, undefined);
+    assert.equal(row.interaction_state, undefined);
+  }
+  const detailed = await f.run("codex-cli-list", { approvalScan: true });
+  assert.equal(detailed.codex_cli_scan.complete, false, "explicit detailed scan still reads current history");
+  await assert.rejects(f.run("status", { conversation: f.id }), /private backend failure/u,
+    "Status routing still demands a fresh snapshot rather than reusing List's summary");
+  assert.equal(f.sends, 0);
+});
+
 test("unmaterialized native Status offers first Send without claiming subscription or permission authority", async t => {
   const f = fixture(t); f.snapshot.historyMaterialized = false;
   f.client.subscribe = async () => { throw new CodexNativeError("unmaterialized_subscription", "No materialized history"); };
-  const listed = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+  const listed = (await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0];
   assert.equal(listed.unstarted_thread, true);
   assert.equal(listed.connection_state, "loaded_backend_verified"); assert.equal(listed.activity_state, "idle");
   assert.equal(listed.capabilities.send, true); assert.equal(listed.available_actions.send.input.conversation_id, f.id);
@@ -86,7 +111,7 @@ test("unmaterialized native Status offers first Send without claiming subscripti
   const sent = await f.run("send", { conversation: f.id, message: "First task", messageId: "first", openclawSession: "controller" });
   assert.equal(sent.delivered, true); assert.equal(sent.submission_state, "verified");
   assert.equal(sent.native_thread_id, f.target.threadId); assert.equal(sent.native_turn_id, "native-turn-1");
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, undefined);
   assert.equal(f.sends, 1); assert.equal(f.launches, 1); assert.equal(f.callbacks, 0);
   f.finish();
   const completed = await f.run("watch-status", { watch: sent.watch_id });
@@ -97,18 +122,18 @@ test("only a verified unnamed pre-first-task snapshot is marked as an unstarted 
   const f = fixture(t);
   for (const history of [undefined, true, false]) {
     f.snapshot.historyMaterialized = history;
-    assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, history === false ? true : undefined);
+    assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, history === false ? true : undefined);
   }
   for (const field of ["name", "preview"] as const) {
     f.snapshot.thread[field] = "A deliberately named new session";
-    const row = (await f.run("codex-cli-list")).codex_cli_sessions[0];
+    const row = (await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0];
     assert.equal(row.unstarted_thread, undefined);
     assert.equal(row.capabilities.send, true);
     delete f.snapshot.thread[field];
   }
   f.snapshot.pendingInteractions.push({ id: "pending", kind: "blocking_question", threadId: f.target.threadId,
     turnId: "pending-turn", itemId: "pending-item", method: "item/tool/requestUserInput", questions: [] });
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].unstarted_thread, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].unstarted_thread, undefined);
   assert.equal(f.sends, 0); assert.equal(f.launches, 0); assert.equal(f.callbacks, 0);
 });
 
@@ -126,7 +151,7 @@ test("native Status public progress stays on the exact selected turn and disting
   assert.equal(running.progress.latest_item_at, "2023-11-14T22:13:20.000Z");
   assert.ok(Number.isFinite(Date.parse(running.progress.read_at)));
   assert.deepEqual((toolResult(running).details as typeof running).progress, running.progress);
-  assert.equal((await f.run("codex-cli-list")).codex_cli_sessions[0].progress, undefined);
+  assert.equal((await f.run("codex-cli-list", { approvalScan: true })).codex_cli_sessions[0].progress, undefined);
   f.finish();
   await f.run("watch-status", { watch: sent.watch_id });
   f.snapshot.latestTurnId = "successor";
@@ -166,7 +191,7 @@ test("native CLI Send persists one exact task, Status recovers completion withou
 
 test("native CLI list/status and permission tools preserve native identities without terminal selection", async t => {
   const f = fixture(t);
-  const list = await f.run("codex-cli-list"); assert.equal(list.codex_cli_sessions[0].conversation_id, f.id);
+  const list = await f.run("codex-cli-list", { approvalScan: true }); assert.equal(list.codex_cli_sessions[0].conversation_id, f.id);
   const status = await f.run("status", { conversation: f.id }); assert.equal(status.connection_state, "loaded_backend_verified");
   const options = await f.run("native-inspect", { conversation: f.id, action: "permissions" });
   assert.equal(options.current, "read-only"); assert.deepEqual(options.choices.map(c => c.id), ["read-only", "default", "full-access"]);

@@ -75,13 +75,67 @@ export interface TerminalListComposerFacts {
   readonly inputOwnerBlocked: boolean;
 }
 
+/** A deferred/disabled scan carries no input authority; failed capture is distinct from unsafe input. */
+export async function observeTerminalListState(input: {
+  noApprovalScan?: boolean;
+  listDiscoveryOnly?: boolean;
+  discoveredActivity?: "idle" | "working" | "waiting";
+  observe(): Promise<TerminalBridgeStatus>;
+}): Promise<TerminalListState> {
+  if (input.noApprovalScan || input.listDiscoveryOnly) {
+    return {
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false,
+        reason: input.noApprovalScan ? "approval scan disabled" : "approval details deferred to Status or execution preflight"
+      },
+      activity_state: input.discoveredActivity === "waiting" ? "awaiting_approval" : input.discoveredActivity ?? "unknown",
+      activity_reason: input.discoveredActivity ? "current discovery activity" : "terminal screen scan disabled",
+      screen_state: "unknown",
+      screen_reason: "terminal screen scan disabled"
+    };
+  }
+  try {
+    const status = await input.observe();
+    return {
+      approval_state: {
+        ...status.approval_state,
+        screen_excerpt: status.approval_state.blocked ? status.screen.excerpt?.slice(-1000) : undefined
+      },
+      activity_state: status.activity_state,
+      activity_reason: status.activity_reason,
+      screen_state: status.screen_state ?? status.activity_state,
+      screen_reason: status.screen_reason ?? status.activity_reason,
+      capability_limitation: status.capability_limitation,
+      _terminal_status_snapshot: status,
+      // Internal projection evidence; terminalControlledListEntry selects all
+      // public fields explicitly and never exposes the pane excerpt itself.
+      screen_excerpt: status.screen.excerpt
+    };
+  } catch (error) {
+    return {
+      approval_state: {
+        scanned: false,
+        blocked: false,
+        approvable: false,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      activity_state: "unknown",
+      activity_reason: error instanceof Error ? error.message : String(error),
+      screen_state: "unknown",
+      screen_reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 /** A skipped or failed capture says nothing about the contents of the Composer. */
 export function claudePhysicalSendReadinessFromListState(
-  state: TerminalListState, options: { noApprovalScan?: boolean }
+  state: TerminalListState, options: { noApprovalScan?: boolean; listDiscoveryOnly?: boolean }
 ): ReturnType<typeof claudeUserExplicitReadiness> {
-  if (options.noApprovalScan) return {
+  if (options.noApprovalScan || options.listDiscoveryOnly) return {
     ready: false, reason: "screen_not_scanned",
-    message: "AKK did not scan this window because noApprovalScan is enabled. Call List again with noApprovalScan:false (CLI: omit --no-approval-scan) to check input readiness."
+    message: "AKK has not scanned this window's input. Use Status, or List with noApprovalScan:false (CLI: --approval-scan), to check current input readiness."
   };
   if (typeof state.screen_excerpt !== "string") return {
     ready: false, reason: "screen_unavailable",
@@ -91,8 +145,9 @@ export function claudePhysicalSendReadinessFromListState(
 }
 
 /** Diagnostics do not carry the private transcript anchor or grant a physical fallback. */
-export function claudeListAdmissionProjection(agent: string, facts: TerminalListTerminalFacts, send: boolean) {
+export function claudeListAdmissionProjection(agent: string, facts: TerminalListTerminalFacts, send: boolean, deferred = false) {
   if (agent !== "claude") return {};
+  if (deferred) return { _claude_managed_send_eligible: false };
   const missing = { ready: false, reason: "claude_reader_unavailable",
     message: "AKK could not verify the current Claude process through its reader. Check Status and the configured Claude reader, then refresh List and retry." };
   return {

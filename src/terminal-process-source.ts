@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import process from "node:process";
 import type { TerminalProcessSnapshot } from "./terminal-agent-adapter.js";
 import { parseProcessElapsedSeconds } from "./terminal-process-facts.js";
@@ -11,6 +11,10 @@ export interface ProcessCommandResult {
   stderr: string;
   error?: Error;
 }
+
+export type ProcessCommandRunner = (
+  command: string, args: string[]
+) => ProcessCommandResult | Promise<ProcessCommandResult>;
 
 export type TerminalProcessInventoryDiagnosticLog = (
   event: string,
@@ -93,14 +97,14 @@ export class StaticTerminalProcessSource implements TerminalProcessSource {
 
 export class SystemTerminalProcessSource implements TerminalProcessSource {
   readonly completeInventoryAuthority = true as const;
-  private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
+  private readonly runCommand: ProcessCommandRunner;
   private readonly diagnosticLog?: TerminalProcessInventoryDiagnosticLog;
 
   constructor(options: {
-    runCommand?: (command: string, args: string[]) => ProcessCommandResult;
+    runCommand?: ProcessCommandRunner;
     diagnosticLog?: TerminalProcessInventoryDiagnosticLog;
   } = {}) {
-    this.runCommand = options.runCommand ?? runProcessCommand;
+    this.runCommand = options.runCommand ?? runProcessCommandAsync;
     this.diagnosticLog = options.diagnosticLog;
   }
 
@@ -108,7 +112,7 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
     isCandidate: (snapshot: TerminalProcessSnapshot) => boolean = () => true,
     options: { includeCwd?: boolean; includeAncestors?: boolean } = {}
   ): Promise<TerminalProcessSnapshot[]> {
-    const ps = this.runCommand("ps", ["-axo", "pid,ppid,etime,command"]);
+    const ps = await this.runCommand("ps", ["-axo", "pid,ppid,etime,command"]);
     if (ps.status !== 0) {
       throw new Error(ps.stderr || ps.error?.message || "ps failed");
     }
@@ -130,7 +134,7 @@ export class SystemTerminalProcessSource implements TerminalProcessSource {
       return selected;
     }
 
-    const lsof = this.runCommand("lsof", [
+    const lsof = await this.runCommand("lsof", [
       "-a",
       "-d",
       "cwd",
@@ -303,6 +307,21 @@ export function runProcessCommand(command: string, args: string[]): ProcessComma
     stderr: result.stderr,
     error: result.error
   };
+}
+
+/** Read-only probes may overlap; each invocation still observes the OS afresh. */
+export function runProcessCommandAsync(command: string, args: string[]): Promise<ProcessCommandResult> {
+  return new Promise(resolve => {
+    execFile(command, args, {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 10,
+      env: { ...process.env, LC_ALL: "C" }
+    }, (error, stdout, stderr) => {
+      const status = error ? typeof error.code === "number" ? error.code : null : 0;
+      resolve({ status, stdout, stderr,
+        ...(error && typeof error.code !== "number" ? { error } : {}) });
+    });
+  });
 }
 
 /**

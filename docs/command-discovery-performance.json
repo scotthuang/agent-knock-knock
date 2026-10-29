@@ -1,0 +1,700 @@
+{
+  "date": "2026-10-29",
+  "baseline_commit": "576f8c5",
+  "baseline_package": "0.16.6",
+  "branch": "perf/command-scoped-discovery",
+  "node": "24.19.0",
+  "platform": "macOS",
+  "measurement_scope": "fresh CLI process; repository dist rebuilt from source; default Store; same tclaude reader/config; no model tasks submitted",
+  "probe_scope": "ChildProcess.prototype.spawn plus synchronous child_process methods; inherited child preload suppressed to avoid double-counting wrapper internals",
+  "measurements": [
+    {
+      "command": "list",
+      "before_seconds": 36.145,
+      "after_seconds_median": 2.56,
+      "after_seconds_samples": [
+        2.646,
+        2.033,
+        2.56
+      ],
+      "before_subprocesses": 208,
+      "after_subprocesses": 37,
+      "before_groups": {
+        "tclaude": {
+          "count": 8,
+          "ms": 13209.3
+        },
+        "ps": {
+          "count": 60,
+          "ms": 874.0
+        },
+        "lsof": {
+          "count": 22,
+          "ms": 1044.0
+        },
+        "tmux": {
+          "count": 24,
+          "ms": 32.8
+        },
+        "herdr": {
+          "count": 87,
+          "ms": 606.9
+        },
+        "codex": {
+          "count": 2,
+          "ms": 15.9
+        },
+        "sqlite3": {
+          "count": 4,
+          "ms": 40.5
+        },
+        "python3": {
+          "count": 1,
+          "ms": 123.2
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 22,
+            "ms": 228.2
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 2165.7
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 33.0
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 311.8
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 45.4
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 17.2
+          },
+          "python3": {
+            "count": 1,
+            "ms": 165.7
+          }
+        },
+        {
+          "ps": {
+            "count": 22,
+            "ms": 159.9
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 1700.8
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 33.0
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 342.3
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 40.7
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 12.9
+          },
+          "python3": {
+            "count": 1,
+            "ms": 130.7
+          }
+        },
+        {
+          "ps": {
+            "count": 22,
+            "ms": 232.0
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 2185.1
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 38.5
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 374.1
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 41.9
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 13.4
+          },
+          "python3": {
+            "count": 1,
+            "ms": 138.3
+          }
+        }
+      ]
+    },
+    {
+      "command": "list --agent claude",
+      "before_seconds": 25.951,
+      "after_seconds_median": 1.941,
+      "after_seconds_samples": [
+        1.98,
+        1.841,
+        1.941
+      ],
+      "before_subprocesses": 100,
+      "after_subprocesses": 19,
+      "before_groups": {
+        "tclaude": {
+          "count": 8,
+          "ms": 15724.8
+        },
+        "ps": {
+          "count": 34,
+          "ms": 350.4
+        },
+        "lsof": {
+          "count": 6,
+          "ms": 279.5
+        },
+        "tmux": {
+          "count": 12,
+          "ms": 5.1
+        },
+        "herdr": {
+          "count": 39,
+          "ms": 292.5
+        },
+        "python3": {
+          "count": 1,
+          "ms": 117.6
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 12,
+            "ms": 92.5
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 1547.5
+          },
+          "lsof": {
+            "count": 1,
+            "ms": 52.3
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 61.9
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 29.5
+          },
+          "python3": {
+            "count": 1,
+            "ms": 152.0
+          }
+        },
+        {
+          "ps": {
+            "count": 12,
+            "ms": 55.9
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 1514.2
+          },
+          "lsof": {
+            "count": 1,
+            "ms": 48.7
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 40.8
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 14.1
+          },
+          "python3": {
+            "count": 1,
+            "ms": 125.6
+          }
+        },
+        {
+          "ps": {
+            "count": 12,
+            "ms": 65.0
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 1620.0
+          },
+          "lsof": {
+            "count": 1,
+            "ms": 47.9
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 43.4
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 12.6
+          },
+          "python3": {
+            "count": 1,
+            "ms": 121.2
+          }
+        }
+      ]
+    },
+    {
+      "command": "list --agent codex",
+      "before_seconds": 14.989,
+      "after_seconds_median": 1.214,
+      "after_seconds_samples": [
+        1.195,
+        1.218,
+        1.214
+      ],
+      "before_subprocesses": 114,
+      "after_subprocesses": 24,
+      "before_groups": {
+        "tclaude": {
+          "count": 1,
+          "ms": 1694.3
+        },
+        "ps": {
+          "count": 30,
+          "ms": 623.1
+        },
+        "lsof": {
+          "count": 17,
+          "ms": 859.1
+        },
+        "tmux": {
+          "count": 12,
+          "ms": 6.2
+        },
+        "herdr": {
+          "count": 48,
+          "ms": 337.9
+        },
+        "codex": {
+          "count": 2,
+          "ms": 18.7
+        },
+        "sqlite3": {
+          "count": 4,
+          "ms": 30.0
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 11,
+            "ms": 128.6
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 52.2
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 331.1
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 46.9
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 15.5
+          }
+        },
+        {
+          "ps": {
+            "count": 11,
+            "ms": 147.9
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 52.9
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 326.3
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 39.3
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 12.5
+          }
+        },
+        {
+          "ps": {
+            "count": 11,
+            "ms": 146.1
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 28.6
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 357.9
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 40.5
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 13.5
+          }
+        }
+      ]
+    },
+    {
+      "command": "ClaudeNativeClient.inspect (one known identity, fresh peer verification)",
+      "before_seconds": 2.457,
+      "after_seconds_median": 0.145,
+      "after_seconds_samples": [
+        0.15,
+        0.137,
+        0.145
+      ],
+      "before_subprocesses": 5,
+      "after_subprocesses": 2,
+      "before_groups": {
+        "tclaude": {
+          "count": 1,
+          "ms": 2314.4
+        },
+        "ps": {
+          "count": 3,
+          "ms": 5.6
+        },
+        "python3": {
+          "count": 1,
+          "ms": 95.0
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 1,
+            "ms": 3.0
+          },
+          "python3": {
+            "count": 1,
+            "ms": 103.1
+          }
+        },
+        {
+          "ps": {
+            "count": 1,
+            "ms": 3.1
+          },
+          "python3": {
+            "count": 1,
+            "ms": 91.9
+          }
+        },
+        {
+          "ps": {
+            "count": 1,
+            "ms": 2.7
+          },
+          "python3": {
+            "count": 1,
+            "ms": 94.2
+          }
+        }
+      ]
+    },
+    {
+      "command": "status --conversation <same Claude native identity>",
+      "before_seconds": 27.834,
+      "after_seconds_median": 3.478,
+      "after_seconds_samples": [
+        3.478
+      ],
+      "before_subprocesses": 112,
+      "after_subprocesses": 29,
+      "before_groups": {
+        "ps": {
+          "count": 43,
+          "ms": 429.6
+        },
+        "tclaude": {
+          "count": 10,
+          "ms": 17384.8
+        },
+        "python3": {
+          "count": 2,
+          "ms": 29655.9
+        },
+        "lsof": {
+          "count": 6,
+          "ms": 284.9
+        },
+        "tmux": {
+          "count": 12,
+          "ms": 5.3
+        },
+        "herdr": {
+          "count": 39,
+          "ms": 259.0
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 12,
+            "ms": 142.1
+          },
+          "python3": {
+            "count": 2,
+            "ms": 3433.2
+          },
+          "lsof": {
+            "count": 2,
+            "ms": 96.7
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 38.4
+          },
+          "herdr": {
+            "count": 12,
+            "ms": 91.9
+          }
+        }
+      ]
+    },
+    {
+      "command": "list --agent claude --no-approval-scan",
+      "before_seconds": 15.326,
+      "after_seconds_median": 2.215,
+      "after_seconds_samples": [
+        2.215
+      ],
+      "before_subprocesses": 56,
+      "after_subprocesses": 19,
+      "before_groups": {
+        "tclaude": {
+          "count": 8,
+          "ms": 13983.8
+        },
+        "ps": {
+          "count": 30,
+          "ms": 88.2
+        },
+        "lsof": {
+          "count": 2,
+          "ms": 95.0
+        },
+        "tmux": {
+          "count": 12,
+          "ms": 5.3
+        },
+        "herdr": {
+          "count": 3,
+          "ms": 13.1
+        },
+        "python3": {
+          "count": 1,
+          "ms": 131.8
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 12,
+            "ms": 90.4
+          },
+          "tclaude": {
+            "count": 1,
+            "ms": 1756.7
+          },
+          "lsof": {
+            "count": 1,
+            "ms": 48.2
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 44.5
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 16.5
+          },
+          "python3": {
+            "count": 1,
+            "ms": 141.6
+          }
+        }
+      ]
+    },
+    {
+      "command": "list --agent codex --no-approval-scan",
+      "before_seconds": 6.725,
+      "after_seconds_median": 1.202,
+      "after_seconds_samples": [
+        1.202
+      ],
+      "before_subprocesses": 67,
+      "after_subprocesses": 24,
+      "before_groups": {
+        "tclaude": {
+          "count": 1,
+          "ms": 2041.4
+        },
+        "ps": {
+          "count": 22,
+          "ms": 219.6
+        },
+        "lsof": {
+          "count": 11,
+          "ms": 506.3
+        },
+        "tmux": {
+          "count": 12,
+          "ms": 5.2
+        },
+        "herdr": {
+          "count": 15,
+          "ms": 78.3
+        },
+        "codex": {
+          "count": 2,
+          "ms": 16.1
+        },
+        "sqlite3": {
+          "count": 4,
+          "ms": 29.0
+        }
+      },
+      "after_groups_samples": [
+        {
+          "ps": {
+            "count": 11,
+            "ms": 143.4
+          },
+          "sqlite3": {
+            "count": 4,
+            "ms": 32.8
+          },
+          "lsof": {
+            "count": 5,
+            "ms": 327.2
+          },
+          "tmux": {
+            "count": 1,
+            "ms": 40.4
+          },
+          "herdr": {
+            "count": 3,
+            "ms": 12.4
+          }
+        }
+      ]
+    }
+  ],
+  "detailed_claude_list": {
+    "label": "verified-claude-full-scan",
+    "args": [
+      "list",
+      "--agent",
+      "claude",
+      "--approval-scan"
+    ],
+    "seconds": 4.434,
+    "exit": 0,
+    "spawns": 69,
+    "groups": {
+      "ps": {
+        "count": 22,
+        "ms": 450.1
+      },
+      "tclaude": {
+        "count": 1,
+        "ms": 1433.9
+      },
+      "lsof": {
+        "count": 5,
+        "ms": 727.0
+      },
+      "tmux": {
+        "count": 1,
+        "ms": 41.0
+      },
+      "herdr": {
+        "count": 39,
+        "ms": 216.6
+      },
+      "python3": {
+        "count": 1,
+        "ms": 115.4
+      }
+    }
+  },
+  "codex_serial_herdr_ipc_floor": {
+    "probes": 33,
+    "total_ms": 3398.4427069999992,
+    "by_method": {
+      "ping": {
+        "count": 3,
+        "ms": 310.733875
+      },
+      "session.snapshot": {
+        "count": 6,
+        "ms": 525.9827489999997
+      },
+      "pane.process_info": {
+        "count": 6,
+        "ms": 630.275832
+      },
+      "pane.read": {
+        "count": 18,
+        "ms": 1931.4502509999995
+      }
+    }
+  },
+  "checks": {
+    "test_fast": {
+      "pass": 3376,
+      "total": 3376
+    },
+    "typecheck": "pass",
+    "validate_architecture": "pass",
+    "validate_refactor_evidence": "pass",
+    "skill_check": "pass (run by build)",
+    "git_diff_check": "pass"
+  },
+  "not_run": [
+    "integration/full/release suites (AGENTS.md policy)",
+    "live send or approval against business sessions"
+  ],
+  "raw_artifacts_directory": "/tmp/akk-command-perf-20261029"
+}

@@ -654,6 +654,13 @@ test("Claude List follows managed Send eligibility while preserving canonical se
     { name: "busy", physical: changed({ activity_state: "working" }), route: "managed_terminal", send: false },
     { name: "approval blocked", physical: changed({ approval_state: { scanned: true, blocked: true } }), route: "managed_terminal", send: false },
     { name: "unscanned", physical: changed({ approval_state: { scanned: false, blocked: false } }), route: "managed_terminal", send: false },
+    { name: "deferred inventory", physical: changed({ detail_scan: "deferred", available_actions: {},
+      _claude_managed_send_eligible: false, approval_state: { scanned: false, blocked: false } }), route: "managed_terminal", send: true },
+    { name: "deferred Store read-only", physical: changed({ detail_scan: "deferred" }), writable: false, route: "managed_terminal", send: false },
+    { name: "deferred ownership conflict", physical: changed({ detail_scan: "deferred", management_state: "conflict" }), route: "managed_terminal", send: false },
+    { name: "deferred identity conflict", physical: changed({ detail_scan: "deferred", native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }), route: "managed_terminal", send: false },
+    { name: "deferred ambiguous pane", physical: [{ ...physical, detail_scan: "deferred" },
+      { ...physical, id: "terminal:v2:tmux:claude:akk:0.1:123", native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }], route: "managed_terminal", send: false },
     { name: "managed prerequisites unavailable", physical: changed({ _claude_managed_send_eligible: false }), route: "managed_terminal", send: false },
     { name: "managed prerequisites unobserved", physical: changed({ _claude_managed_send_eligible: undefined }), route: "managed_terminal", send: false },
     { name: "Store-filtered Send", physical: [physical], projected: changed({ available_actions: {} }), route: "managed_terminal", send: false },
@@ -690,6 +697,12 @@ test("Claude List follows managed Send eligibility while preserving canonical se
     assert.equal(visible.route_preference, scenario.route, scenario.name);
     assert.equal(visible.capabilities.send, scenario.send, scenario.name);
     assert.equal(visible.available_actions.send, scenario.send ? true : undefined, scenario.name);
+    if (scenario.name === "deferred inventory") {
+      assert.equal(visible.send_preflight_required, true);
+      assert.equal(visible.detail_scan, "deferred");
+      assert.match(visible.usage.summary, /checks.*before submitting/u);
+      assert.doesNotMatch(visible.usage.summary, /Ready to receive/u);
+    }
     assert.doesNotMatch(JSON.stringify(compact), /physical-authority|expected_terminal_token|_claude_managed_send_eligible/u);
   }
   assert.equal(backend.capabilities.send, true, "Projection must not rewrite native diagnostics");

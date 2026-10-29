@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   cliCwd,
   cliEnv,
+  cliExecutionMemo,
+  cliExecutionMemoAsync,
   cliExit,
   cliNow,
   cliPid,
@@ -153,4 +155,60 @@ test("CLI runtime log falls back safely when no logger is injected", async () =>
       cliRuntimeLog("info", "cli_runtime_context_fallback_test");
     }
   ));
+});
+
+test("discovery single-flight is shared within one command but isolated across concurrent and later commands", async () => {
+  const started = deferred(), release = deferred();
+  let reads = 0;
+  const load = async () => { reads++; started.resolve(); await release.promise; return { sequence: reads }; };
+  const first = runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    const a = cliExecutionMemoAsync("catalog", "reader/home", load);
+    const b = cliExecutionMemoAsync("catalog", "reader/home", load);
+    assert.equal(a, b);
+    assert.equal(await a, await b);
+    assert.equal(await cliExecutionMemoAsync("catalog", "reader/home", load), await a);
+  });
+  await started.promise;
+  await runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    assert.equal(await cliExecutionMemoAsync("catalog", "reader/home", async () => ++reads), 2);
+    assert.equal(cliExecutionMemo("catalog", "another/home", () => 3), 3);
+  });
+  release.resolve();
+  await first;
+  await runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    assert.equal(await cliExecutionMemoAsync("catalog", "reader/home", async () => ++reads), 3);
+  });
+  assert.equal(reads, 3);
+});
+
+test("failed discovery can retry and standalone callers never retain a command snapshot", async () => {
+  let attempts = 0;
+  const load = async () => { if (++attempts === 1) throw new Error("reader unavailable"); return attempts; };
+  await runCliCommandExecution("list", {}, { runtimeLog() {} }, async () => {
+    const one = cliExecutionMemoAsync("catalog", "reader", load);
+    const two = cliExecutionMemoAsync("catalog", "reader", load);
+    assert.equal(one, two);
+    await assert.rejects(one, /reader unavailable/u);
+    assert.equal(await cliExecutionMemoAsync("catalog", "reader", load), 2);
+  });
+  assert.equal(await cliExecutionMemoAsync("catalog", "reader", load), 3);
+  assert.equal(await cliExecutionMemoAsync("catalog", "reader", load), 4);
+});
+
+test("routed command output capture can explicitly inherit the parent discovery without leaking into an independent command", async () => {
+  let reads = 0;
+  const load = () => ++reads;
+  await runCliCommandExecution("status", {}, { runtimeLog() {} }, async () => {
+    assert.equal(cliExecutionMemo("catalog", "reader", load), 1);
+    const inner = await runCliCommandExecution("native-status", {}, { runtimeLog() {} }, async () => {
+      assert.equal(cliExecutionMemo("catalog", "reader", load), 1);
+      writeCliStdout("inner only");
+    }, { inheritDiscovery: true });
+    assert.equal(inner.stdout, "inner only");
+    await runCliCommandExecution("independent", {}, { runtimeLog() {} }, async () => {
+      assert.equal(cliExecutionMemo("catalog", "reader", load), 2);
+    });
+    assert.equal(cliExecutionMemo("catalog", "reader", load), 1);
+  });
+  assert.equal(reads, 2);
 });

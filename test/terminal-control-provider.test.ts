@@ -579,6 +579,36 @@ test("tmux provider deduplicates a default server also found by socket path", as
   assert.equal(panes[0].socketPath, undefined);
 });
 
+test("tmux discovery overlaps independent probes without reordering results or caching resolution", async () => {
+  const started: string[] = [];
+  const release: Array<() => void> = [];
+  let panePid = 36017;
+  let held = true;
+  const provider = new TmuxTerminalControlProvider({
+    socketPaths: ["/tmp/second-tmux"], commands: ["first-tmux", "second-tmux"],
+    async runCommand(command, args) {
+      const socket = args[0] === "-S" ? args[1] : "default";
+      started.push(`${command}:${socket}`);
+      if (held) await new Promise<void>(resolve => release.push(resolve));
+      return { status: 0, stderr: "", stdout:
+        `work\t0\t0\t${panePid}\tcodex\t/repo\t/tmp/server\t%1\n` };
+    }
+  });
+  const pending = provider.diagnose();
+  assert.equal(started.length, 4, "a slow socket must not serialize unrelated probes");
+  for (const unblock of [...release].reverse()) unblock();
+  const diagnostics = await pending;
+  assert.deepEqual(diagnostics.attempts.map(attempt =>
+    `${attempt.command}:${attempt.socketPath ?? "default"}`), started);
+  assert.equal(diagnostics.panes.length, 1);
+  assert.equal(diagnostics.panes[0].panePid, 36017);
+  held = false;
+  const [endpoint] = await provider.listTerminals();
+  panePid = 36018;
+  assert.equal((await provider.resolve(endpoint)).processAnchorPid, 36018,
+    "input revalidation must see a new process incarnation, not a discovery cache");
+});
+
 test("terminal provider registry rejects duplicate and unknown provider kinds", () => {
   const provider = new StaticTerminalControlProvider();
   const registry = createTerminalControlProviderRegistry([provider]);

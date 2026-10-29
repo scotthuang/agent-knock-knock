@@ -75,7 +75,8 @@ import type {
 } from "./terminal-agent-adapter.js";
 import {
   SystemTerminalProcessSource,
-  runProcessCommand,
+  runProcessCommandAsync,
+  type ProcessCommandRunner,
   type ProcessCommandResult
 } from "./terminal-process-source.js";
 
@@ -87,11 +88,15 @@ export {
 
 export interface CodexStoreAdapterOptions {
   codexHome?: string;
-  runCommand?: (command: string, args: string[]) => ProcessCommandResult;
+  runCommand?: ProcessCommandRunner;
   runSqliteThreadQuery?: CodexSqliteThreadQueryRunner;
   sqliteCantOpenRetryDelaysMs?: readonly number[];
   sleep?: (milliseconds: number) => Promise<void>;
   maxSessions?: number;
+  /** Only read-only List composition supplies a command-scoped discovery memo. */
+  memoizeOpenRootInventory?: (
+    key: string, observe: () => Promise<CodexOpenRootRolloutInventory>
+  ) => Promise<CodexOpenRootRolloutInventory>;
 }
 
 interface CodexLifecycleThreadRow extends CodexThreadRow {
@@ -110,15 +115,16 @@ export class CodexStoreAdapter implements
   CodexLocalSessionAdapter,
   TerminalThreadLifecycleCandidateProvider {
   private readonly codexHome: string;
-  private readonly runCommand: (command: string, args: string[]) => ProcessCommandResult;
+  private readonly runCommand: ProcessCommandRunner;
   private readonly runSqliteThreadQuery: CodexSqliteThreadQueryRunner;
   private readonly sqliteCantOpenRetryDelaysMs: readonly number[];
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly maxSessions: number;
+  private readonly memoizeOpenRootInventory?: CodexStoreAdapterOptions["memoizeOpenRootInventory"];
 
   constructor(options: CodexStoreAdapterOptions = {}) {
     this.codexHome = options.codexHome ?? path.join(os.homedir(), ".codex");
-    this.runCommand = options.runCommand ?? runProcessCommand;
+    this.runCommand = options.runCommand ?? runProcessCommandAsync;
     this.runSqliteThreadQuery = options.runSqliteThreadQuery ??
       runCodexSqliteThreadQuery;
     this.sqliteCantOpenRetryDelaysMs =
@@ -126,6 +132,7 @@ export class CodexStoreAdapter implements
       DEFAULT_SQLITE_CANTOPEN_RETRY_DELAYS_MS;
     this.sleep = options.sleep ?? waitForMilliseconds;
     this.maxSessions = options.maxSessions ?? 100;
+    this.memoizeOpenRootInventory = options.memoizeOpenRootInventory;
   }
 
   async listThreadRows(): Promise<CodexThreadRow[]> {
@@ -295,11 +302,22 @@ export class CodexStoreAdapter implements
     pid: number,
     cwd?: string
   ): Promise<CodexOpenRootRolloutInventory> {
+    if (!this.memoizeOpenRootInventory) return this.observeOpenRootInventory(pid, cwd);
+    const key = JSON.stringify([path.resolve(this.codexHome), pid, cwd ? path.resolve(cwd) : null]);
+    const observed = await this.memoizeOpenRootInventory(key, () => this.observeOpenRootInventory(pid, cwd));
+    // Each consumer applies its own preferred-root/companion constraints and
+    // cannot alter another consumer's shared discovery observation.
+    return structuredClone(observed);
+  }
+
+  private async observeOpenRootInventory(
+    pid: number, cwd?: string
+  ): Promise<CodexOpenRootRolloutInventory> {
     if (!Number.isSafeInteger(pid) || pid <= 1) {
       throw new Error("Codex process pid must be a positive integer greater than 1");
     }
-    const readProcessBirth = (): string => {
-      const result = this.runCommand("ps", [
+    const readProcessBirth = async (): Promise<string> => {
+      const result = await this.runCommand("ps", [
         "-o",
         "lstart=",
         "-p",
@@ -314,8 +332,8 @@ export class CodexStoreAdapter implements
       }
       return processBirth;
     };
-    const processBirth = readProcessBirth();
-    const result = this.runCommand("lsof", [
+    const processBirth = await readProcessBirth();
+    const result = await this.runCommand("lsof", [
       "-a",
       "-p",
       String(pid),
@@ -327,7 +345,7 @@ export class CodexStoreAdapter implements
         `could not inspect open rollout files for Codex process ${pid}`
       );
     }
-    const confirmedProcessBirth = readProcessBirth();
+    const confirmedProcessBirth = await readProcessBirth();
     if (confirmedProcessBirth !== processBirth) {
       throw new Error(
         `Codex process ${pid} incarnation changed while open rollouts were inspected`

@@ -283,6 +283,29 @@ test("process inventory diagnostics cannot change discovery behavior", async () 
   }]);
 });
 
+test("async process inventories retain independent fresh ps and cwd observations", async () => {
+  let observations = 0;
+  const commands: string[] = [];
+  const source = new SystemTerminalProcessSource({
+    async runCommand(command) {
+      commands.push(command);
+      if (command === "ps") {
+        observations += 1;
+        return ok(`  PID PPID ELAPSED COMMAND\n ${1100 + observations} 100 00:12 codex\n`);
+      }
+      return ok("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n" +
+        `codex ${1100 + observations} user cwd DIR 1,1 100 200 /repo/${observations}\n`);
+    }
+  });
+  const first = await source.listProcessSnapshots();
+  const second = await source.listProcessSnapshots();
+  assert.deepEqual(commands, ["ps", "lsof", "ps", "lsof"]);
+  assert.equal(first[0].pid, 1101);
+  assert.equal(first[0].cwd, "/repo/1");
+  assert.equal(second[0].pid, 1102);
+  assert.equal(second[0].cwd, "/repo/2");
+});
+
 test("system process source rejects incomplete or malformed successful ps inventories", async (t) => {
   const cases = [
     {

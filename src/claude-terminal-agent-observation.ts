@@ -7,8 +7,9 @@ import { resolveExecutable } from "./cli-command-runtime.js";
 import { cliEnv, cliRuntimeLog } from "./cli-runtime-context.js";
 import { claudeReaderConfiguration, claudeReaderDiagnostic, claudeReaderNextAction,
   type ClaudeReaderDiagnostic } from "./claude-reader-configuration.js";
-import { observeClaudeTerminalRegistry, observeClaudeTerminalWindow } from "./claude-terminal-registry-observation.js";
+import { observeClaudeTerminalRegistry, observeClaudeTerminalRegistryRow, observeClaudeTerminalWindow } from "./claude-terminal-registry-observation.js";
 import { isRecord, nonBlankString } from "./value-guards.js";
+import { completedClaudeAgentDiscovery, readClaudeAgentDiscovery } from "./claude-agent-discovery-cache.js";
 
 export interface ClaudeTerminalAgentObservation {
   rows: ClaudeAgentRow[]; rejectedPids: number[]; errors: string[];
@@ -59,11 +60,14 @@ function resolveReader(reader: string): string {
     return executable;
   } catch { throw new Error("claude_reader_unavailable"); }
 }
-function readerRows(reader: string, root: string): ClaudeAgentRow[] {
-  const command = spawnSync(reader, ["agents", "--json", "--all"], {
+function readerRows(reader: string, root: string, outputs?: ReadonlyMap<string, string | Error>, discoverySnapshot = false): ClaudeAgentRow[] {
+  const cached = outputs?.get(root) ?? (discoverySnapshot ? completedClaudeAgentDiscovery(root, reader) : undefined);
+  if (cached instanceof Error) throw cached;
+  if (discoverySnapshot && cached === undefined) throw new Error("claude_discovery_snapshot_unavailable");
+  const command = cached === undefined ? spawnSync(reader, ["agents", "--json", "--all"], {
     encoding: "utf8", timeout: 10_000, maxBuffer: 10 * 1024 * 1024,
     env: { ...cliEnv(), CLAUDE_CONFIG_DIR: root }
-  });
+  }) : { stdout: cached, status: 0, error: undefined };
   if (command.error || command.status !== 0) throw new Error("claude_reader_failed");
   let raw: unknown;
   try { raw = JSON.parse(command.stdout); }
@@ -84,6 +88,24 @@ function bindRegistryRows(root: string, legacyRoot: string, pid: number, rows: C
 }
 /** Never infer a session directory from the reader's install layout. */
 export function readClaudeTerminalAgents(options: Readonly<Record<string, unknown>>): ClaudeTerminalAgentObservation {
+  return readTerminalAgents(options);
+}
+
+/** List shares reader output with the native catalog; every registry binding is still verified. */
+export async function readClaudeTerminalAgentsForDiscovery(options: Readonly<Record<string, unknown>>): Promise<ClaudeTerminalAgentObservation> {
+  let config: ReturnType<typeof claudeReaderConfiguration>, reader: string;
+  try { config = claudeReaderConfiguration(options); reader = resolveReader(config.reader); }
+  catch { return readTerminalAgents(options); }
+  const outputs = new Map<string, string | Error>();
+  await Promise.all([...new Set(config.configDirs.map(canonicalRoot))].map(async root => {
+    try { outputs.set(root, await readClaudeAgentDiscovery(root, reader)); }
+    catch { outputs.set(root, new Error("claude_reader_failed")); }
+  }));
+  return readTerminalAgents(options, outputs);
+}
+
+function readTerminalAgents(options: Readonly<Record<string, unknown>>,
+  outputs?: ReadonlyMap<string, string | Error>): ClaudeTerminalAgentObservation {
   const result: ClaudeTerminalAgentObservation = { rows: [], rejectedPids: [], errors: [] };
   const fail = (code: string) => {
     if (result.errors.includes(code)) return;
@@ -108,7 +130,7 @@ export function readClaudeTerminalAgents(options: Readonly<Record<string, unknow
   const sources = new Map<number, Set<string>>();
   for (const root of new Set(config.configDirs.map(canonicalRoot))) {
     let rows: ClaudeAgentRow[];
-    try { rows = readerRows(reader, root); }
+    try { rows = readerRows(reader, root, outputs, options.listDiscoverySnapshot === true); }
     catch (error) { fail((error as Error).message); continue; }
     for (const pid of new Set(rows.map(row => row.pid!))) {
       const locations = sources.get(pid) ?? new Set<string>();
@@ -123,4 +145,23 @@ export function readClaudeTerminalAgents(options: Readonly<Record<string, unknow
   result.rejectedPids = [...new Set(result.rejectedPids)];
   result.rows = result.rows.filter(row => !result.rejectedPids.includes(row.pid!));
   return result;
+}
+
+/** Exact-target metadata never enumerates agents, and invalid present records never fall back. */
+export function readClaudeTerminalAgent(options: Readonly<Record<string, unknown>>,
+  pid: number): ClaudeTerminalAgentObservation | undefined {
+  let config: ReturnType<typeof claudeReaderConfiguration>;
+  try { config = claudeReaderConfiguration(options); }
+  catch { return { rows: [], rejectedPids: [pid], errors: ["claude_reader_invalid_configuration"] }; }
+  const observations = [...new Set(config.configDirs.map(canonicalRoot))]
+    .map(configDir => observeClaudeTerminalRegistryRow({ configDir, pid }));
+  const invalid = observations.find(observation => observation.state === "invalid");
+  const present = observations.filter(observation => observation.state !== "absent");
+  const errors = invalid?.state === "invalid" ? [`claude_registry_${invalid.reason}`]
+    : present.length > 1 ? ["claude_registry_conflicting_roots"] : [];
+  if (errors.length) return { rows: [], rejectedPids: [pid], errors, reader: claudeReaderDiagnostic(config) };
+  const selected = present[0];
+  if (!selected || selected.state === "legacy") return undefined;
+  return { rows: selected.state === "verified" ? [selected.row] : [], rejectedPids: [], errors: [],
+    reader: claudeReaderDiagnostic(config) };
 }
