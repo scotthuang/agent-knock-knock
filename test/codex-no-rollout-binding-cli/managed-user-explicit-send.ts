@@ -174,7 +174,7 @@ test("human terminal Send keeps managed ownership across transient writer conten
       NATIVE_THREAD_ID,
       EXTERNAL_THREAD_ID
     ]);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = assertTerminalUserExplicitSendAction(terminal);
     fs.mkdirSync(fixture.storeDir, {
       recursive: true,
@@ -272,7 +272,7 @@ for (const sourceLessCase of [
     const message = `Bind a source-less Send from ${sourceLessCase.label}.`;
     try {
       enableFixtureCandidateInventory(fixture, [...sourceLessCase.roots]);
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       const action = assertTerminalUserExplicitSendAction(terminal);
       assert.deepEqual(listManagedSessions(fixture.storeDir), []);
       assert.deepEqual(listConversations(fixture.storeDir), []);
@@ -329,7 +329,7 @@ test("source-less human Send recovers a zero-match candidate without replay", as
       NATIVE_THREAD_ID,
       EXTERNAL_THREAD_ID
     ]);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = assertTerminalUserExplicitSendAction(terminal);
     fixture.acceptanceNativeThreadIdsOnEnter = [];
     fixture.cliPid = process.pid + 500_000;
@@ -404,7 +404,7 @@ test("source-less human Send with a stable id makes multiple exact candidate mat
       NATIVE_THREAD_ID,
       EXTERNAL_THREAD_ID
     ]);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = assertTerminalUserExplicitSendAction(terminal);
     fixture.acceptanceNativeThreadIdsOnEnter = [
       NATIVE_THREAD_ID,
@@ -1489,7 +1489,7 @@ test("a detached candidate claim cannot hide user-priority physical Send", async
       EXTERNAL_THREAD_ID,
       "session-detached-current-candidate"
     );
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     assertTerminalUserExplicitSendAction(listed);
     assert.deepEqual(taskInputCalls(fixture, message), []);
   } finally {
@@ -1533,7 +1533,7 @@ test("closed detached Codex history does not force /status on a narrow candidate
     // physical Codex process after those roots have closed their descriptors.
     enableFixtureCandidateInventory(fixture, [NATIVE_THREAD_ID]);
 
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = terminal.available_actions.send;
     assert.ok(action, JSON.stringify(terminal, null, 2));
     assert.equal(action.arguments.selector, fixture.terminalId);
@@ -1614,7 +1614,7 @@ test("known detached companion roots use the terminal-scoped human-priority rout
     );
     fixture.acceptanceNativeThreadIdsOnEnter = [NATIVE_THREAD_ID];
 
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(
       terminal.native_agent_identity_observation.status,
       "resolved"
@@ -1683,7 +1683,7 @@ test("a non-companion bound candidate claim cannot hide or stale user-priority p
       updated_at: new Date().toISOString()
     }, { expectedRevision: detachedClaim.revision as number });
 
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     const currentAction = assertTerminalUserExplicitSendAction(listed);
     assert.equal(
       currentAction.arguments.expected_terminal_token,
@@ -1730,7 +1730,7 @@ test("a stalled Turn remains visible but cannot suppress user-priority physical 
     );
     persistReleasedCandidateSourceTurns(fixture, source);
     persistBlockingTurn(fixture, source, "stalled");
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assertTerminalUserExplicitSendAction(terminal);
     assert.ok(
       terminal.blocking_turns?.some((turn: Record<string, any>) =>

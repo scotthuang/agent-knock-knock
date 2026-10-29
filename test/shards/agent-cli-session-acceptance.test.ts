@@ -223,6 +223,7 @@ test("v0.8.1 terminal state without native identity metadata remains bound to it
 
     const listed = await runAgentCliInProcess([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -578,6 +579,7 @@ if (args.includes("cwd")) {
 
     const listedForSecond = await runAgentCliInProcessSequential([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--codex-home",

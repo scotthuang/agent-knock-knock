@@ -175,7 +175,7 @@ test("unmanaged Codex approval remains raw while arbitrary terminal authority is
       "› 1. Yes, proceed (y)",
       "  2. No, and tell Codex what to do differently (esc)"
     ].join("\n"));
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.ok(terminal.available_actions.approve);
     assert.deepEqual(terminal.available_actions.approve.arguments, {
       conversation_id: fixture.terminalId
@@ -234,7 +234,7 @@ test("human-confirmed Codex approval falls back to the exact terminal when manag
   const fixture = createNoRolloutFixture();
   try {
     const seeded = await seedStatusCardManagedApproval(fixture);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.management_state, "conflict");
     assert.equal(terminal.managed.current_turn, null);
     const action = terminal.available_actions.approve;
@@ -374,7 +374,7 @@ test("human-confirmed Codex approval can target a managed pane with no AKK dispa
       const ledgerBefore = dispatchHistory === "resolved"
         ? readSoleTerminalDispatchLedger(fixture)
         : undefined;
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(terminal.management_state, "managed", dispatchHistory);
       assert.equal(terminal.managed.current_turn, null, dispatchHistory);
       const action = terminal.available_actions.approve;
@@ -472,7 +472,7 @@ test("terminal-scoped Codex approval fingerprint and token ignore output outside
       `background test output before list\n${prompt}`
     );
 
-    const first = await listFixtureTerminal(fixture);
+    const first = await listFixtureTerminal(fixture, { approvalScan: true });
     const firstAction = first.available_actions.approve;
     assert.ok(firstAction, JSON.stringify(first, null, 2));
     const firstToken = String(firstAction.arguments.expected_terminal_token);
@@ -484,7 +484,7 @@ test("terminal-scoped Codex approval fingerprint and token ignore output outside
       fixture.screenPath,
       `different background test output after list\n${prompt}`
     );
-    const second = await listFixtureTerminal(fixture);
+    const second = await listFixtureTerminal(fixture, { approvalScan: true });
     const secondAction = second.available_actions.approve;
     assert.ok(secondAction, JSON.stringify(second, null, 2));
     assert.equal(second.approval_state.fingerprint, firstFingerprint);
@@ -529,7 +529,7 @@ test("terminal-scoped Codex approval token binds the exact current prompt with o
         fs.rmSync(fixture.materializedPath, { force: true });
       }
       fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       const action = terminal.available_actions.approve;
       assert.ok(action, `${authority}: ${JSON.stringify(terminal, null, 2)}`);
       assert.equal(action.authority, authority);
@@ -601,7 +601,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
       "injected Codex rollout observation unavailable";
     fs.rmSync(fixture.materializedPath, { force: true });
     fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
-    const listed = await listFixtureTerminal(fixture);
+    const listed = await listFixtureTerminal(fixture, { approvalScan: true });
     const staleAction = listed.available_actions.approve;
     assert.ok(staleAction, JSON.stringify(listed, null, 2));
     const status = await runCli([
@@ -650,7 +650,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
     }, { expectedRevision: prepared.revision as number });
     const keysBefore = approvalKeyCalls(fixture).length;
 
-    const blockedList = await listFixtureTerminal(fixture);
+    const blockedList = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(blockedList.available_actions.approve, undefined);
     const blocked = await runCli([
       "approve",
@@ -677,7 +677,7 @@ test("managed no-owner Codex approval waits for aborted deferred cleanup before 
       abort_source_after_binding: binding,
       abort_target_after_status: "absent"
     }, { expectedRevision: aborted.revision as number });
-    const recoveredList = await listFixtureTerminal(fixture);
+    const recoveredList = await listFixtureTerminal(fixture, { approvalScan: true });
     const recoveredAction = recoveredList.available_actions.approve;
     assert.ok(recoveredAction, JSON.stringify(recoveredList, null, 2));
     const approved = await runCli([
@@ -718,7 +718,7 @@ test("managed no-owner Codex approval fails closed when Store or native authorit
         "injected Codex rollout observation unavailable";
       fs.rmSync(fixture.materializedPath, { force: true });
       fs.writeFileSync(fixture.screenPath, codexApprovalScreen("npm test"));
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       const action = terminal.available_actions.approve;
       assert.ok(action, `${drift}: ${JSON.stringify(terminal, null, 2)}`);
       const status = await runCli([
@@ -790,7 +790,7 @@ test("managed no-owner Codex approval fails closed when Store or native authorit
         fs.writeFileSync(fixture.processBirthPath, STALE_PROCESS_BIRTH);
       }
 
-      const relisted = await listFixtureTerminal(fixture);
+      const relisted = await listFixtureTerminal(fixture, { approvalScan: true });
       const relistedApproval = relisted.available_actions.approve;
       if (drift === "session_revision") {
         assert.ok(relistedApproval, JSON.stringify(relisted, null, 2));
@@ -834,7 +834,7 @@ test("terminal-scoped Codex approval rejects a known native-thread handoff and p
     const fixture = createNoRolloutFixture();
     try {
       await seedStatusCardManagedApproval(fixture);
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       const action = terminal.available_actions.approve;
       assert.ok(action, `${drift}: ${JSON.stringify(terminal, null, 2)}`);
       const status = await runCli([
@@ -871,7 +871,7 @@ test("terminal-scoped Codex approval rejects a known native-thread handoff and p
         fs.writeFileSync(fixture.processBirthPath, STALE_PROCESS_BIRTH);
       }
 
-      const relisted = await listFixtureTerminal(fixture);
+      const relisted = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(relisted.available_actions.approve, undefined, drift);
       const rejected = await runCli([
         "approve",
@@ -901,7 +901,7 @@ test("terminal-scoped Codex approval rejects uncertain dispatch ownership before
   const fixture = createNoRolloutFixture();
   try {
     await seedStatusCardManagedApproval(fixture);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = terminal.available_actions.approve;
     assert.ok(action, JSON.stringify(terminal, null, 2));
     const status = await runCli([
@@ -922,7 +922,7 @@ test("terminal-scoped Codex approval rejects uncertain dispatch ownership before
     }, null, 2)}\n`);
     const keysBefore = approvalKeyCalls(fixture).length;
 
-    const relisted = await listFixtureTerminal(fixture);
+    const relisted = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(relisted.available_actions.approve, undefined);
     const rejected = await runCli([
       "approve",
@@ -946,7 +946,7 @@ test("terminal-scoped Codex approval rejects a nonterminal deferred transfer bef
   const fixture = createNoRolloutFixture();
   try {
     const seeded = await seedStatusCardManagedApproval(fixture);
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = terminal.available_actions.approve;
     assert.ok(action, JSON.stringify(terminal, null, 2));
     const status = await runCli([
@@ -988,7 +988,7 @@ test("terminal-scoped Codex approval rejects a nonterminal deferred transfer bef
     }, { expectedRevision: null });
     const keysBefore = approvalKeyCalls(fixture).length;
 
-    const relisted = await listFixtureTerminal(fixture);
+    const relisted = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(relisted.available_actions.approve, undefined);
     const rejected = await runCli([
       "approve",

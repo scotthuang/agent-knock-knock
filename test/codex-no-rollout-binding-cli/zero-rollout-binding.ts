@@ -651,7 +651,7 @@ test("a rollout appearing between raw discovery and send preflight fails cleanly
       "neither task text nor Enter may cross the identity race"
     );
 
-    const terminal = await listFixtureTerminal({ ...fixture, environment });
+    const terminal = await listFixtureTerminal({ ...fixture, environment }, { approvalScan: true });
     assert.equal(terminal.management_state, "unmanaged");
     assert.ok(terminal.available_actions.new_thread);
     assert.ok(terminal.available_actions.list_resumable_threads);
@@ -767,7 +767,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
     const terminal = await listFixtureTerminal({
       ...fixture,
       environment: productionEnvironment
-    });
+    }, { approvalScan: true });
     assert.equal(terminal.management_state, "unmanaged");
     const listed = await runCli([
       "list-resumable-threads",
@@ -839,7 +839,7 @@ test("native New and Resume remain reachable after draft-blocked virgin attaches
     const terminal = await listFixtureTerminal({
       ...newFixture,
       environment: newEnvironment
-    });
+    }, { approvalScan: true });
     const action = terminal.available_actions.new_thread;
     assert.ok(action, JSON.stringify(terminal.available_actions));
     const prepared = await runCliCrashCheckpoint([
@@ -869,7 +869,7 @@ test("a provisional attach orphan keeps fenced reconciliation alongside user-pri
     const orphan = persistConflictSession(fixture, {
       sessionId: "session-provisional-attach-orphan"
     });
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.management_state, "conflict");
     assert.equal(terminal.management_conflict.kind, "provisional_orphan");
     assert.deepEqual(Object.keys(terminal.available_actions), [
@@ -953,7 +953,7 @@ test("a same-process external native-thread change keeps exact reconcile alongsi
       nativeThreadId: EXTERNAL_THREAD_ID,
       processBirth: LIVE_PROCESS_BIRTH
     });
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.native_agent_session_id, NATIVE_THREAD_ID);
     assert.equal(terminal.management_state, "conflict");
     assert.equal(
@@ -1011,7 +1011,7 @@ test("a proved Codex PID reuse ignores the stale binding without adopting its na
       nativeThreadId: EXTERNAL_THREAD_ID,
       processBirth: STALE_PROCESS_BIRTH
     });
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.management_state, "unmanaged");
     assert.equal(terminal.managed.session_id, null);
     assert.equal(terminal.available_actions.reconcile_binding, undefined);
@@ -1058,7 +1058,7 @@ test("a verified-empty Codex process detaches its ended rollout and starts one i
       CODEX_TEST_COMPOSER_FOOTER
     );
 
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.activity_state, "idle");
     assert.equal(
       terminal.native_agent_identity_observation.status,
@@ -1171,7 +1171,7 @@ test("verified-empty physical Send advertises replacement over a real draft and 
       } else if (blocker === "active_turn") {
         persistBlockingTurn(fixture, source);
       }
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       if (blocker === "resolver") {
         assert.equal(
           terminal.native_agent_identity_observation.status,
@@ -1259,7 +1259,7 @@ test("verified-empty handoff sends no Enter when a native rollout appears after 
       "Ready\n› \u001b[2mRun /review on my current changes\u001b[0m\n\n" +
       "  gpt-5.6 · 90% left"
     );
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     const action = terminal.available_actions.send;
     assert.ok(action, JSON.stringify(terminal));
     fixture.activeNativeThreadId = EXTERNAL_THREAD_ID;
@@ -1311,7 +1311,7 @@ test("Herdr uses the same verified-empty Codex handoff fence and virgin post-sub
       "› \u001b[2mRun /review on my current changes\u001b[0m\n" +
       CODEX_TEST_COMPOSER_FOOTER
     );
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.terminal_control.kind, "herdr");
     assert.equal(terminal.activity_state, "idle");
     assert.equal(
@@ -1377,7 +1377,7 @@ test("ambiguous and unverifiable binding claims hide reconciliation but not user
           processBirth: LIVE_PROCESS_BIRTH
         });
       }
-      const terminal = await listFixtureTerminal(fixture);
+      const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(terminal.management_state, "conflict", kind);
       assert.equal(
         terminal.management_conflict.kind,
@@ -1409,7 +1409,7 @@ test("a fresh /status card that supersedes the open rollout is projected as an a
       `/status\nSession: ${EXTERNAL_THREAD_ID}\n` +
       codexTestComposerScreen()
     );
-    const terminal = await listFixtureTerminal(fixture);
+    const terminal = await listFixtureTerminal(fixture, { approvalScan: true });
     assert.equal(terminal.native_agent_session_id, NATIVE_THREAD_ID);
     assert.equal(
       terminal.native_agent_status_card_session_id,
@@ -1441,7 +1441,7 @@ test("managed blockers suppress reconciliation but not user-priority physical Se
         nativeThreadId: EXTERNAL_THREAD_ID,
         processBirth: LIVE_PROCESS_BIRTH
       });
-      const before = await listFixtureTerminal(fixture);
+      const before = await listFixtureTerminal(fixture, { approvalScan: true });
       const advertised = before.available_actions.reconcile_binding;
       assert.ok(advertised, blocker);
       if (blocker === "turn") {
@@ -1452,7 +1452,7 @@ test("managed blockers suppress reconciliation but not user-priority physical Se
         persistUnresolvedDispatchLedger(fixture, session);
       }
 
-      const blocked = await listFixtureTerminal(fixture);
+      const blocked = await listFixtureTerminal(fixture, { approvalScan: true });
       assert.equal(blocked.management_state, "conflict", blocker);
       assert.equal(blocked.available_actions.reconcile_binding, undefined, blocker);
       assertTerminalUserExplicitSendAction(blocked);

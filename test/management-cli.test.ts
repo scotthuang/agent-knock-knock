@@ -90,6 +90,7 @@ test("list exposes physical tmux terminals with the terminal-first action contra
     fs.mkdirSync(tmuxWorkspace, { recursive: true });
     const listed = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -723,6 +724,7 @@ test("list exposes terminal-controlled Codex working activity state", async () =
     fs.mkdirSync(workspace, { recursive: true });
     const listed = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -799,6 +801,7 @@ test("list recognizes the current Codex composer marker and keeps explicit Send 
     fs.mkdirSync(workspace, { recursive: true });
     const idle = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -840,6 +843,7 @@ test("list recognizes the current Codex composer marker and keeps explicit Send 
 
     const unknown = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -898,6 +902,7 @@ test("list never advertises raw Claude approval or ambiguous cancellation", asyn
     fs.mkdirSync(workspace, { recursive: true });
     const listed = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
@@ -956,6 +961,7 @@ test("list discovers Claude and Codex tmux sessions from static runtime snapshot
     fs.mkdirSync(claudeWorkspace, { recursive: true });
     const listed = await runCli([
       "list",
+      "--approval-scan",
       "--store-dir",
       storeDir,
       "--processes-json",
