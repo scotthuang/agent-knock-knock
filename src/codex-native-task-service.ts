@@ -1,4 +1,5 @@
 import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
+import { codexDeliveryDiagnostics } from "./codex-routing-diagnostics.js";
 import { backendObservationStopped, backendRenewalDeadline, isBackendCallbackRetryable,
   prepareBackendCallbackRetry, stopBackendObservation, closeBackendManagement } from "./backend-task-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -233,7 +234,8 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
         task.status = "failed";
         task.send_intent = { message_id: input.messageId, client_user_message_id: this.uuid(), text: input.text,
           baseline_turn_ids: [], state: "not_sent", dispatched_at: this.now().toISOString(),
-          failure_stage: "native_preflight", error_code: nativeErrorCode(error) };
+          failure_stage: "native_preflight", error_code: nativeErrorCode(error),
+          diagnostics: { ...codexDeliveryDiagnostics(error, input.target.threadId, "backend_precheck"), dispatch_state: "not_sent" } };
         return this.repo.save(task, null);
       });
     }
@@ -267,6 +269,9 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     } catch (error) {
       this.update(id, current => {
         const intent = current.send_intent!; intent.error_code = nativeErrorCode(error);
+        intent.diagnostics = codexDeliveryDiagnostics(error, input.target.threadId,
+          error?.diagnostics?.stage ?? (error?.dispatchState === "not_sent" ? "backend_precheck" : "rpc_dispatch"));
+        if (error?.dispatchState === undefined) intent.diagnostics.dispatch_state = "unknown";
         if (current.native_turn_id) return;
         if ((error as { dispatchState?: string })?.dispatchState === "not_sent") {
           intent.state = "not_sent"; if (live(current)) { current.status = "failed"; this.notify(current, "settled", `Codex CLI task ${id} was not sent (${intent.error_code}). This message ID will not be replayed.`); }

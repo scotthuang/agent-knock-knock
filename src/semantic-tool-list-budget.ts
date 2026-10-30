@@ -154,6 +154,7 @@ function statusReference(row: Row, version: HostListProjectionVersion): Row {
   if (delivery) result.callback_delivery = delivery;
   const callback = recordValue(row.callback);
   if (callback) result.callback = callback;
+  if (recordValue(row.routing_health)) result.routing_health = row.routing_health;
   result.details_omitted = true;
   result.detail_reason = "list_row_budget";
   result.attention_required = hostListWatchNeedsAttention(row);

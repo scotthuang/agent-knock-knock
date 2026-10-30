@@ -58,6 +58,15 @@ the detail was not checked. A capability boolean reports that capability's
 value; it does not replace the current action offer or its fresh preflight.
 Do not invent an action from a missing field.
 
+Codex native rows additionally expose `routing_health` in both v4 and v5:
+`backend` (`loaded`, `unavailable`, `check_failed`), `fallback`
+(`unique_verified`, `no_match`, `multiple_matches`, `not_checked`), and
+`check_depth` (`discovery`, `snapshot`) are independent observations.
+`observed_at`, `last_failure` and `recovery_actions` explain freshness and recovery.
+A loaded backend with no terminal alias remains a usable native route; missing
+fallback alone never disables Send. See [Codex delivery diagnostics](codex-delivery-diagnostics.md)
+for safe error fields, correction hints and the advisory cache lifetime.
+
 The projection change does not change action contract v35. That contract added
 a no-existing-stash prerequisite to Claude physical Send, narrowing eligibility
 for an empty input box with a stashed draft. The per-agent Composer policies,

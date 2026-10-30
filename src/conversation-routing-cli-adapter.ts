@@ -22,6 +22,8 @@ import { conversationCommandPolicy, conversationRoutedOptions, prepareConversati
 import { withExactTerminalActions } from "./conversation-list.js";
 import { assertNativeRuntimeStoreAuthority, withNativeRuntimeStoreAuthority } from "./native-store-authority-runtime.js";
 import { codexFolderTrustBlocked } from "./codex-folder-trust-surface.js";
+import { CodexDeliveryError, codexDeliveryDiagnostics, parseCodexDeliveryDiagnostics, type CodexFallbackHealth, type CodexFailureStage } from "./codex-routing-diagnostics.js";
+import { createCodexRoutingDiagnosticCache } from "./codex-routing-diagnostic-cache.js";
 
 type Options = Record<string, unknown>;
 type Row = Record<string, unknown>;
@@ -103,8 +105,17 @@ export async function dispatchRoutedConversationCli(command: string | undefined,
         const invoke = () => ports.execute(execution.command, execution.options);
         const result = choice.route === "native" && nativeAuthorityMutations.has(command)
           ? await withNativeRuntimeStoreAuthority({ nativeThreadId: parseCodexNativeConversationId(choice.targetId).threadId,
-              storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir }, invoke)
+              storeDir: configuration.storeDir, runtimeDir: terminalRuntimeDir }, async () => {
+                try { return await invoke(); }
+                catch (error) { throw nativeRouteFailure(choice.targetId, options, error,
+                  recordValue(recordValue(error)?.diagnostics)?.stage === "backend_precheck" ? "backend_precheck" : "rpc_dispatch"); }
+              })
           : await invoke();
+        const failure = parseCodexDeliveryDiagnostics(result.send_diagnostics);
+        if (choice.route === "native" && failure) {
+          const identity = parseCodexNativeConversationId(choice.targetId);
+          createCodexRoutingDiagnosticCache(configuration.storeDir, cliNow).rememberFailure(identity.codexHome, identity.threadId, failure);
+        }
         return projectNativeStatusStoreAuthority({ command, choice, result, ports, options, observedTerminals });
       }
     });
@@ -243,17 +254,41 @@ async function selectNativeConversationRoute(input: {
   const { target, options, runtime, ports, identityOptions } = input;
   const identity = parseCodexNativeConversationId(target);
   const policy = conversationCommandPolicy(input.command, options)!;
+  let backendError: unknown = { code: "thread_not_loaded" };
   if (policy.backend) {
     try {
       const snapshot = await runtime.read(identity);
       if (snapshot.threadId !== identity.threadId || snapshot.thread.id !== identity.threadId) throw new Error("Backend conversation identity mismatch");
       if (snapshot.loaded) return { route: "native", targetId: target, reason: "backend_available" };
-    } catch (error) { if (!backendPreflightUnavailable(error)) throw error; }
+    } catch (error) {
+      if (!backendPreflightUnavailable(error)) throw nativeRouteFailure(target, options, error, "backend_precheck");
+      backendError = error;
+    }
   }
-  if (policy.requireBackend) throw new Error("The native interaction backend is unavailable; no terminal response was sent");
-  const proof = resolveNativeTerminalRoute(target, await ports.terminals(options), identityOptions);
-  if (proof.status !== "exact") throw new Error(`${policy.backend ? "Backend unavailable" : "AKK has no equivalent backend operation"}; no unique verified terminal fallback: ${proof.reason}`);
+  if (policy.requireBackend) throw nativeRouteFailure(target, options, backendError, "backend_precheck", "not_checked",
+    "The native interaction backend is unavailable; no terminal response was sent");
+  let terminals: Row[];
+  try { terminals = await ports.terminals(options); }
+  catch { throw nativeRouteFailure(target, options, backendError, "fallback_scan", "not_checked", "Terminal fallback scan failed"); }
+  const proof = resolveNativeTerminalRoute(target, terminals, identityOptions);
+  if (proof.status !== "exact") throw nativeRouteFailure(target, options, backendError, "fallback_scan",
+    proof.status === "ambiguous" ? "multiple_matches" : "no_match",
+    `${policy.backend ? "Backend unavailable" : "AKK has no equivalent backend operation"}; no unique verified terminal fallback: ${proof.reason}`);
   return { route: "terminal", targetId: canonicalTerminalRouteId(proof.association.terminalId), reason: policy.backend ? "backend_unavailable" : "backend_operation_unavailable" };
+}
+
+function nativeRouteFailure(target: string, options: Options, error: unknown, stage: CodexFailureStage,
+  fallback: CodexFallbackHealth = "not_checked", message?: string): CodexDeliveryError {
+  const identity = parseCodexNativeConversationId(target);
+  const cache = createCodexRoutingDiagnosticCache(codexNativeRuntimeOptions(options).storeDir, cliNow);
+  const diagnostics = { ...codexDeliveryDiagnostics(error, identity.threadId, stage, fallback),
+    ...cache.listMatch(identity.codexHome, identity.threadId) };
+  if (stage === "rpc_dispatch" && recordValue(error)?.dispatchState === undefined) diagnostics.dispatch_state = "unknown";
+  cache.rememberFailure(identity.codexHome, identity.threadId, diagnostics);
+  // RPC errors already carry only a safe message; replace their diagnostic suffix with this route's context.
+  const summary = message ?? (error instanceof Error ? recordValue(error)?.diagnostics
+    ? error.message.split(/ Refresh AKK List| Check the existing task receipt\/Watch| Diagnostics:/u)[0] : error.message : "Codex route unavailable");
+  return new CodexDeliveryError(summary, diagnostics);
 }
 
 function mayInspectMissingAlias(terminal: Row): boolean {

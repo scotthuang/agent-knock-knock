@@ -1,3 +1,4 @@
+import { compactCodexRoutingHealth } from "./codex-routing-diagnostics.js";
 import { paginateHostList } from "./semantic-tool-list-budget.js";
 import { compactListV5Row, resolveHostListProjectionVersion } from "./semantic-tool-list-format.js";
 import { isAkkModelFacingPrivateAuthorityField } from
@@ -106,7 +107,9 @@ function compactDesktopConversation(row: Record<string, unknown>): Record<string
 }
 
 function compactNativeConversation(row: Record<string, unknown>): Record<string, unknown> {
+  const health = compactCodexRoutingHealth(row.routing_health);
   return withConversationUsage({
+    ...(health ? { routing_health: health } : {}),
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent",
       "native_thread_id", "native_turn_id", "native_input_id", "pid", "agent_version", "waiting_for", "manual_required", "activity_state", "connection_state", "backend_version",
       "pending_interaction_count", "interaction_requests_scanned", "history_state", "unstarted_thread", "classification", "frontend_presence",

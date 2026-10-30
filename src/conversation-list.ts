@@ -1,7 +1,7 @@
 import { associateClaudeConversationRoutes, exactClaudeTerminal } from "./claude-conversation-routing-identity.js";
 import { claudeNativeControlCapabilities } from "./claude-native-public-projection.js";
 import { claudeManagedSendRoute, claudeManagedTerminalSendBlockReason, claudeUserExplicitTerminalSendOffer, withClaudeManagedSendAuthority } from "./claude-managed-send-route.js";
-import { associateConversationRoutes, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
+import { associateConversationRoutes, resolveNativeTerminalRoute, type ConversationRoutingIdentityOptions } from "./conversation-routing-identity.js";
 import { presentConversationList, type ConversationListPresentationOptions } from "./conversation-list-presentation.js";
 import { withConversationUsage } from "./conversation-usage-guidance.js";
 import { recordValue } from "./value-guards.js";
@@ -208,6 +208,7 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
   const claudeAssociations = associateClaudeConversationRoutes(terminals, claude);
   const linked = new Set([...association.associations, ...claudeAssociations].map(item => item.terminalId));
   const conversations: Row[] = native.map(row => ({ ...row, route_preference: "codex_backend",
+    ...nativeRoutingHealth(row, terminals, !recordValue(result.terminal_scan)?.error),
     route_status: row.connection_state === "loaded_backend_verified" ? "backend_available" : "backend_unavailable",
     terminal_aliases: association.associations.filter(item => item.nativeId === row.conversation_id).map(item => item.terminalId),
     terminal_controls: rows(result.terminals).filter(terminal => association.associations.some(item => item.nativeId === row.conversation_id && item.terminalId === terminal.id))
@@ -226,6 +227,14 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
     conversation_routing: { policy: "agent_specific", codex: "backend_first", claude: "managed_terminal_first",
     exact_associations: association.associations.length + claudeAssociations.length,
     unresolved_terminals: association.unassociated.filter(item => terminals.some(t => t.id === item.terminalId && t.agent === "codex")).length } };
+}
+
+function nativeRoutingHealth(row: Row, terminals: readonly Row[], scanComplete: boolean): Row {
+  const health = recordValue(row.routing_health);
+  if (!health) return {};
+  const proof = scanComplete ? resolveNativeTerminalRoute(String(row.conversation_id), terminals) : undefined;
+  return { routing_health: { ...health, fallback: !proof ? "not_checked" : proof.status === "exact" ? "unique_verified"
+    : proof.status === "ambiguous" ? "multiple_matches" : "no_match" } };
 }
 
 /** Remove historical output only after exact association and blocking checks have run. */

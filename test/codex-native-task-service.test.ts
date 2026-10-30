@@ -94,6 +94,8 @@ test("empty-thread preflight failures persist an idempotent not-sent receipt wit
   const failed = await createCodexNativeTaskService(h.deps).send(request);
   assert.equal(failed.status, "failed"); assert.equal(failed.send_intent?.state, "not_sent");
   assert.equal(failed.send_intent?.error_code, "timeout"); assert.equal(failed.send_intent?.failure_stage, "native_preflight");
+  assert.equal(failed.send_intent?.diagnostics?.dispatch_state, "not_sent", "a failed subscription never submits the task");
+  assert.equal(failed.send_intent?.diagnostics?.stage, "backend_precheck");
   assert.equal(failed.native_turn_id, undefined); assert.equal(failed.send_intent?.receipt_turn_id, undefined);
   assert.equal(codexNativeTaskNeedsReconciliation(failed), false); assert.deepEqual(failed.notifications, []);
   assert.equal(h.state.starts, 0); assert.equal(h.repository.list().length, 1);
@@ -227,6 +229,10 @@ test("uncertain send recovers exact history after restart without replay, title 
   };
   const sent = await createCodexNativeTaskService(h.deps).send(input);
   assert.equal(sent.send_intent?.state, "uncertain"); assert.equal(sent.native_turn_id, undefined);
+  const receipt = codexNativeTaskProjection(h.repository.load(sent.id)!);
+  assert.equal(receipt.send_diagnostics?.stage, "rpc_dispatch");
+  assert.equal(receipt.send_diagnostics?.dispatch_state, "unknown");
+  assert.deepEqual(receipt.send_recovery_actions, ["check_existing_receipt_before_resend"]);
   h.state.snapshot = snapshot([turn("native-one", "completed", h.state.clientId)]);
   h.state.snapshot.turns[0].items.push({ id: "answer", type: "agentMessage", phase: "final_answer", text: "Finished exact task" });
   const recovered = await createCodexNativeTaskService(h.deps).reconcile(sent.id);
@@ -291,6 +297,10 @@ test("not-sent and unknown-acceptance timeout callbacks survive durable serializ
   h.deps.start = async () => { throw new CodexNativeError("thread_not_idle", "busy before dispatch", "not_sent"); };
   const notSent = await createCodexNativeTaskService(h.deps).send({ ...input, callbackRoute: route });
   assert.equal(notSent.status, "failed"); assert.equal(notSent.notifications[0].status, "accepted");
+  const receipt = codexNativeTaskProjection(h.repository.load(notSent.id)!);
+  assert.equal(receipt.send_diagnostics?.stage, "backend_precheck");
+  assert.equal(receipt.send_diagnostics?.dispatch_state, "not_sent");
+  assert.deepEqual(receipt.send_recovery_actions, ["refresh_list", "copy_conversation_id_verbatim"]);
   assert.equal(h.repository.load(notSent.id)?.native_turn_id, undefined);
   h.deps.start = async (_identity, options) => {
     await options.beforeDispatch?.(h.state.snapshot); throw new CodexNativeError("timeout", "lost receipt", "unknown");
