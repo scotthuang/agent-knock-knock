@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.9 / Pi 0.1.0-poc.17 / DeepSeek Harness 0.1.0-rc.21 — 2026-10-31
+
+- Explain Codex delivery failures with allowlisted stage, decoded target, dispatch certainty, fallback outcome and native RPC method/code. Preserve diagnostics and recovery guidance in durable Send receipts without exposing raw backend errors, prompts or private paths.
+- Add independent backend/fallback health observations to compact List v4 and v5. A bounded, private, 24-hour advisory cache can identify an exact mismatch with a recent complete inventory; it never authorizes, rejects, reroutes or automatically resends work.
+- Preserve opaque native identifiers, fresh execution checks, transport pinning and uncertain-send recovery. Ordinary List adds no full Send preflight or native subscription, and unknown acceptance still requires receipt inspection rather than blind retry.
+- Publish coordinated Pi and DSH connectors pinned to core **0.16.9**, keeping their existing Host compatibility ranges and prerelease `next` tags.
+
 ## 0.16.8 / Pi 0.1.0-poc.16 / DeepSeek Harness 0.1.0-rc.20 — 2026-10-30
 
 - Add an explicitly versioned compact List v5 for updated OpenClaw, Pi and DSH connectors. Omit repeated usage prose and duplicate IDs while retaining exact selectors, readable states, dynamic action inputs and structured blockers. Keep the existing whole-response budgets and complete pagination.

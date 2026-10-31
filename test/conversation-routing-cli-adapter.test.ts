@@ -329,7 +329,7 @@ test("a mistyped native ID names its decoded thread and its mismatch with the la
   const f = fixture(t);
   await f.run("codex-cli-list", f.nativeId);
   const identity = JSON.parse(Buffer.from(f.nativeId.split(":")[2], "base64url").toString());
-  const mistypedThread = "01a178b-ea3f-7e60-a965-019862954019";
+  const mistypedThread = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa";
   const target = createCodexNativeConversationId({ codexHome: identity[0], threadId: mistypedThread });
   f.failure = new CodexNativeError("rpc_error", "Codex backend rejected the native request", "not_sent", -32602);
   await assert.rejects(f.run("send", target), (error: any) => {
@@ -337,7 +337,7 @@ test("a mistyped native ID names its decoded thread and its mismatch with the la
     assert.equal(error.diagnostics.target_thread_id, mistypedThread);
     assert.equal(error.diagnostics.rpc_code, -32602);
     assert.equal(error.diagnostics.recent_list_match, "no_match");
-    assert.match(error.message, /decoded thread.*01a178b.*does not match any session in the recent List/);
+    assert.match(error.message, /decoded thread.*aaaaaaaa.*does not match any session in the recent List/);
     assert.equal(error.diagnostics.fallback, "not_checked");
     return true;
   });

@@ -38,7 +38,7 @@ Example: a mistyped ID rejected during a read:
 ```json
 {
   "stage": "backend_precheck",
-  "target_thread_id": "01a178b-ea3f-7e60-a965-019862954019",
+  "target_thread_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa",
   "dispatch_state": "not_sent",
   "fallback": "not_checked",
   "reason": "rpc_error",
