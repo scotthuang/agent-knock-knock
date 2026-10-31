@@ -7,12 +7,12 @@ and workflow filename. No stored ClawHub token or manual override is required.
 The reviewed `.github/clawhub-release.json` identifies the already-tested GitHub
 Release TGZ, original source commit, version, size and SHA-256. The workflow never
 rebuilds it, publishes to npm, installs AKK locally, or changes the publisher binding.
-For 0.16.9, the release gate passed 3,909 core tests, both connector verification
+For 0.16.10, the release gate passed 3,913 core tests, both connector verification
 gates, isolated OpenClaw 2026.9.1, runtime Inspector and package dry-run checks.
-The product commit is `92892fcf4734b52a61a00ad63d5c34c74f7add3c` (PR #491).
+The product commit is `4dbcdbe47f18a819dc848f59e4baf7ca26d880f7` (PR #494).
 This publication update changes only the release manifest and this workflow
-documentation. Pi `0.1.0-poc.17` and DeepSeek Harness `0.1.0-rc.21` are separate
-npm publications pinned to core `0.16.9`; this workflow publishes only the core
+documentation. Pi `0.1.0-poc.18` and DeepSeek Harness `0.1.0-rc.22` are separate
+npm publications pinned to core `0.16.10`; this workflow publishes only the core
 ClawHub package.
 
 ClawHub requires the trusted source SHA/ref to match the running workflow. The
