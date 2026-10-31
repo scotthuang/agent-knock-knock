@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.9",
+  "version": "0.16.10",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "92892fcf4734b52a61a00ad63d5c34c74f7add3c",
-  "asset": "scotthuang-agent-knock-knock-0.16.9.tgz",
-  "sha256": "b1c221279d7e6b8f938391ee96e44daea3b11f4016f5fe829390777db3280d1b",
-  "bytes": 3979822,
-  "changelog": "Codex Send failures retain safe stage, exact decoded target, dispatch certainty, fallback outcome and RPC method/code, with durable recovery guidance. Compact List v4/v5 expose independent routing-health observations. A private 24-hour advisory cache supplies exact inventory mismatch clues without changing authorization, route selection, transport pinning or uncertain-send rules. Coordinated core 0.16.9, Pi 0.1.0-poc.17 and DSH 0.1.0-rc.21. Formal gate passed 3909 core tests, both connector gates, isolated OpenClaw compatibility, runtime validation and package dry-run. No new live delivery claim."
+  "commit": "4dbcdbe47f18a819dc848f59e4baf7ca26d880f7",
+  "asset": "scotthuang-agent-knock-knock-0.16.10.tgz",
+  "sha256": "5c8299732d44fba3e82ecff981a400f1e4cc3cf8c6e2822b52780429187919c7",
+  "bytes": 3980508,
+  "changelog": "Recognize complete framed multiline Claude Code terminal questionnaires, including custom-text entry, while preserving prompt rows, semantic selection and the original screen fingerprint. Require contiguous framing and a blank option boundary; retain header, footer, cursor, numbering, input-ownership and cross-line secret guards. Unproven shapes and multi-select mutation remain manual; no new Claude native-peer response support or live delivery claim. Coordinated core 0.16.10, Pi 0.1.0-poc.18 and DSH 0.1.0-rc.22. Formal gate passed 3913 core tests, both connector gates, isolated OpenClaw compatibility, runtime validation and package dry-run."
 }
