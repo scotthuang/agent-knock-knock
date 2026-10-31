@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.8",
+  "version": "0.16.9",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "c056685f364b97474bb36bd31189bbf9c6430649",
-  "asset": "scotthuang-agent-knock-knock-0.16.8.tgz",
-  "sha256": "bf73eb66384c19207ac91faf24b2370f3496c68465a769d02d104aa9848b2080",
-  "bytes": 3969474,
-  "changelog": "Compact List v5 removes repeated usage prose and duplicate IDs while preserving exact selectors, readable unknown states, dynamic action inputs and blockers. OpenClaw, Pi and DSH default to v5; generic Host SDK and MCP keep v4 with explicit format selection and version-bound pagination. Budgets, raw CLI output, action contract 35 and execution authority remain unchanged. Coordinated core 0.16.8, Pi 0.1.0-poc.16 and DSH 0.1.0-rc.20. Formal release gate passed 3904 core tests, both connector gates, isolated OpenClaw compatibility, runtime validation and dry-run. No external delivery claim."
+  "commit": "92892fcf4734b52a61a00ad63d5c34c74f7add3c",
+  "asset": "scotthuang-agent-knock-knock-0.16.9.tgz",
+  "sha256": "b1c221279d7e6b8f938391ee96e44daea3b11f4016f5fe829390777db3280d1b",
+  "bytes": 3979822,
+  "changelog": "Codex Send failures retain safe stage, exact decoded target, dispatch certainty, fallback outcome and RPC method/code, with durable recovery guidance. Compact List v4/v5 expose independent routing-health observations. A private 24-hour advisory cache supplies exact inventory mismatch clues without changing authorization, route selection, transport pinning or uncertain-send rules. Coordinated core 0.16.9, Pi 0.1.0-poc.17 and DSH 0.1.0-rc.21. Formal gate passed 3909 core tests, both connector gates, isolated OpenClaw compatibility, runtime validation and package dry-run. No new live delivery claim."
 }
