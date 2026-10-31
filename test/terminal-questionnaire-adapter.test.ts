@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { CLAUDE_WRAPPED_RESOURCE_QUESTION } from "./fixtures/claude-questionnaire-21295.js";
 import {
   CLAUDE_NATIVE_QUESTIONNAIRE_PROFILES,
   CODEX_NATIVE_QUESTIONNAIRE_PROFILES,
@@ -908,6 +909,80 @@ test("Claude named-session bottom border is recognized by its exact UI shape", (
       }).status, "actionable");
     }
   }
+});
+
+test("Claude 2.1.295 live framed multiline question preserves the whole prompt and semantic choice", () => {
+  const parsed = actionable(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.295", screen: CLAUDE_WRAPPED_RESOURCE_QUESTION
+  }));
+  assert.equal(parsed.question.prompt,
+    "检测到 AI 资源有新版本(skill/dev 1.1.5、skill/pub 1.1.7、skill/ai-installer\n" +
+    "1.0.5、skill/mp-frontend-repo-map 0.1.6、hook/dev-conversation-report 0.2.5),是否现在执行\n" +
+    "mpfa update 更新?");
+  assert.equal(parsed.question.response_kind, "single_select");
+  assert.deepEqual(parsed.question.options?.map(option => option.label),
+    ["更新(推荐)", "不更新", "Type something."]);
+  assert.equal(parsed.prompt_evidence.exact_region, CLAUDE_WRAPPED_RESOURCE_QUESTION);
+  assert.equal(parsed.action_plan.kind, "single_select");
+  if (parsed.action_plan.kind !== "single_select") return;
+  assert.deepEqual(parsed.action_plan.choices[1], {
+    option_id: parsed.question.options![1]!.option_id,
+    outcome: "submit_or_advance", stages: [{ kind: "key", key: "2" }]
+  });
+  const edited = actionable(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.295",
+    screen: CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("│ mpfa update 更新?", "│ 是否跳过更新?")
+  }));
+  assert.notEqual(edited.question.question_id, parsed.question.question_id);
+  assert.notEqual(edited.prompt_evidence.sha256, parsed.prompt_evidence.sha256);
+});
+
+test("Claude multiline framing cannot absorb missing boundaries, malformed rows, or a changed footer", () => {
+  for (const screen of [
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace(" ☐ AI 资源更新\n", ""),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("│ 1.0.5", "1.0.5"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("│ mpfa", "│  mpfa"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("更新?\n\n❯", "更新?\n❯"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("│ mpfa", "\n│ mpfa"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("❯ 1.", "  1."),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("  2. 不更新", "  3. 不更新"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("Esc to cancel", "Esc to close"),
+    CLAUDE_WRAPPED_RESOURCE_QUESTION.replace("│ mpfa", "│ \u0000mpfa")
+  ]) {
+    assert.notEqual(inspectNativeQuestionnaire({
+      agent: "claude", version: "2.1.295", screen
+    }).status, "actionable");
+  }
+});
+
+test("Claude multiline question checks every row for secrets including a wrapped word", () => {
+  for (const prompt of ["│ Choose a value\n│ Enter your API key", "│ Enter your pass\n│ word"]) {
+    const screen = CLAUDE_WRAPPED_RESOURCE_QUESTION.replace(/│ [\s\S]*?\n\n❯/u, `${prompt}\n\n❯`);
+    const parsed = manual(inspectNativeQuestionnaire({ agent: "claude", version: "2.1.295", screen }));
+    assert.equal(parsed.reason, "secret_input");
+    assert.deepEqual(parsed.action_plan, { kind: "manual_only" });
+  }
+});
+
+test("Claude framed multiline prompt is preserved when the custom text row owns input", () => {
+  const screen = CLAUDE_WRAPPED_RESOURCE_QUESTION
+    .replace("❯ 1.", "  1.")
+    .replace("  3. Type something.", "❯ 3. Type something.")
+    .replace("↑/↓ to navigate · Esc", "↑/↓ to navigate · ctrl+g to edit in Vim · Esc");
+  const parsed = actionable(inspectNativeQuestionnaire({ agent: "claude", version: "2.1.295", screen }));
+  assert.equal(parsed.question.response_kind, "free_text");
+  assert.match(parsed.question.prompt, /1\.0\.5、skill\/mp-frontend-repo-map/u);
+  assert.equal(parsed.prompt_evidence.exact_region, screen);
+  assert.deepEqual(parsed.action_plan, {
+    kind: "free_text", stages: [
+      { kind: "answer_text", single_line: true, max_characters: 799 },
+      { kind: "key", key: "C-m" }
+    ]
+  });
+  assert.notEqual(inspectNativeQuestionnaire({
+    agent: "claude", version: "2.1.295",
+    screen: screen.replace("❯ 3. Type something.", "  3. Type something.")
+  }).status, "actionable");
 });
 
 test("Claude exact multi-select is detected but mutation fails closed", () => {
