@@ -428,6 +428,8 @@ export function isSecretQuestion(
 ): boolean {
   return explicitSecret === true ||
     SECRET_INPUT_PATTERN.test(question.prompt) ||
+    // A terminal wrap must not hide a sensitive word split across prompt rows.
+    SECRET_INPUT_PATTERN.test(question.prompt.replaceAll("\n", "")) ||
     question.options?.some((option) =>
       SECRET_INPUT_PATTERN.test(option.label) ||
       (option.description !== undefined &&
@@ -601,6 +603,33 @@ function lastIndexMatching(
   return -1;
 }
 
+function parseClaudePrompt(
+  lines: readonly string[],
+  headerIndex: number,
+  before: number
+): { prompt: string; optionStart: number } | undefined {
+  if (headerIndex < 0) return undefined;
+  const start = headerIndex + (lines[headerIndex + 1] === "" ? 2 : 1);
+  const first = lines[start] ?? "";
+  if (!first || first !== first.trim() || start >= before) return undefined;
+  if (!first.startsWith("│")) {
+    return { prompt: first, optionStart: start + (lines[start + 1] === "" ? 2 : 1) };
+  }
+  // Observed Claude 2.1.295 multiline question: every row has the same rail,
+  // followed by a blank boundary before numbered options. Never consume an
+  // unframed continuation or let option text become part of the question.
+  const rows: string[] = [];
+  let end = start;
+  while (end < before && lines[end]?.startsWith("│")) {
+    const row = /^│ (\S.*)$/u.exec(lines[end] ?? "");
+    if (!row?.[1]) return undefined;
+    rows.push(row[1]);
+    end += 1;
+  }
+  if (rows.length === 0 || lines[end] !== "" || end + 1 >= before) return undefined;
+  return { prompt: rows.join("\n"), optionStart: end + 1 };
+}
+
 function parseClaudeChoiceRegion(
   lines: readonly string[]
 ): ClaudeChoiceRegion | undefined {
@@ -624,19 +653,16 @@ function parseClaudeChoiceRegion(
   const parsedHeader = start >= 0
     ? parseClaudeHeader(lines[start] ?? "")
     : undefined;
-  const hasHeaderGap = lines[start + 1] === "";
-  const promptIndex = start + (hasHeaderGap ? 2 : 1);
-  const prompt = lines[promptIndex] ?? "";
-  const optionStart = promptIndex + (lines[promptIndex + 1] === "" ? 2 : 1);
+  const parsedPrompt = parseClaudePrompt(lines, start, separatorIndex);
   if (
     !parsedHeader ||
-    prompt.length === 0 ||
-    prompt !== prompt.trim() ||
+    !parsedPrompt ||
     (parsedHeader.totalSteps === 1) !==
       (footer === CLAUDE_SINGLE_SELECTION_FOOTER)
   ) {
     return undefined;
   }
+  const { prompt, optionStart } = parsedPrompt;
   const optionLines = lines.slice(optionStart, separatorIndex);
   const multiSelect = optionLines.some((line) =>
     /^(?:❯ |  )[1-9]\d*\. \[(?: |✔)\] /u.test(line)
@@ -828,13 +854,13 @@ function parseClaudeCustomTextEdit(
   }
   const start = lastIndexMatching(lines, (line) => parseClaudeHeader(line) !== undefined, editIndex);
   const header = start >= 0 ? parseClaudeHeader(lines[start] ?? "") : undefined;
-  const promptIndex = start + (lines[start + 1] === "" ? 2 : 1);
-  const prompt = lines[promptIndex] ?? "";
-  const optionStart = promptIndex + (lines[promptIndex + 1] === "" ? 2 : 1);
   const footerGap = lines[editIndex - 1] === "" ? 1 : 0;
   const chatIndex = editIndex - 1 - footerGap;
   const chat = /^  ([1-9]\d*)\. Chat about this$/u.exec(lines[chatIndex] ?? "");
   const separatorIndex = chatIndex - 1;
+  const parsedPrompt = parseClaudePrompt(lines, start, separatorIndex);
+  if (!parsedPrompt) return undefined;
+  const { prompt, optionStart } = parsedPrompt;
   const options = parseClaudeOptionLines(
     lines.slice(optionStart, separatorIndex),
     "single_select"
@@ -842,8 +868,6 @@ function parseClaudeCustomTextEdit(
   if (
     !header ||
     header.finalReview ||
-    prompt.length === 0 ||
-    prompt !== prompt.trim() ||
     !chat?.[1] ||
     !/^\u2500{8,}$/u.test(lines[separatorIndex] ?? "") ||
     !options ||

@@ -19,7 +19,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.21** pins AKK **0.16.9** in its package and lockfile,
+Connector **0.1.0-rc.22** pins AKK **0.16.10** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the 0.165.0 adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
@@ -72,8 +72,8 @@ Headless/one-shot Harness processes, Windows named pipes, and DSH Desktop's
 embedded launcher are outside this connector's validated scope. Existing Codex CLI backend and Desktop connections need no
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
-see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.9/README.md#compatibility) and the
-[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.9/docs/pi-dsh-compatibility.md). This connector does
+see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.10/README.md#compatibility) and the
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.10/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
 
 ## Demo
@@ -137,7 +137,7 @@ can select an older `latest` build.
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
 Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.21`.
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.22`.
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
@@ -447,7 +447,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.21
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.22
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -475,10 +475,10 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.9`; building the current repository
+tests against its pinned AKK runtime `0.16.10`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
-[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.9/CONTRIBUTING.md#coordinated-package-releases);
+[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.10/CONTRIBUTING.md#coordinated-package-releases);
 the registry-based `npm ci` above requires that exact core to be published.
 Testing connector changes against another AKK runtime requires an explicit
 dependency change and
@@ -486,7 +486,7 @@ compatibility review rather than an implicit local link.
 
 ## Tests and release status
 
-Connector **`0.1.0-rc.21`** pins AKK **`0.16.9`** and its synchronized Skill.
+Connector **`0.1.0-rc.22`** pins AKK **`0.16.10`** and its synchronized Skill.
 Its Host tools explicitly opt into compact List **v5**, removing derived usage
 prose and duplicate IDs while preserving exact selectors, readable states,
 dynamic action inputs, current blockers and bounded pagination. An explicit
@@ -649,7 +649,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.21` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.22` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -694,7 +694,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.21
+npm run release:check -- --publish --confirm-version 0.1.0-rc.22
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
