@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock-deepseek-harness",
-  "version": "0.1.0-rc.21",
+  "version": "0.1.0-rc.22",
   "description": "Delegate from DeepSeek Harness Web to existing Codex CLI, Codex Desktop and Claude Code sessions with progress and completion callbacks.",
   "license": "MIT",
   "type": "module",
@@ -64,7 +64,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.2",
-    "@scotthuang/agent-knock-knock": "0.16.9",
+    "@scotthuang/agent-knock-knock": "0.16.10",
     "ajv": "8.20.0"
   },
   "devDependencies": {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.10 / Pi 0.1.0-poc.18 / DeepSeek Harness 0.1.0-rc.22 — 2026-10-31
+
+- Recognize the complete framed multiline prompt in supported Claude Code terminal questionnaires, including the custom-text entry state. Preserve all prompt rows, semantic option selection and the original screen fingerprint instead of mistaking a wrapped question row for an option.
+- Require contiguous framing and a blank boundary before options; retain header, footer, numbering, cursor, option-count and input-ownership checks. Check sensitive words across line wraps. Unproven shapes and multi-select mutation remain manual; this does not add Claude native-peer response support.
+- Include the PR #494 captured-question regression and its existing isolated Claude 2.1.295 terminal-response evidence. No new production task or external-channel delivery claim is made by this release.
+- Publish coordinated Pi and DSH connectors pinned to core **0.16.10**, retaining their existing Host compatibility ranges, synchronized Skills and prerelease `next` tags.
+
 ## 0.16.9 / Pi 0.1.0-poc.17 / DeepSeek Harness 0.1.0-rc.21 — 2026-10-31
 
 - Explain Codex delivery failures with allowlisted stage, decoded target, dispatch certainty, fallback outcome and native RPC method/code. Preserve diagnostics and recovery guidance in durable Send receipts without exposing raw backend errors, prompts or private paths.
