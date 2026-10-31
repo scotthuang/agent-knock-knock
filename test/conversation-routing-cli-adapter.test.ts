@@ -6,7 +6,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { dispatchRoutedConversationCli, backendPreflightUnavailable } from "../src/conversation-routing-cli-adapter.js";
 import { conversationCommandPolicy } from "../src/conversation-routing-commands.js";
-import { runCliCommandExecution } from "../src/cli-runtime-context.js";
+import { runCliCommandExecution, writeCliStdout } from "../src/cli-runtime-context.js";
+import { codexNativeListForCli } from "../src/codex-native-cli-adapter.js";
 import { createCodexNativeRuntime, type CodexNativeClientPort } from "../src/codex-native-runtime.js";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { CodexNativeError, type CodexNativeSnapshot } from "../src/codex-native-types.js";
@@ -47,6 +48,9 @@ function fixture(t: { after(fn: () => void): void }) {
     const result = await runCliCommandExecution(command, options, { cwd: root, env: { HOME: root, AKK_RUNTIME_DIR: runtimeDir }, runtimeLog() {},
       createCodexNativeRuntime: configuration => createCodexNativeRuntime({ ...configuration, clientFactory: async () => client }) },
     async () => {
+      if (command === "codex-cli-list") {
+        writeCliStdout(JSON.stringify(await codexNativeListForCli(options))); return;
+      }
       assert.equal(await dispatchRoutedConversationCli(command, options, {
         async terminals(_options, targetId) { scans++; scannedTargets.push(targetId); beforeScan?.(scans); return [row]; },
         async execute(selectedCommand, selectedOptions) {
@@ -287,18 +291,57 @@ test("backend callback failure never selects terminal, and busy backend is left 
 
 test("unknown native mutation pins backend and cannot fall back on a later retry", async t => {
   const f = fixture(t); f.executionFailure = new CodexNativeError("timeout", "lost acknowledgement", "unknown");
-  await assert.rejects(f.run("send", f.nativeId), /lost acknowledgement/);
+  await assert.rejects(f.run("send", f.nativeId), (error: any) => {
+    assert.equal(error.diagnostics.stage, "rpc_dispatch");
+    assert.equal(error.diagnostics.dispatch_state, "unknown");
+    assert.match(error.message, /Check the existing task receipt/);
+    assert.doesNotMatch(error.message, /Refresh AKK List/);
+    return true;
+  });
   f.failure = Object.assign(new Error("offline"), { code: "ENOENT" });
   await assert.rejects(f.run("send", f.nativeId), /lost acknowledgement/);
   assert.equal(f.scans, 2); assert.deepEqual(f.calls.map(call => call.options.conversation), [f.nativeId, f.nativeId]);
+  f.failure = undefined;
+  const list = await f.run("codex-cli-list", f.nativeId);
+  assert.equal(list.codex_cli_sessions[0].routing_health.backend, "loaded");
+  assert.equal(list.codex_cli_sessions[0].routing_health.last_failure.dispatch_state, "unknown");
+  assert.deepEqual(list.codex_cli_sessions[0].routing_health.recovery_actions, ["check_existing_receipt_before_resend"]);
 });
 
 test("same cwd and old startup UUID do not authorize native-offline terminal fallback", async t => {
   const f = fixture(t); f.failure = new CodexNativeError("closed", "offline");
   delete f.row.native_agent_session_id;
   f.row.command = `codex resume ${uuid}`;
-  await assert.rejects(f.run("send", f.nativeId), /no unique verified terminal fallback/);
+  await assert.rejects(f.run("send", f.nativeId), (error: any) => {
+    assert.match(error.message, /no unique verified terminal fallback/);
+    assert.deepEqual(error.diagnostics, {
+      stage: "fallback_scan", target_thread_id: uuid, dispatch_state: "not_sent",
+      fallback: "no_match", reason: "closed", recent_list_match: "not_checked"
+    });
+    assert.match(error.message, /Refresh AKK List.*conversation_id/);
+    assert.ok(!error.message.includes(f.storeDir));
+    return true;
+  });
   assert.equal(f.calls.length, 0);
+});
+
+test("a mistyped native ID names its decoded thread and its mismatch with the last List without rerouting", async t => {
+  const f = fixture(t);
+  await f.run("codex-cli-list", f.nativeId);
+  const identity = JSON.parse(Buffer.from(f.nativeId.split(":")[2], "base64url").toString());
+  const mistypedThread = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa";
+  const target = createCodexNativeConversationId({ codexHome: identity[0], threadId: mistypedThread });
+  f.failure = new CodexNativeError("rpc_error", "Codex backend rejected the native request", "not_sent", -32602);
+  await assert.rejects(f.run("send", target), (error: any) => {
+    assert.equal(error.diagnostics.stage, "backend_precheck");
+    assert.equal(error.diagnostics.target_thread_id, mistypedThread);
+    assert.equal(error.diagnostics.rpc_code, -32602);
+    assert.equal(error.diagnostics.recent_list_match, "no_match");
+    assert.match(error.message, /decoded thread.*aaaaaaaa.*does not match any session in the recent List/);
+    assert.equal(error.diagnostics.fallback, "not_checked");
+    return true;
+  });
+  assert.deepEqual(f.calls, []);
 });
 
 test("Status, Watch and permission operations resolve an idle alias before backend dispatch", async t => {

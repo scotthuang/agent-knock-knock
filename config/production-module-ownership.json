@@ -907,6 +907,14 @@
       "owner": "terminal-dispatch-core"
     },
     {
+      "path": "src/codex-routing-diagnostic-cache.ts",
+      "owner": "codex-native"
+    },
+    {
+      "path": "src/codex-routing-diagnostics.ts",
+      "owner": "codex-native"
+    },
+    {
       "path": "src/codex-running-executable.ts",
       "owner": "terminal-runtime-composition"
     },

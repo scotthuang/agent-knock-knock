@@ -1,4 +1,5 @@
 import path from "node:path";
+import { codexDeliveryDiagnostics, codexDeliveryFailureMessage } from "./codex-routing-diagnostics.js";
 import { connectCodexUnixWebSocket, type CodexAppServerReadTransport } from "./codex-app-server-transport.js";
 import { parseCodexAppServerMetadata } from "./codex-app-server-read-client.js";
 import { CodexNativeError, type CodexNativeClientOptions, type CodexNativeMetadata } from "./codex-native-types.js";
@@ -40,18 +41,18 @@ export class CodexNativeRpc {
     this.listeners.add(listener); return () => this.listeners.delete(listener);
   }
   call(method: string, params: unknown, mutation = false): Promise<unknown> {
-    if (this.closed) return Promise.reject(new CodexNativeError("closed", "Codex native connection closed"));
-    if (this.pending.size >= 100) return Promise.reject(new CodexNativeError("invalid_argument", "Too many native requests"));
+    if (this.closed) return Promise.reject(rpcContextError(new CodexNativeError("closed", "Codex native connection closed"), { method, params, mutation }));
+    if (this.pending.size >= 100) return Promise.reject(rpcContextError(new CodexNativeError("invalid_argument", "Too many native requests"), { method, params, mutation }));
     const id = `akk-native-${++this.sequence}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new CodexNativeError("timeout", `Codex native ${method} timed out`, mutation ? "unknown" : "not_sent"));
+        reject(rpcContextError(new CodexNativeError("timeout", `Codex native ${method} timed out`, mutation ? "unknown" : "not_sent"), { method, params, mutation }));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer, mutation, method, params });
       try { this.transport.send(JSON.stringify({ id, method, params })); }
       catch { clearTimeout(timer); this.pending.delete(id);
-        reject(new CodexNativeError("closed", "Codex native send failed", mutation ? "unknown" : "not_sent")); }
+        reject(rpcContextError(new CodexNativeError("closed", "Codex native send failed", mutation ? "unknown" : "not_sent"), { method, params, mutation })); }
     });
   }
   respond(id: string | number, result: unknown): void {
@@ -78,12 +79,12 @@ export class CodexNativeRpc {
     this.pending.delete(raw.id); clearTimeout(pending.timer);
     if (responseError) pending.reject(nativeRpcError(responseError, pending));
     else if (Object.hasOwn(raw, "result")) pending.resolve(raw.result);
-    else pending.reject(new CodexNativeError("invalid_response", "Native response omitted result", pending.mutation ? "unknown" : "not_sent"));
+    else pending.reject(rpcContextError(new CodexNativeError("invalid_response", "Native response omitted result", pending.mutation ? "unknown" : "not_sent"), pending));
   }
   private finish(error: CodexNativeError): void {
     if (this.closed) return; this.closed = true;
     for (const p of this.pending.values()) {
-      clearTimeout(p.timer); p.reject(new CodexNativeError(error.code, error.message, p.mutation ? "unknown" : "not_sent"));
+      clearTimeout(p.timer); p.reject(rpcContextError(new CodexNativeError(error.code, error.message, p.mutation ? "unknown" : "not_sent"), p));
     }
     this.pending.clear(); this.listeners.clear(); this.unlisten.forEach(stop => stop());
   }
@@ -98,9 +99,17 @@ function nativeRpcError(error: Record<string, unknown>, pending: Pending): Codex
   const unmaterializedSubscription = pending.method === "thread/resume" && code === -32600 && typeof threadId === "string"
     && error.message === `no rollout found for thread id ${threadId}`;
   // Raw RPC error messages can contain prompts and private paths. Keep them local to the server.
-  return new CodexNativeError(unmaterialized ? "unmaterialized_thread" : unmaterializedSubscription ? "unmaterialized_subscription"
+  return rpcContextError(new CodexNativeError(unmaterialized ? "unmaterialized_thread" : unmaterializedSubscription ? "unmaterialized_subscription"
     : unsupported ? "unsupported_capability" : "rpc_error",
     unmaterializedSubscription ? "Codex native subscription requires materialized task history"
       : unsupported ? "Codex backend does not expose this native capability" : "Codex backend rejected the native request",
-    pending.mutation && code !== -32601 && code !== -32602 ? "unknown" : "not_sent", code);
+    pending.mutation && code !== -32601 && code !== -32602 ? "unknown" : "not_sent", code), pending);
+}
+
+function rpcContextError(error: CodexNativeError, pending: Pick<Pending, "method" | "params" | "mutation">): CodexNativeError {
+  error.rpcMethod = pending.method;
+  const threadId = pending.params && typeof pending.params === "object" ? (pending.params as Record<string, unknown>).threadId : undefined;
+  error.diagnostics = codexDeliveryDiagnostics(error, threadId, pending.mutation ? "rpc_dispatch" : "backend_precheck");
+  error.message = codexDeliveryFailureMessage(error.message, error.diagnostics);
+  return error;
 }

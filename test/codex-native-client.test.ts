@@ -47,6 +47,30 @@ function baseHandler(m: Message): unknown {
   throw new Error(`Unexpected ${m.method}`);
 }
 
+test("native RPC failures expose only safe request context and distinguish unknown dispatch from read rejection", async () => {
+  for (const [method, code, state] of [["thread/read", -32602, "not_sent"], ["turn/start", -32000, "unknown"]] as const) {
+    const f = new Fixture();
+    f.handler = m => {
+      if (m.method !== method) return baseHandler(m);
+      f.emit({ id: m.id, error: { code, message: "SECRET_PROMPT /private/customer/file", data: { token: "SECRET_TOKEN" } } });
+      return undefined;
+    };
+    const c = await connect(f);
+    try {
+      await assert.rejects(method === "thread/read" ? c.readSnapshot(THREAD)
+        : c.start(THREAD, { text: "SECRET_TASK", clientUserMessageId: "submission" }), (error: CodexNativeError) => {
+        assert.deepEqual(error.diagnostics, {
+          stage: method === "thread/read" ? "backend_precheck" : "rpc_dispatch", target_thread_id: THREAD,
+          dispatch_state: state, fallback: "not_checked", reason: "rpc_error", rpc_method: method, rpc_code: code
+        });
+        assert.match(error.message, state === "unknown" ? /Check the existing task receipt\/Watch.*do not resend blindly/ : /Refresh AKK List/);
+        assert.doesNotMatch(JSON.stringify(error) + error.message, /SECRET|\/private\/customer/);
+        return true;
+      });
+    } finally { c.close(); }
+  }
+});
+
 test("native discovery is read-only, accepts contract-valid newer backends, and never resumes history", async () => {
   const f = new Fixture(); f.loaded.push("child", "desktop");
   f.handler = m => ({ thread: thread("idle", { id: m.params.threadId, sessionId: m.params.threadId,

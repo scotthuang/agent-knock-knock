@@ -1,4 +1,5 @@
 import type { CodexAppServerReadTransport } from "./codex-app-server-transport.js";
+import type { CodexDeliveryDiagnostics } from "./codex-routing-diagnostics.js";
 import type { CodexAppServerMetadata, CodexAppServerThread, CodexAppServerThreadItem } from "./codex-app-server-read-client.js";
 
 export interface CodexNativeIdentity { codexHome: string; threadId: string }
@@ -65,6 +66,8 @@ export interface CodexNativeClientOptions {
 }
 export type CodexNativeDispatchState = "not_sent" | "unknown" | "accepted";
 export class CodexNativeError extends Error {
+  diagnostics?: CodexDeliveryDiagnostics;
+  rpcMethod?: string;
   constructor(public readonly code: "invalid_response" | "invalid_argument" | "timeout" | "closed" | "rpc_error"
     | "thread_not_loaded" | "thread_not_idle" | "unsupported_thread" | "stale_interaction"
     | "unsupported_capability" | "pagination_limit" | "duplicate_submission" | "unmaterialized_thread" | "unmaterialized_subscription",

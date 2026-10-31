@@ -8,6 +8,7 @@ import { isCodexNativeWatchId, parseCodexNativeConversationId } from "./codex-na
 export { isCodexNativeWatchId } from "./codex-native-identity.js";
 import { createNativeRecordRepository, type NativeRecordRepository } from "./codex-native-record-store.js";
 import type { CodexNativeIdentity, NativeInteraction } from "./codex-native-types.js";
+import type { CodexDeliveryDiagnostics } from "./codex-routing-diagnostics.js";
 
 export type CodexNativeTaskStatus = "awaiting_acceptance" | "watching" | "completed" |
   "failed" | "interrupted" | "timed_out" | "cancelled";
@@ -20,6 +21,7 @@ export interface CodexNativeSendIntent {
   dispatched_at: string;
   receipt_turn_id?: string;
   error_code?: string;
+  diagnostics?: CodexDeliveryDiagnostics;
   /** Proven before task submission; persisted under the same message reservation lock. */
   failure_stage?: "native_preflight";
 }

@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createCodexNativeConversationId } from "../src/codex-native-identity.js";
 import { associateConversationRoutes, proveNativeTerminalRoute, resolveNativeTerminalRoute, withClosedStatusInspection } from "../src/conversation-routing-identity.js";
+import { unifiedConversationList } from "../src/conversation-list.js";
+import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
+import { codexRoutingHealth } from "../src/codex-routing-diagnostics.js";
 
 const home = "/fixture/codex", thread = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", other = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const nativeId = createCodexNativeConversationId({ codexHome: home, threadId: thread });
@@ -15,6 +18,24 @@ function native(extra: Record<string, unknown> = {}) {
   return { id: nativeId, conversation_id: nativeId, native_thread_id: thread, source: "codex_cli", agent: "codex",
     connection_state: "loaded_backend_verified", cwd: "/project", ...extra };
 }
+
+test("List retains independent backend and fallback health in both public formats without disabling a native-only route", () => {
+  for (const version of [4, 5] as const) for (const [terminals, fallback] of [
+    [[], "no_match"], [[terminal()], "unique_verified"],
+    [[terminal(), terminal({ id: "terminal:v2:tmux:codex:other:0.0:124", pid: 124 })], "multiple_matches"]
+  ] as const) {
+    const row = native({ capabilities: { send: true }, detail_scan: "deferred",
+      routing_health: { ...codexRoutingHealth("loaded", "discovery", "2026-10-31T01:00:00Z"), message: "SECRET" } });
+    const raw = unifiedConversationList({ codex_cli_sessions: [row], terminals }, terminals);
+    const output = compactAkkListModelProjection(raw, { listProjectionVersion: version });
+    const projected = (output.conversations as any[]).find(item => item.conversation_id === nativeId);
+    assert.equal(projected.routing_health.backend, "loaded");
+    assert.equal(projected.routing_health.fallback, fallback);
+    assert.equal(projected.capabilities.send, true);
+    assert.deepEqual(projected.routing_health.recovery_actions, []);
+    assert.doesNotMatch(JSON.stringify(projected.routing_health), /SECRET/);
+  }
+});
 
 test("routing merges only the matching resolved physical native identity and backend home", () => {
   const result = associateConversationRoutes([terminal()], [native(), native({

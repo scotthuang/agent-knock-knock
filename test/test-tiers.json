@@ -201,6 +201,7 @@
     "test/terminal-permission-control-bridge.test.ts",
     "test/codex-native-cli-adapter.test.ts",
     "test/codex-native-client.test.ts",
+    "test/codex-routing-diagnostic-cache.test.ts",
     "test/codex-native-public-projection.test.ts",
     "test/codex-native-response-service.test.ts",
     "test/codex-native-runtime.test.ts",

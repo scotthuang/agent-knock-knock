@@ -14,6 +14,8 @@ import { launchCodexNativeMonitor, runCodexNativeMonitor } from "./codex-native-
 import { codexNativeDiscoveryProjection, codexNativeSessionProjection, codexNativeTaskProjection, nativeQuestionResponse } from "./codex-native-public-projection.js";
 import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { CodexNativeError, type CodexNativeIdentity, type CodexNativePermissionPreset, type NativeInteractionResponse } from "./codex-native-types.js";
+import { codexDeliveryDiagnostics, codexRoutingHealth } from "./codex-routing-diagnostics.js";
+import { createCodexRoutingDiagnosticCache } from "./codex-routing-diagnostic-cache.js";
 
 type Options = Record<string, unknown>;
 type Runtime = ReturnType<typeof createCodexNativeRuntime>;
@@ -56,9 +58,21 @@ function discoveryHistoryGroups(entries: readonly CodexNativeCatalogEntry[]): Se
 export async function codexNativeListForCli(options: Options): Promise<Record<string, unknown>> {
   if (options.agent && options.agent !== "codex") return { codex_cli_sessions: [], codex_cli_scan: { status: "filtered" } };
   const runtime = runtimeFor(options);
+  const configuration = codexNativeRuntimeOptions(options);
+  const cache = createCodexRoutingDiagnosticCache(configuration.storeDir, cliNow);
   try {
     const discovery = await runtime.catalog.discover();
-    const rows: Array<ReturnType<typeof codexNativeSessionProjection> | ReturnType<typeof codexNativeDiscoveryProjection>> = [];
+    for (const home of configuration.codexHomes) cache.rememberList(home,
+      discovery.sessions.filter(entry => entry.codexHome === home).map(entry => entry.threadId),
+      !discovery.errors.some(error => error.codexHome === home));
+    const rows: Record<string, unknown>[] = [];
+    const addRow = (row: Record<string, unknown>, entry: CodexNativeCatalogEntry, depth: "discovery" | "snapshot", error?: unknown) => {
+      const observedAt = cliNow().toISOString();
+      const failure = error === undefined ? cache.lastFailure(entry.codexHome, entry.threadId)
+        : { ...codexDeliveryDiagnostics(error, entry.threadId, "backend_precheck"), observed_at: observedAt };
+      rows.push({ ...row, routing_health: codexRoutingHealth(error !== undefined ? "check_failed"
+        : row.connection_state === "loaded_backend_verified" ? "loaded" : "unavailable", depth, observedAt, failure) });
+    };
     const errors = [...discovery.errors];
     const historyGroups = discoveryHistoryGroups(discovery.sessions);
     for (const entry of discovery.sessions) {
@@ -67,13 +81,15 @@ export async function codexNativeListForCli(options: Options): Promise<Record<st
           if (!options.status || options.status === entry.thread.status.type ||
               options.status === "working" && entry.thread.status.type === "active") {
             let row = codexNativeDiscoveryProjection(entry, entry.thread, entry.backendVersion);
+            let depth: "discovery" | "snapshot" = "discovery", readError: unknown;
             if (historyGroups.has(discoveryGroup(entry))) {
               try {
                 const snapshot = await (await runtime.clientFor(entry)).readSnapshot(entry.threadId);
                 row = codexNativeDiscoveryProjection(entry, snapshot.thread, entry.backendVersion, snapshot);
-              } catch (error) { errors.push({ codexHome: entry.codexHome, error_code: nativeErrorCode(error) }); }
+                depth = "snapshot";
+              } catch (error) { readError = error; errors.push({ codexHome: entry.codexHome, error_code: nativeErrorCode(error) }); }
             }
-            rows.push(row);
+            addRow(row, entry, depth, readError);
           }
           continue;
         }
@@ -81,7 +97,7 @@ export async function codexNativeListForCli(options: Options): Promise<Record<st
         const snapshot = await client.readSnapshot(entry.threadId);
         if (options.status && options.status !== snapshot.thread.status.type &&
           !(options.status === "working" && snapshot.thread.status.type === "active")) continue;
-        rows.push(codexNativeSessionProjection(entry, snapshot, entry.backendVersion));
+        addRow(codexNativeSessionProjection(entry, snapshot, entry.backendVersion), entry, "snapshot");
       } catch (error) { errors.push({ codexHome: entry.codexHome, error_code: nativeErrorCode(error) }); }
     }
     return { codex_cli_sessions: rows,

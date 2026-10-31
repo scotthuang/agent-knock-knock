@@ -64,6 +64,12 @@ test("native List discovery reads no task snapshots and Status retains fresh det
     assert.equal(row.capabilities.send, state === "idle");
     assert.equal(row.capabilities.watch, state === "active");
     assert.equal(row.detail_scan, "deferred");
+    assert.equal(row.routing_health.backend, "loaded");
+    assert.equal(row.routing_health.fallback, "not_checked");
+    assert.equal(row.routing_health.check_depth, "discovery");
+    assert.equal(row.routing_health.last_failure, null);
+    assert.deepEqual(row.routing_health.recovery_actions, []);
+    assert.ok(Number.isFinite(Date.parse(row.routing_health.observed_at)));
     assert.equal(row.interaction_requests_scanned, false);
     assert.equal(row.pending_interaction_count, null);
     assert.equal(row.native_turn_id, undefined, "a thread activity flag is not an exact task anchor");
@@ -100,6 +106,8 @@ test("default native List retains exact empty-candidate folding only for ambiguo
   assert.equal(subscriptions, 0);
   const rows = result.codex_cli_sessions;
   assert.equal(rows[0].unstarted_thread, true);
+  assert.equal(rows[0].routing_health.check_depth, "snapshot");
+  assert.equal(rows[2].routing_health.check_depth, "discovery");
   assert.equal(rows[0].history_state, "unmaterialized");
   assert.equal(rows[0].native_turn_id, null);
   assert.equal(rows[0].latest_turn, null);
@@ -131,6 +139,8 @@ test("ambiguous native discovery preserves visible rows when history is unavaila
     assert.equal(presented.conversations.length, 2);
     assert.equal(presented.conversation_presentation.unstarted_candidates_omitted, undefined);
     assert.ok(result.codex_cli_sessions.every(row => row.native_turn_id === undefined && row.unstarted_thread === undefined));
+    assert.ok(result.codex_cli_sessions.every(row => row.routing_health.backend === "check_failed"
+      && row.routing_health.check_depth === "discovery" && row.routing_health.last_failure.reason === "backend_check_failed"));
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE_READ_FAILURE|different-thread/u);
     assert.equal(f.sends, 0); assert.equal(f.callbacks, 0);
   });

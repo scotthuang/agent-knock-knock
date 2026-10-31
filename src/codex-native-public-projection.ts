@@ -1,4 +1,5 @@
 import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
+import { parseCodexDeliveryDiagnostics, codexRecoveryActions } from "./codex-routing-diagnostics.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { isLoadedEmptyCodexCliSnapshot } from "./codex-native-client.js";
 import { createHash } from "node:crypto";
@@ -250,7 +251,9 @@ function nativeTaskCapabilities(task: CodexNativeTaskRecord, active: boolean, st
 function sendReceiptProjection(task: CodexNativeTaskRecord, active: boolean, awaitingAnchor: boolean) {
   const intent = task.send_intent;
   if (!intent) return undefined;
+  const diagnostics = parseCodexDeliveryDiagnostics(intent.diagnostics);
   return { message_id: intent.message_id, delivered: intent.state === "accepted", send_state: intent.state,
+    ...(diagnostics ? { send_diagnostics: diagnostics, send_recovery_actions: codexRecoveryActions(diagnostics) } : {}),
     ...(intent.failure_stage === "native_preflight" ? { failure_stage: intent.failure_stage, request_dispatched: false } : {}),
     submission_state: intent.state === "accepted" && task.native_turn_id ? "verified" : intent.receipt_turn_id ? "acknowledged"
       : intent.state === "not_sent" ? "not_sent" : intent.state === "reserved" ? "reserved" : "unknown",
