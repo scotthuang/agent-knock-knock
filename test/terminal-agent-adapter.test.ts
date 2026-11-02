@@ -51,7 +51,7 @@ const FOLDER_ACCESS = [
   "  enter continue · esc back"
 ].join("\n");
 
-for (const version of ["0.164.0", "0.165.0"]) test(`${version} folder trust owns input without granting approval actions`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0"]) test(`${version} folder trust owns input without granting approval actions`, () => {
   const restricted = FOLDER_ACCESS.replace(
     /  Trust this folder\?[\s\S]+?Your trust decision will be saved\./u,
     "  Config, hooks, and exec policies from untrusted folders stay disabled.\n" +

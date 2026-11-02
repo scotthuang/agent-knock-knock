@@ -422,3 +422,29 @@ test("pending file approvals remain answerable before canonical file items mater
     } finally { c.close(); }
   }
 });
+
+test("0.166 flat item lifecycle times preserve exact paginated task identity", async () => {
+  const f = new Fixture(); f.serverVersion = "0.166.0";
+  f.handler = m => {
+    if (m.method === "thread/read") return { thread: thread("active") };
+    if (m.method === "thread/turns/list") return page([turn(TURN, "inProgress")]);
+    if (m.method === "thread/items/list") return page([entry(TURN, {
+      id: "public-timestamped", type: "agentMessage", phase: "commentary", text: "Checking compatibility",
+      startedAtMs: 1793570400000, completedAtMs: null
+    })]);
+    throw new Error(`Unexpected ${m.method}`);
+  };
+  const c = await connect(f);
+  try {
+    const snapshot = await c.readSnapshot(THREAD, TURN);
+    assert.equal(snapshot.selectedTurn?.id, TURN);
+    assert.equal(snapshot.selectedTurn?.status, "inProgress");
+    assert.equal(snapshot.selectedTurn?.items[0]?.startedAtMs, 1793570400000);
+    assert.equal(snapshot.selectedTurn?.items[0]?.completedAtMs, null);
+    assert.equal(snapshot.canSend, false);
+    f.handler = m => m.method === "thread/items/list" ? page([entry("other-turn", {
+      id: "foreign", type: "agentMessage", text: "wrong task", startedAtMs: 1793570400000
+    })]) : m.method === "thread/read" ? { thread: thread("active") } : page([turn(TURN, "inProgress")]);
+    await assert.rejects(c.readSnapshot(THREAD, TURN), (e: CodexNativeError) => e.code === "invalid_response");
+  } finally { c.close(); }
+});

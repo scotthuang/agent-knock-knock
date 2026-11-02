@@ -176,7 +176,7 @@ test("0.165 native Terra display label keeps exact slug and dynamic model positi
   assert.equal(observeCodexIdleModel(ready.replace("GPT-6.1 Terra", "GPT-6.1 Sol"), plan), undefined);
 });
 
-for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} model catalog without default badges retains current model and exact footer`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) test(`${version} model catalog without default badges retains current model and exact footer`, () => {
   const plan = planTerminalModelControl(probeTerminalModelControl("codex", version));
   const screen = [
     "  Select Model and Effort", "",
@@ -197,7 +197,7 @@ for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} model 
   ]) assert.equal(observeTerminalModelControl(plan, changed).state, "ambiguous");
 });
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0", "0.166.0"]) {
   test(`Codex ${version} native display names and compact scope footers retain canonical model ids`, async () => {
     const native = new FakeModelTerminal("codex", {
       currentModel: "gpt-5.2", currentEffort: "high",
@@ -223,7 +223,7 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0
   });
 }
 
-for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0"]) {
+for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "0.162.1", "0.164.0", "0.165.0", "0.166.0"]) {
   test(`Codex ${version} picker parser refuses changed or contradictory footer scope`, () => {
     const advanced = [
       "  Advanced Reasoning", "  ⚠ Consumes usage limits faster", "",
@@ -1674,7 +1674,7 @@ class FakeModelTerminal {
 }
 
 
-for (const version of ["0.164.0", "0.165.0"]) test(`${version} single-line footer reads explicit effort but never treats default as low`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0"]) test(`${version} single-line footer reads explicit effort but never treats default as low`, () => {
   const plan = planTerminalModelControl(probeTerminalModelControl("codex", version));
   const ready = "› Ask Codex to do anything\n\n  GPT-6.1-Sol high · /repo";
   assert.deepEqual(observeCodexIdleModel(ready, plan), {

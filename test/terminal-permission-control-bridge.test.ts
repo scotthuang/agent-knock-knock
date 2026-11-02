@@ -178,7 +178,7 @@ test("permission bridge refuses a mismatched or unreviewed runtime profile befor
 });
 
 
-for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} centered confirmation sends only on a fresh exact affirmative frame`, async () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) test(`${version} centered confirmation sends only on a fresh exact affirmative frame`, async () => {
   const native = terminal(codex1621PermissionConfirmation(), version);
   const yes = await native.ports.capture();
   assert.equal(yes.state, "full_access_confirmation");

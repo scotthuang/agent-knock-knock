@@ -17,7 +17,7 @@ ClawHub package.
 
 ClawHub requires the trusted source SHA/ref to match the running workflow. The
 workflow therefore checks that its commit descends from the artifact's original
-commit and differs only in these four non-packaged publication files. It records
+commit and differs only in the allowlisted non-packaged publication files. It records
 both commits separately. Product changes require a new validated release artifact;
 they cannot be substituted into an old immutable version.
 
@@ -45,14 +45,19 @@ versions are observed, and failed versions require inspection. Only an absent
 version permits one upload. A rerun cannot upload again; inspect the saved receipt
 and current remote state before deliberately starting a new run.
 
-After upload, it polls read-only for at most 30 minutes and then checks public
-version/latest, clean scan, the `herdr` topic and the downloaded TGZ's SHA-256.
-Pending, unknown or failed outcomes are not reported as successful publication.
-An explicit HTTP 4xx followed by an absent publication stops with a bounded,
-credential-redacted server diagnostic, rather than waiting for a nonexistent
-scan. Transport-unknown outcomes still receive read-only reconciliation.
-The uploaded receipt contains no tokens. Do not use a workflow rerun to bypass a
-failed or uncertain publication; inspect its exact remote state first.
+By default, an exact pending acknowledgement with an attempt ID finishes the
+submission step successfully as `accepted_pending`. This means ClawHub accepted
+the artifact for processing, not that scanning, `latest` or public downloading
+has completed. Existing pending attempts are also reported without uploading again.
+
+Set the manual workflow input `wait_for_publication=true` for the optional
+30-minute read-only wait and public TGZ/latest/clean/herdr verification. Published
+versions are verified directly. Unknown POST outcomes still receive bounded
+read-only reconciliation; only a confirmed pending attempt permits accepted
+submission, and neither unknown nor failed outcomes count as accepted. An
+explicit HTTP 4xx followed by absent publication fails with a redacted diagnostic.
+Receipts preserve these distinct outcomes. Never rerun an uncertain upload as
+permission to POST again; first inspect its exact remote state.
 
 Local validation: `node scripts/publish-clawhub-release.mjs` (needs the repository's
 pinned ClawHub development dependency, downloads the existing release archive,

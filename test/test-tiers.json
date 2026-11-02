@@ -243,7 +243,8 @@
     "test/claude-terminal-registry-observation.test.ts",
     "test/claude-terminal-agent-observation.test.ts",
     "test/store-owner-identity.test.ts",
-    "test/native-store-authority-transfer.test.ts"
+    "test/native-store-authority-transfer.test.ts",
+    "test/clawhub-publication-policy.test.ts"
   ],
   "integration": [
     "test/claude-native-inspection-cli.test.ts",

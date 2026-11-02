@@ -42,7 +42,7 @@ const observe = (screen: string, expectedAgentVersion = "0.159.0") => observeCod
   operation: { kind: "status" }, screen, expectedAgentVersion
 });
 
-for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
   // Public rust-v0.162.1 status/card.rs changed only this informational URL.
   // Synthetic account, path and UUID deliberately contain no local evidence.
   const screen = SCREEN.replace("v0.159.0", `v${version}`)
@@ -339,4 +339,20 @@ test("0.165 fast model footers retain idle, working and history-viewer boundarie
     assert.notEqual(inspect(`${ready}\n  New activity · Back to bottom`).activity.state, "idle");
     assert.notEqual(inspect(ready.replace("Ask Codex to do anything", "my unsent text")).activity.state, "idle");
   }
+});
+
+test("0.166 status accepts the wider workspace label, redacts it and retains exact UUID authority", () => {
+  const rows = CARD.replace("v0.159.0", "v0.166.0").split("\n").map((line) => {
+    const field = /^ {2}([^:]+): +(.+)$/u.exec(line);
+    return field ? `  ${field[1]}:${" ".repeat(20 - field[1]!.length)}${field[2]}` : line;
+  });
+  const account = rows.findIndex((line) => line.startsWith("  Account:"));
+  rows.splice(account + 1, 0, "  ChatGPT workspace:   Private Team");
+  const screen = `${rows.join("\n")}\n\n${PLAIN_COMPOSER}`;
+  const result = observe(screen, "0.166.0");
+  assert.equal(result.status, "observed");
+  assert.equal(result.nativeThreadId, THREAD);
+  assert.equal(result.result?.fields.find((field) => field.name === "ChatGPT workspace")?.value, "[REDACTED]");
+  assert.doesNotMatch(JSON.stringify(result.result), /Private Team/);
+  assert.notEqual(observe(screen.replace(THREAD, "truncated-uuid"), "0.166.0").status, "observed");
 });

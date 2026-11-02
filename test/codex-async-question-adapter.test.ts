@@ -50,7 +50,8 @@ test("Codex async-question profiles are exact and do not float to unknown versio
     "0.160.0",
     "0.162.1",
     "0.164.0",
-    "0.165.0"
+    "0.165.0",
+    "0.166.0"
   ]);
   assert.equal(
     codexAsyncQuestionProfile("0.155.1"),
@@ -164,7 +165,7 @@ test("0.160 Option question hints retain the exact native tuple and reject old o
   assert.equal(inspectCodexAsyncQuestion({ version: "0.160.0", screen }).state, "ambiguous");
 });
 
-for (const version of ["0.162.1", "0.164.0", "0.165.0"]) test(`${version} macOS symbol key hints keep question identity and exact navigation bindings`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) test(`${version} macOS symbol key hints keep question identity and exact navigation bindings`, () => {
   // Public rust-v0.162.1 key_hint.rs and question_queue_hint_{Left,Up}
   // snapshots use Control/Shift symbols without '+' on macOS.
   for (const [back, forward, backAction, forwardAction] of [
@@ -774,7 +775,7 @@ test("duplicate semantic questions remain ambiguous instead of guessing a source
 });
 
 
-for (const version of ["0.164.0", "0.165.0"] as const) test(`${version} async plain title retains native identity and rejects Markdown rendering`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0"] as const) test(`${version} async plain title retains native identity and rejects Markdown rendering`, () => {
   const screen = EXPANDED_OPTIONS.replace("Which environment should I use?", "Which environment and file should I use?")
     .replace("enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
       "enter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question");
@@ -804,7 +805,7 @@ for (const version of ["0.164.0", "0.165.0"] as const) test(`${version} async pl
   if (conflicting.state === "ambiguous") assert.equal(conflicting.reason, "question_match_ambiguous");
 });
 
-for (const version of ["0.164.0", "0.165.0"] as const) test(`${version} never drops an unproven rendered title to authorize a different pending question`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0"] as const) test(`${version} never drops an unproven rendered title to authorize a different pending question`, () => {
   const title = "Which environment should I use?";
   const screen = EXPANDED_OPTIONS.replace(
     "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
@@ -824,4 +825,27 @@ for (const version of ["0.164.0", "0.165.0"] as const) test(`${version} never dr
       });
     }
   }
+});
+
+// 0.166 async_questions/mod.rs paints suggested option labels as Markdown.
+// The screen must not collapse two native questions to the same identity.
+test("0.166 Markdown choices cannot authorize a terminal answer through a plain lookalike", () => {
+  const screen = EXPANDED_OPTIONS.replace(
+    "enter submit   ctrl + ] skip   ⌥ + ↓ main prompt   shift + ← next question",
+    "enter submit   ⌃] skip   ⇧→ main prompt   ⇧← next question"
+  );
+  assert.equal(inspectCodexAsyncQuestion({ version: "0.166.0", screen, evidence: EVIDENCE }).state, "expanded");
+  for (const label of ["**Staging**", "[Staging](https://example.test)", "~~Staging~~", "`Staging`", "Staging\nProduction"]) {
+    const changed = { ...EVIDENCE[0]!, questions: [
+      { title: EVIDENCE[0]!.questions[0]!.title, options: [label, "Production"] },
+      EVIDENCE[0]!.questions[1]!
+    ] };
+    for (const evidence of [[changed], [...EVIDENCE, { ...changed, itemId: "different-native-question" }]]) {
+      const result = inspectCodexAsyncQuestion({ version: "0.166.0", screen, evidence });
+      assert.equal(result.state, "ambiguous", label);
+      if (result.state === "ambiguous") assert.equal(result.reason, "unproven_option_rendering");
+      assert.equal("owner_private_action_plan" in result, false);
+    }
+  }
+  assert.equal(inspectCodexAsyncQuestion({ version: "0.166.1", screen, evidence: EVIDENCE }).state, "ambiguous");
 });

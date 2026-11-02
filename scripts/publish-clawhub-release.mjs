@@ -6,8 +6,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { clawhubSubmissionOutcome } from './clawhub-publication-policy.js';
 
 const registry = 'https://clawhub.ai';
+const waitForPublication = process.env.CLAWHUB_WAIT_FOR_PUBLICATION === 'true';
 const release = JSON.parse(await readFile('.github/clawhub-release.json', 'utf8'));
 const toolRoot = path.resolve(process.env.CLAWHUB_TOOL_ROOT ?? 'node_modules/clawhub/dist');
 const loadTool = (file) => import(pathToFileURL(path.join(toolRoot, file)).href);
@@ -122,7 +124,7 @@ async function main() {
   requireThat(/^[a-f0-9]{40}$/.test(sourceCommit), 'invalid_publisher_commit');
   execFileSync('git', ['merge-base', '--is-ancestor', release.commit, sourceCommit]);
   const changed = execFileSync('git', ['diff', '--name-only', release.commit, sourceCommit], { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  const publishingFiles = new Set(['.github/clawhub-release.json', '.github/workflows/clawhub-publish.yml', '.github/CLAWHUB-PUBLISH.md', 'scripts/publish-clawhub-release.mjs']);
+  const publishingFiles = new Set(['.github/clawhub-release.json', '.github/workflows/clawhub-publish.yml', '.github/CLAWHUB-PUBLISH.md', 'scripts/publish-clawhub-release.mjs', 'scripts/clawhub-publication-policy.js']);
   requireThat(changed.every((file) => publishingFiles.has(file)), 'product_changed_since_tested_release');
   const archive = await fetchBytes(`https://github.com/${release.repository}/releases/download/${tag}/${release.asset}`);
   requireThat(archive.length === release.bytes && sha256(archive) === release.sha256, 'release_archive_mismatch');
@@ -163,6 +165,8 @@ async function main() {
     try {
       const accepted = await http.apiRequestForm(registry, { method: 'POST', path: schema.ApiRoutes.packages, token, form, retryCount: 0, timeoutMs: PACKAGE_PUBLISH_REQUEST_TIMEOUT_MS }, schema.ApiV1PackagePublishResponseSchema);
       await record('upload_acknowledged', { attempt_id: accepted.attemptId ?? null, acknowledged_publication: accepted.publicationStatus ?? null });
+      const outcome = clawhubSubmissionOutcome({ state: accepted.publicationStatus, attemptId: accepted.attemptId }, waitForPublication);
+      if (outcome) return record(outcome, { public_availability_verified: false, awaiting_platform_checks: true });
     } catch (error) {
       const status = http.getHttpErrorStatus(error);
       if (status >= 400 && status < 500) rejectedStatus = status;
@@ -181,6 +185,8 @@ async function main() {
       previous = JSON.stringify(publication);
     }
     if (publication.state === 'published') return verifyPublicArtifact();
+    const outcome = clawhubSubmissionOutcome(publication, waitForPublication);
+    if (outcome) return record(outcome, { attempt_id: publication.attemptId, public_availability_verified: false, awaiting_platform_checks: true });
     requireThat(!(publication.state === 'absent' && rejectedStatus), `upload_rejected_http_${rejectedStatus}`);
     requireThat(publication.state !== 'failed', 'publication_failed_requires_review');
     await sleep(15_000);
