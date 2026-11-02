@@ -736,7 +736,7 @@ function parseCodexStatusCardAfterCommand(
       };
     }
     const name = redactCodexNativeStatusText(match[1].trim()).slice(0, 64);
-    const value = /^account$/iu.test(name)
+    const value = /^(?:account|ChatGPT workspace)$/iu.test(name)
       ? "[REDACTED]"
       : redactCodexNativeStatusText(match[2].trim())
         .slice(0, CODEX_STATUS_MAX_FIELD_VALUE_LENGTH);
@@ -821,7 +821,7 @@ function parseCodex159StatusCard(
     status: "observed", region, nativeThreadId: nativeThreadId.toLowerCase(), agentVersion,
     fields: fields.map(({ name, value }) => ({
       name: redactCodexNativeStatusText(name),
-      value: /^account$/iu.test(name) ? "[REDACTED]" : redactCodexNativeStatusText(value)
+      value: /^(?:account|ChatGPT workspace)$/iu.test(name) ? "[REDACTED]" : redactCodexNativeStatusText(value)
     }))
   };
 }

@@ -17,16 +17,17 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.160.0": "codex-tui-0.160.0",
   "0.162.1": "codex-tui-0.162.1",
   "0.164.0": "codex-tui-0.164.0",
-  "0.165.0": "codex-tui-0.165.0"
+  "0.165.0": "codex-tui-0.165.0",
+  "0.166.0": "codex-tui-0.166.0"
 });
 
-export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2" | "0.159.3" | "0.160.0" | "0.162.1" | "0.164.0" | "0.165.0";
+export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2" | "0.159.3" | "0.160.0" | "0.162.1" | "0.164.0" | "0.165.0" | "0.166.0";
 export type CodexPaginatedBackendVersion = CodexPaginatedVersion;
 
 /** Versions whose paginated history and physical TUI binding are verified together. */
 export function isCodexPaginatedVersion(value: unknown): value is CodexPaginatedVersion {
   return value === "0.158.0" || value === "0.159.0" || value === "0.159.2" ||
-    value === "0.159.3" || value === "0.160.0" || value === "0.162.1" || value === "0.164.0" || value === "0.165.0";
+    value === "0.159.3" || value === "0.160.0" || value === "0.162.1" || value === "0.164.0" || value === "0.165.0" || value === "0.166.0";
 }
 
 /**
@@ -46,16 +47,9 @@ export function isAuditedCodexPaginatedServerPair(
   agentVersion: unknown,
   serverVersion: unknown
 ): serverVersion is CodexPaginatedBackendVersion {
-  return agentVersion === "0.158.0" && serverVersion === "0.158.0" ||
-    agentVersion === "0.159.0" &&
-      (serverVersion === "0.159.0" || serverVersion === "0.159.2") ||
-    agentVersion === "0.159.2" && serverVersion === "0.159.2" ||
-    agentVersion === "0.159.3" &&
-      (serverVersion === "0.159.3" || serverVersion === "0.160.0") ||
-    agentVersion === "0.160.0" && serverVersion === "0.160.0" ||
-    agentVersion === "0.162.1" && serverVersion === "0.162.1" ||
-    agentVersion === "0.164.0" && serverVersion === "0.164.0" ||
-    agentVersion === "0.165.0" && serverVersion === "0.165.0";
+  return isCodexPaginatedVersion(agentVersion) && agentVersion === serverVersion ||
+    agentVersion === "0.159.0" && serverVersion === "0.159.2" ||
+    agentVersion === "0.159.3" && serverVersion === "0.160.0";
 }
 
 /**

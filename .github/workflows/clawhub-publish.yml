@@ -8,6 +8,11 @@ on:
         type: boolean
         default: false
 
+      wait_for_publication:
+        description: Wait for platform checks and verify public download (optional)
+        type: boolean
+        default: false
+
 concurrency:
   group: clawhub-agent-knock-knock-publication
   cancel-in-progress: false
@@ -37,6 +42,7 @@ jobs:
         env:
           CLAWHUB_TOOL_ROOT: ${{ runner.temp }}/clawhub-tools/node_modules/clawhub/dist
           CLAWHUB_PUBLISH: ${{ inputs.publish }}
+          CLAWHUB_WAIT_FOR_PUBLICATION: ${{ inputs.wait_for_publication }}
         run: node scripts/publish-clawhub-release.mjs
       - name: Preserve publication receipt (no credentials)
         if: always()

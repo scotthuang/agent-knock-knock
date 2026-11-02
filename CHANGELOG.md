@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.11 / Pi 0.1.0-poc.19 / DeepSeek Harness 0.1.0-rc.23 — 2026-11-02
+
+- Adapt reviewed Codex CLI/app-server **0.166.0** terminal profiles for status, model and permission controls, blocking questions and exact paginated observation. Preserve frontend/backend identity separation, folder-trust handling and unknown-send protection.
+- Treat Markdown-rendered async choices as ambiguous when terminal evidence cannot prove their original labels; structured backend answers retain native IDs. Redact the new ChatGPT workspace status field. Accept existing optional flat item lifecycle timestamps without substituting task identity or claiming completion.
+- Default ClawHub publication to finish after a confirmed pending attempt acknowledgement. Preserve the receipt and distinguish accepted submission from public scan/download availability; optional waiting remains available and uncertain uploads are never replayed.
+- Publish coordinated Pi/DSH connectors pinned to core **0.16.11**, retaining existing Host ranges and prerelease `next` tags.
+
 ## 0.16.10 / Pi 0.1.0-poc.18 / DeepSeek Harness 0.1.0-rc.22 — 2026-10-31
 
 - Recognize the complete framed multiline prompt in supported Claude Code terminal questionnaires, including the custom-text entry state. Preserve all prompt rows, semantic option selection and the original screen fingerprint instead of mistaking a wrapped question row for an option.
