@@ -56,7 +56,11 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-llm"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-skill"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-tools"], supportedRange);
-  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.16.10");
+  const coreManifest = JSON.parse(fs.readFileSync(
+    path.resolve(packageDirectory, "../..", "package.json"), "utf8",
+  ));
+  assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], coreManifest.version);
+  assert.equal(lock.packages["node_modules/@scotthuang/agent-knock-knock"].version, coreManifest.version);
   assert.equal(manifest.dependencies["@deepseek-ai/schemastery"], "3.18.2");
   for (const packageName of [
     "@deepseek-ai/dsh-agent",
