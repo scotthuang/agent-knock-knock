@@ -49,7 +49,16 @@ function parseQuestions(value: unknown): NativeInteraction["questions"] {
     return { id, title: q.question, options, isOther: q.isOther === true, isSecret: q.isSecret === true };
   });
 }
+/** Do not claim the native requiredHumanApproval capability or answer its requests. */
+export function nativeApprovalResponseSupported(interaction: Pick<NativeInteraction, "kind" | "nativeApprovalKind">): boolean {
+  return interaction.kind !== "command_approval" ||
+    ["command", "writeStdin"].includes(interaction.nativeApprovalKind ?? "command");
+}
+
 export function nativeResponse(interaction: NativeInteraction, response: NativeInteractionResponse): Record<string, unknown> {
+  if (!nativeApprovalResponseSupported(interaction)) {
+    throw new CodexNativeError("unsupported_capability", "This command approval requires a person or an unsupported approval kind; handle it in the original Codex CLI");
+  }
   if (interaction.kind === "blocking_question" && "answers" in response) {
     const keys = Object.keys(response.answers);
     if (keys.length !== interaction.questions.length || interaction.questions.some(q => !Object.hasOwn(response.answers, q.id))) {

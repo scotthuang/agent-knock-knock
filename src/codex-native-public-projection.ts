@@ -1,3 +1,4 @@
+import { nativeApprovalResponseSupported } from "./codex-native-client-interactions.js";
 import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { parseCodexDeliveryDiagnostics, codexRecoveryActions } from "./codex-routing-diagnostics.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
@@ -72,7 +73,8 @@ export function nativeInteractionProjection(interaction: PersistedNativeInteract
       allow_free_text: !question.options.length || question.isOther === true || interaction.kind === "async_question",
       options: question.options.map(option => ({ option_id: optionId(interaction, question.id, option), label: option }))
     })),
-    available_actions: approval
+    ...(!nativeApprovalResponseSupported(interaction) ? { manual_action: "Handle this person-only or unsupported command approval in the original Codex CLI." } : {}),
+    available_actions: !nativeApprovalResponseSupported(interaction) ? {} : approval
       ? { approve: { tool: "agent_knock_knock_approve", input: { ...target, interaction_id: interaction.id } } }
       : { respond: { tool: "agent_knock_knock_respond_interaction", input: { ...target, interaction_id: interaction.id } } }
   };

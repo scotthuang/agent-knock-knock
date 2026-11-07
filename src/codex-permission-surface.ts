@@ -49,7 +49,7 @@ export function observeCodexPermissionSurface(
 ): CodexPermissionSurface {
   const rawLines = styledScreen.replace(/\r\n?/gu, "\n").split("\n");
   const plainLines = rawLines.map((line) => line.replace(/\x1b\[[0-9;]*m/gu, ""));
-  if (agentVersion === "0.162.1" || agentVersion === "0.164.0" || agentVersion === "0.165.0" || agentVersion === "0.166.0") {
+  if (agentVersion === "0.162.1" || agentVersion === "0.164.0" || agentVersion === "0.165.0" || agentVersion === "0.166.0" || agentVersion === "0.167.0") {
     const centered = centeredConfirmation(rawLines, plainLines);
     if (centered) return centered;
   }

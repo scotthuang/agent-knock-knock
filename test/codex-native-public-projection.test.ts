@@ -22,3 +22,20 @@ test("native question envelope binds every public question/option to current nat
   const foreign = structuredClone(answer); foreign.answers[0].selected_option_ids = ["Green"];
   assert.throws(() => nativeQuestionResponse(interaction, foreign), /no longer available/);
 });
+
+
+test("command approval actions distinguish native ordinary requests from person-only or unknown kinds", () => {
+  for (const nativeApprovalKind of [undefined, "command", "writeStdin", "humanCommand", "futureKind"]) {
+    const request: NativeInteraction = { ...interaction, kind: "command_approval", questions: [], nativeApprovalKind };
+    const projected = nativeInteractionProjection(request, "fixture");
+    assert.equal(projected.native_turn_id, request.turnId);
+    assert.equal(projected.interaction_id, request.id);
+    if (nativeApprovalKind === "humanCommand" || nativeApprovalKind === "futureKind") {
+      assert.deepEqual(projected.available_actions, {});
+      assert.match(projected.manual_action!, /original Codex CLI/);
+    } else {
+      assert.ok(projected.available_actions.approve);
+      assert.equal(projected.manual_action, undefined);
+    }
+  }
+});
