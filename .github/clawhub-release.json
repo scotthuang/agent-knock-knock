@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.11",
+  "version": "0.16.12",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "3d7a52789c60afe37f1593fe7511e95463a2f971",
-  "asset": "scotthuang-agent-knock-knock-0.16.11.tgz",
-  "sha256": "5ef8bd8550680a7134d59a4e97c03ba069b39fcec256184b3ada5f4c96d8d03e",
-  "bytes": 3982342,
-  "changelog": "Codex CLI/app-server 0.166.0 compatibility: reviewed native profiles, Markdown async-choice ambiguity guards and ChatGPT workspace status redaction. Preserves exact task identity, 800-code-point progress and 720-minute monitoring. Coordinated Pi poc.19 / DSH rc.23 pin core 0.16.11. Submission acceptance is reported separately from later public scan/download availability."
+  "commit": "f0f7f7ac36efe22dfac44d69e6ef502e4fef0483",
+  "asset": "scotthuang-agent-knock-knock-0.16.12.tgz",
+  "sha256": "46c014659a6bbfd995721709a41de59b6a719670b552f5b59c6d6f65b8d5b885",
+  "bytes": 3984516,
+  "changelog": "Codex CLI/app-server 0.167.0 compatibility: reviewed terminal profiles and person-only approval boundaries. Preserves exact task ownership, ordinary backend approvals, 800-code-point progress and 720-minute monitoring. Coordinated Pi poc.20 / DSH rc.24 pin core 0.16.12. Reports confirmed submission separately from later platform scanning/public availability."
 }
