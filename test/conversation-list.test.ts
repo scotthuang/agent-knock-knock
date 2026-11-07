@@ -22,7 +22,7 @@ function native() {
 }
 
 test("exact frontend versions remain distinct from a newer backend", () => {
-  for (const frontend of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) {
+  for (const frontend of ["0.162.1", "0.164.0", "0.165.0", "0.166.0", "0.167.0"]) {
     const physical = terminal({ agent_version: frontend });
     const result = unifiedConversationList({ terminals: [physical],
       codex_cli_sessions: [{ ...native(), backend_version: "0.165.0" }] }, [physical]);

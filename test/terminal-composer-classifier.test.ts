@@ -551,7 +551,7 @@ test("Claude input proof distinguishes occupied stashes from known footer syntax
 });
 
 
-for (const version of ["0.164.0", "0.165.0", "0.166.0"]) test(`${version} contextual footer closes the default-effort Composer without inventing idle or effort authority`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0", "0.167.0"]) test(`${version} contextual footer closes the default-effort Composer without inventing idle or effort authority`, () => {
   // Layout from the owned 0.164 CLI: no separate shortcut row; warning shares
   // the model/path row. Only synthetic path and transcript are retained.
   const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +

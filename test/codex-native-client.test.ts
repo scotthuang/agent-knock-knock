@@ -448,3 +448,38 @@ test("0.166 flat item lifecycle times preserve exact paginated task identity", a
     await assert.rejects(c.readSnapshot(THREAD, TURN), (e: CodexNativeError) => e.code === "invalid_response");
   } finally { c.close(); }
 });
+
+
+test("0.167 person-only and unknown command approvals remain pending without claiming human authority", async () => {
+  for (const kind of ["humanCommand", "futureHumanKind"]) {
+    const f = new Fixture(); f.serverVersion = "0.167.0";
+    f.handler = m => {
+      if (m.method === "thread/resume") {
+        f.emit({ id: 167, method: "item/commandExecution/requestApproval", params: {
+          threadId: THREAD, turnId: TURN, itemId: "human-command", kind,
+          command: "printf fixture", availableDecisions: ["accept", "decline", "cancel"]
+        } });
+        return { thread: thread("active") };
+      }
+      if (m.method === "thread/read") return { thread: thread("active") };
+      if (m.method === "thread/turns/list") return page([turn(TURN, "inProgress")]);
+      return baseHandler(m);
+    };
+    const c = await connect(f);
+    try {
+      const initialize = f.sent.find(m => m.method === "initialize")!;
+      assert.equal(initialize.params.capabilities.experimentalApi, true);
+      assert.notEqual(initialize.params.capabilities.requiredHumanApproval, true);
+      await c.subscribe(THREAD);
+      const interaction = c.getInteractions(THREAD)[0]!;
+      assert.equal(interaction.nativeApprovalKind, kind);
+      assert.equal(interaction.turnId, TURN);
+      for (const decision of ["accept", "decline", "cancel"] as const) {
+        await assert.rejects(c.respond(interaction, { decision }), (e: CodexNativeError) =>
+          e.code === "unsupported_capability" && e.dispatchState === "not_sent");
+      }
+      assert.equal(f.sent.some(m => m.id === 167 && !m.method), false);
+      assert.equal(c.getInteractions(THREAD)[0]?.id, interaction.id);
+    } finally { c.close(); }
+  }
+});

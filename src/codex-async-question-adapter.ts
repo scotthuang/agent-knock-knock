@@ -20,7 +20,8 @@ export const CODEX_ASYNC_QUESTION_PROFILES: Readonly<Record<string, string>> =
     "0.162.1": "codex/0.162.1/request-user-input-async-v4",
     "0.164.0": "codex/0.164.0/request-user-input-async-v5",
     "0.165.0": "codex/0.165.0/request-user-input-async-v5",
-    "0.166.0": "codex/0.166.0/request-user-input-async-v6"
+    "0.166.0": "codex/0.166.0/request-user-input-async-v6",
+    "0.167.0": "codex/0.167.0/request-user-input-async-v6"
   });
 
 export const CODEX_ASYNC_QUESTION_LIMITS = Object.freeze({
@@ -1237,9 +1238,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 0.166 choices are Markdown: keep unrenderable candidates in the ambiguity set. */
+/** 0.166+ choices are Markdown: keep unrenderable candidates in the ambiguity set. */
 function hasUnprovenOptionRendering(evidence: readonly NormalizedEvidence[], profile: string): boolean {
-  return profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"] &&
+  return [CODEX_ASYNC_QUESTION_PROFILES["0.166.0"], CODEX_ASYNC_QUESTION_PROFILES["0.167.0"]].includes(profile) &&
     evidence.some((source) => source.questions.some((question) =>
       question.modelOptions.some((label) => asyncQuestionRenderedTitle(label, profile) === undefined)));
 }
@@ -1253,23 +1254,26 @@ function isFullscreenProfile(profile: string): boolean {
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.167.0"];
 }
 
 function usesMacSymbolKeyHints(profile: string): boolean {
   return profile === CODEX_ASYNC_QUESTION_PROFILES["0.162.1"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.167.0"];
 }
 
 function usesMarkdownQuestionTitles(profile: string): boolean {
   return profile === CODEX_ASYNC_QUESTION_PROFILES["0.164.0"] ||
     profile === CODEX_ASYNC_QUESTION_PROFILES["0.165.0"] ||
-    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"];
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.166.0"] ||
+    profile === CODEX_ASYNC_QUESTION_PROFILES["0.167.0"];
 }
 
-/** 0.164–0.166 render titles as Markdown. Only single-line plain text whose
+/** 0.164–0.167 render titles as Markdown. Only single-line plain text whose
  * rendering is unchanged can prove a terminal question identity. Unknown
  * titles must remain in the ambiguity set; native structured replies do not
  * use this screen matcher. The reviewed upstream parser does not enable smart

@@ -1010,7 +1010,7 @@ function codexLifecycleCommandLine(line: string): string | undefined {
 export const codexTerminalAgentAdapter = createCodexTerminalAgentAdapter();
 
 export function inspectCodexScreen(options: TerminalScreenInspectionOptions): TerminalScreenInspection {
-  const detectedApproval = detectCodexApprovalPrompt(options.screen);
+  const detectedApproval = detectCodexApprovalPrompt(options.screen, options.runtime?.agentVersion);
   const blocked = isCodexApprovalPromptVisible(options.screen);
   const approval: TerminalApprovalInspection = detectedApproval.approvable
     ? {
@@ -1057,7 +1057,7 @@ export function inspectCodexScreen(options: TerminalScreenInspectionOptions): Te
   };
 }
 
-export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDetection {
+export function detectCodexApprovalPrompt(screen: string, agentVersion?: string): CodexApprovalPromptDetection {
   if (codexFolderTrustPromptVisible(screen)) {
     return {
       approvable: false,
@@ -1087,6 +1087,16 @@ export function detectCodexApprovalPrompt(screen: string): CodexApprovalPromptDe
       approvable: false,
       reason: prompt.reason
     };
+  }
+
+  // 0.167 uses the same painted command dialog for normal and humanCommand
+  // requests. Screen text cannot prove the native kind; use the structured
+  // backend path or ask the person, never press a key through this ambiguity.
+  const version = /^(\d+)\.(\d+)\.(\d+)$/u.exec(agentVersion ?? "");
+  if (prompt.marker === "Would you like to run the following command?" && version &&
+      (Number(version[1]) > 0 || Number(version[2]) >= 167)) {
+    return { approvable: false, promptKind: "run_command", command: commandFromApprovalRegion(prompt.region),
+      reason: "Codex command approval needs its exact native approval kind; use backend approval or handle it in the original CLI" };
   }
 
   const options = prompt.region.split("\n")

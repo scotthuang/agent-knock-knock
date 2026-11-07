@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.12 / Pi 0.1.0-poc.20 / DeepSeek Harness 0.1.0-rc.24 — 2026-11-08
+
+- Adapt reviewed Codex CLI/app-server **0.167.0** profiles for status, model/permission controls, blocking and asynchronous questions, and exact paginated observation. Validate the existing native task contracts against the actual 0.167.0 pair; retain old reviewed profiles and mixed-pair restrictions.
+- Respect the new person-only `humanCommand` approval contract: do not claim human-approval capability or answer person-only/unknown command kinds. For 0.167+ screen-only command dialogs, require the structured native kind through the backend or manual handling in the original CLI. Ordinary backend approvals remain available.
+- Preserve exact ownership, uncertain-input protection, 800-code-point public progress, 720-minute hard monitoring, existing inactivity/receipt semantics and List v5 budgets.
+- Publish coordinated Pi/DSH connectors pinned to core **0.16.12** with synchronized Skills, unchanged Host ranges and prerelease `next` tags. ClawHub submission acceptance is distinct from later scanning/public availability.
+
 ## 0.16.11 / Pi 0.1.0-poc.19 / DeepSeek Harness 0.1.0-rc.23 — 2026-11-02
 
 - Adapt reviewed Codex CLI/app-server **0.166.0** terminal profiles for status, model and permission controls, blocking questions and exact paginated observation. Preserve frontend/backend identity separation, folder-trust handling and unknown-send protection.

@@ -42,7 +42,7 @@ const observe = (screen: string, expectedAgentVersion = "0.159.0") => observeCod
   operation: { kind: "status" }, screen, expectedAgentVersion
 });
 
-for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0", "0.167.0"]) test(`${version} recognizes the usage URL without relaxing exact status identity`, () => {
   // Public rust-v0.162.1 status/card.rs changed only this informational URL.
   // Synthetic account, path and UUID deliberately contain no local evidence.
   const screen = SCREEN.replace("v0.159.0", `v${version}`)

@@ -72,10 +72,10 @@ export function captureCodexFullscreenComposerFrame(
     composerText,
     hasShortcutFooter: footerTail.length === 1 &&
       CODEX_FULLSCREEN_SHORTCUT_FOOTER.test(footerTail[0]!.trimEnd()),
-    // 0.164–0.166 render the model/path and warning on one passive footer row.
+    // 0.164–0.167 render the model/path and warning on one passive footer row.
     // The exact empty Composer and independent busy/input-owner checks remain
     // necessary; a command popup must not inherit this ready-surface marker.
-    hasContextFooter: ["0.164.0", "0.165.0", "0.166.0"].includes(version) && footerTail.length === 0 &&
+    hasContextFooter: ["0.164.0", "0.165.0", "0.166.0", "0.167.0"].includes(version) && footerTail.length === 0 &&
       ["", "Ask Codex to do anything"].includes(composerText)
   };
 }

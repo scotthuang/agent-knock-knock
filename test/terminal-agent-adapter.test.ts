@@ -51,7 +51,7 @@ const FOLDER_ACCESS = [
   "  enter continue · esc back"
 ].join("\n");
 
-for (const version of ["0.164.0", "0.165.0", "0.166.0"]) test(`${version} folder trust owns input without granting approval actions`, () => {
+for (const version of ["0.164.0", "0.165.0", "0.166.0", "0.167.0"]) test(`${version} folder trust owns input without granting approval actions`, () => {
   const restricted = FOLDER_ACCESS.replace(
     /  Trust this folder\?[\s\S]+?Your trust decision will be saved\./u,
     "  Config, hooks, and exec policies from untrusted folders stay disabled.\n" +
@@ -2105,4 +2105,23 @@ test("Codex lifecycle observer verifies only a fresh exact status UUID", () => {
     }).status,
     "ambiguous"
   );
+});
+
+
+test("0.167 screen-only command approvals cannot impersonate indistinguishable humanCommand requests", () => {
+  const screen = ["Would you like to run the following command?", "", "  $ printf fixture", "",
+    "› 1. Yes, proceed (y)", "  2. No, and tell Codex what to do differently (esc)",
+    "  Press enter to confirm or esc to cancel"].join("\n");
+  assert.equal(detectCodexApprovalPrompt(screen, "0.166.0").approvable, true);
+  for (const version of ["0.167.0", "0.168.0", "1.0.0"]) {
+    const result = detectCodexApprovalPrompt(screen, version);
+    assert.equal(result.approvable, false);
+    assert.match(result.reason!, /exact native approval kind/);
+    assert.equal("action" in result, false);
+    const inspection = inspectCodexScreen({ screen, runtime: { agentVersion: version } });
+    assert.equal(inspection.activity.state, "awaiting_approval");
+    assert.equal(inspection.approval.blocked, true);
+    assert.equal(inspection.approval.approvable, false);
+    assert.equal(inspection.approval.action, undefined);
+  }
 });
