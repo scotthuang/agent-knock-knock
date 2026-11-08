@@ -29,14 +29,16 @@ returns current discoverable conversations in compact v5; `watches` separately
 returns recent monitoring records (24 hours by default), plus active or
 unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
-prerelease uses the `next` dist-tag.
+RC remains a prerelease. As of **2026-11-08**, its separately reviewed
+`latest` recommendation is **0.1.0-rc.24**; `next` also points to rc.24 at that
+promotion and remains the channel for future experiments.
 
 The reviewed baseline is **DeepSeek Harness Web 0.2.1-rc.2** and **Cordis
 4.0.5**. These are prerelease compatibility claims, not a stable-version
-endorsement. On 2026-10-29, upstream DSH `latest` is `0.2.1-rc.2`, while
-`next` is `0.2.1-rc.4` and `alpha` is `0.2.2-alpha.2`; the latter two are **not
-validated or accepted by this connector**. Do not replace an existing Host
-with a different release merely to follow a tag.
+endorsement. Upstream DSH `latest` was observed as `0.2.2-rc.1` on
+2026-11-08; it is **not validated or accepted by this connector**. Moving the
+connector recommendation does not add Host compatibility. Do not replace an
+existing Host with a different release merely to follow a tag.
 
 | Scope | Declared / validated boundary |
 | --- | --- |
@@ -104,12 +106,12 @@ official endorsement. DSH does not ship with built-in index sources.
 4. Finish existing work and cleanly restart the Web Host after installation;
    this connector is not hot-loaded. Then run `/akk list` in a Web conversation.
 
-The index pins a published version, so market installation does not resolve the
-old bare-package `latest` tag. All listed connector versions are prereleases;
+The index pins a published version, so market installation is independent of
+npm dist-tags. All listed connector versions are prereleases;
 DSH can recommend a compatible prerelease when the entry has no stable version.
 The source URL is stable, but its selected version can change after future
-verified releases. CLI users can use `@next` or the exact version shown in
-this README. See the [official market guide](https://deepseek-harness.github.io/deepseek-harness/guide/plugin-market)
+verified releases. CLI users can use the default recommendation or the exact
+version shown in this README; `@next` opts into experimental candidates. See the [official market guide](https://deepseek-harness.github.io/deepseek-harness/guide/plugin-market)
 and the [index maintenance notes](https://github.com/scotthuang/agent-knock-knock/tree/main/market/dsh).
 
 ## Five-minute quick start
@@ -129,18 +131,21 @@ npm view @scotthuang/agent-knock-knock-deepseek-harness dist-tags --json
 
 The last command reports registry state; this repository does not assume that a
 particular prerelease is present in every configured npm registry. Connector
-prereleases use the `next` tag when published. Installing without `@next`
-can select an older `latest` build.
+prereleases use `next` when first published. A reviewed recommendation may
+separately be promoted to `latest`; the current recommendation is rc.24/core
+0.16.12 and remains an RC. Existing installs, lockfiles and explicit old pins
+are unaffected by a tag change.
 
 ### 2. Add the connector to the Web profile
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-Use `next`, or pin
-`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.24`.
+Use the default recommendation below, or pin
+`@scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.24`. For deliberate
+experimental testing, append `@next` and review its actual Host requirements.
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness
 ```
 
 Stop the current Web Host cleanly if it is running, then start a fresh process
@@ -697,6 +702,10 @@ Publishing additionally requires both explicit flags:
 npm run release:check -- --publish --confirm-version 0.1.0-rc.24
 ```
 
-Prereleases use npm tag `next`; stable versions use `latest`. Repository tags
-and GitHub Releases use the connector-specific namespace
+New prereleases publish to `next`; stable publications use `latest`. A reviewed
+DSH RC can separately become the default `latest` recommendation without
+republishing it or declaring it stable. Follow the
+[explicit promotion procedure](https://github.com/scotthuang/agent-knock-knock/blob/main/CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest);
+normal publication guards remain unchanged. Repository tags and GitHub Releases
+use the connector-specific namespace
 `deepseek-harness-v<version>` and are created separately after npm verification.
