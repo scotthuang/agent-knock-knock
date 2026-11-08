@@ -94,12 +94,15 @@ reviewed baseline), Node.js `>=22.19.0`, and `pnpm`. The connector pins AKK
 **0.16.12**; newer unlisted DSH versions are not automatically compatible.
 
 ```bash
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness
 ```
 
-Use `@next` or an explicit reviewed RC, not the bare package name. Finish
-existing work, cleanly restart the Web Host after installation, then enter
-`/akk list` in a Web conversation. Do not start a second Host to reload it.
+The default `latest` recommendation is **0.1.0-rc.24** (still an RC), pinned to
+core **0.16.12**. Use an exact version for reproducibility; `@next` selects
+experimental candidates. Existing installs and lockfiles do not update when
+a tag moves. DSH Host `0.2.2-rc.1` is outside this connector's declared scope.
+Finish existing work, cleanly restart the Web Host after installation, then
+enter `/akk list` in a Web conversation. Do not start a second Host to reload it.
 
 Prefer the DSH plugin UI? Add the [AKK-maintained index](https://raw.githubusercontent.com/scotthuang/agent-knock-knock/main/market/dsh/index.json)
 to **Plugins → Discover**; it installs a pinned published version. This is a
@@ -215,7 +218,7 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0`, `0.162.1`, `0.164.0`, `0.165.0`, `0.166.0` and `0.167.0`; Claude fixtures include `2.1.285`, with live observations on `2.1.295`/`2.1.296`. An otherwise eligible, complete `x.y.z` Claude version may attempt supported controls through runtime validation even without an exact regression profile. Actual identity, protocol and UI evidence determine availability; unknown dialogs are not guessed. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
 | Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.20` (`next`), pinned AKK `0.16.12` |
-| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); connector `0.1.0-rc.24` (`next`), pinned AKK `0.16.12`. See its guide for previous RC, alpha and legacy coverage. |
+| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); recommended connector `0.1.0-rc.24` (`latest`, still RC), pinned AKK `0.16.12`. See its guide for previous RC, alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr versions are observations, not an allowlist: discovery verifies live identity and read capabilities, while input requires a matching CLI schema declaration or verified baseline behavior. An untested server without input evidence exposes only verified read capabilities. Desktop controls validate the live native contract. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.

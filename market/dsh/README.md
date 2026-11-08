@@ -17,10 +17,10 @@ The reader and install-target behavior were verified with DSH **0.2.1-rc.2**. Th
 For the supported POSIX Web Host setup, `pnpm`, connector capabilities, permissions, and limitations, see the [DSH connector guide](../../connectors/deepseek-harness/README.md). The equivalent manual command is:
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.24
 ```
 
-`next` deliberately selects the current prerelease connector. A bare package name can select the older npm `latest` release. For a reproducible install, replace `next` with the exact version shown by this index. The market is an installation path, not an automatic update service.
+The index remains pinned to rc.24/core 0.16.12. The bare npm package now selects the same reviewed RC through `latest`; `@next` is the separate experimental channel. An npm tag does not make the RC stable or expand its Host compatibility. The market is an installation path, not an automatic update service.
 
 ## Regenerate after a connector release
 

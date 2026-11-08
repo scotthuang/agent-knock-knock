@@ -2,8 +2,24 @@
 
 These are independently versioned controller connectors. Installing an AKK
 core/OpenClaw release does not update an already installed connector. Select
-npm `next` or the exact connector version below; their `latest` tags remain
-unchanged. Neither connector update requires a new core release.
+the appropriate recommendation or an exact version. Neither connector update
+requires a new core release.
+
+## Current install channels — 2026-11-08
+
+| Connector | Recommended install | Exact core dependency | Channel boundary |
+| --- | --- | --- | --- |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; `next` also rc.24 at promotion and may advance separately |
+| Pi | `next`: `0.1.0-poc.20` | `0.16.12` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
+
+The DSH promotion changes only the default registry selection for new installs.
+Existing installations, lockfiles and explicit pins are unchanged. The supported
+DSH Web baseline remains `0.2.1-rc.2`; upstream Host `0.2.2-rc.1` is outside the
+connector's declared and validated range. The market index already pins rc.24
+and is unchanged. See the [promotion procedure](../CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest).
+
+The dated release records below describe channels and validation at that time,
+not the current recommendation.
 
 ## Core 0.14.16 alignment — 2026-10-23
 
@@ -67,7 +83,7 @@ kept as recorded at the time.
 **prerelease on npm `next`**, built against DSH `0.2.1-rc.2`, Cordis `4.0.5` and published
 AKK core `0.14.8`. At verification time DSH npm `next` was `0.2.1-rc.2`, while
 `latest` remained `0.2.0-rc.2`; neither is a stable release. The connector's
-npm `latest` remains `0.1.0-rc.1`. Pi and core are unchanged by this release.
+npm `latest` was `0.1.0-rc.1` at that release. Pi and core were unchanged.
 
 The [official DSH release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
 adds DeepSeek-V4.1-Flash-1017 support. Comparing its actual packages with the

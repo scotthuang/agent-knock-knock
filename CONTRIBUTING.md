@@ -67,9 +67,11 @@ If your change touches logging, callbacks, or trace output, also review the outp
 Every core release includes fresh Pi and DeepSeek Harness connector releases,
 even when their only runtime change is the core dependency. Both connectors
 must pin the exact core version being released in their manifests and locks.
-They keep independent version numbers: stable connector versions use `latest`,
-and prerelease versions use `next`. A stable core release does not promote a
-prerelease DSH connector to `latest`.
+They keep independent version numbers: new stable connector publications use
+`latest`, and new prerelease publications use `next`. A stable core release does
+not automatically promote a prerelease DSH connector to `latest`. A separately
+reviewed DSH recommendation may use the explicit tag-only procedure below;
+the RC version remains an RC.
 
 1. Check npm for all three candidate versions. Bump both connector versions and
    constants, align their exact core dependencies and lockfiles, update release
@@ -104,6 +106,50 @@ republishing it or prove its artifact matches: compare the existing tarball and
 integrity before resuming only the missing publication. Network/authentication
 errors are inconclusive, not proof that a version is free. Do not declare the
 release complete while either connector remains on the previous core.
+
+## Recommend an existing DSH connector on npm latest
+
+Publication and recommendation are separate actions. The normal connector
+publisher continues sending every new RC to `next`; it does not move `latest`
+automatically. After an explicitly authorized maintainer review, an already
+published and validated DSH RC may be selected as the default install through
+`latest`. This is a dist-tag promotion, not a stable-version declaration or a
+new package publication. It does not require new core/Pi packages.
+
+1. Preserve the current official registry tags. Verify the exact target exists,
+   is not deprecated, pins the expected published core, and has the same
+   tarball integrity/SHA-256 and publication timestamp as the reviewed release.
+   Its original release gates must already have passed. Recommendation does
+   not broaden its supported DSH Host or peer ranges.
+2. Immediately before writing, refresh the tags and target metadata. If the
+   target is already `latest`, report already effective without writing. If
+   any relevant state changed since review, stop rather than overwrite a
+   parallel decision. Do not change the clean-tree, artifact or identity checks
+   in the normal publication gate.
+3. Change only the named connector's `latest` using the existing artifact:
+
+   ```sh
+   npm dist-tag add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.24 latest --registry=https://registry.npmjs.org
+   ```
+
+   Do not run `npm publish`, move `next`, retag core/Pi, or rewrite the market
+   index when it already pins the target. npm's CLI does not offer a multi-tag
+   compare-and-swap transaction: the fresh precheck and independent readback
+   are required. A failed/lost write response requires readback before any
+   decision to retry; authorization/OTP failures are not bypassed.
+4. Read the public registry again. Confirm the exact default version/core pin,
+   unchanged other tags, unchanged original version metadata and downloaded
+   archive, and verify bare-package resolution in isolation. Record the
+   evidence and update the current install guidance. Do not run full/release
+   suites merely for this metadata/documentation action; normal repository
+   fast-tier policy applies.
+
+On **2026-11-08**, the DSH connector recommendation is **0.1.0-rc.24** with exact
+core **0.16.12**. Both `latest` and `next` point to rc.24 at this promotion;
+future experiments may advance `next` independently. It is still an RC.
+Existing installs, lockfiles and explicit old version pins do not upgrade
+when a registry tag changes. DSH Host 0.2.2-rc.1 is outside rc.24's declared and
+validated Host set; this promotion adds no compatibility claim for it.
 
 ## Native Lifecycle Live-Smoke Diagnostic
 
