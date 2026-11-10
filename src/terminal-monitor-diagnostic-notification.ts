@@ -17,6 +17,7 @@ export function prepareDetectorNotification(input: {
   const { conversation, diagnostic } = input;
   const delivery = recordValue(conversation.callback_notification_delivery);
   if (diagnostic.status !== "limited" || diagnostic.notification_message_id ||
+      diagnostic.notification_duplicate === true ||
       !isWaitingForAgentStatus(conversation.status) || !callbackExpectedForConversation(conversation) ||
       ["pending", "failed"].includes(String(delivery?.status))) return { conversation, diagnostic };
   const message = createMessage({
@@ -35,6 +36,15 @@ export function prepareDetectorNotification(input: {
     options: { statePath: input.statePath, callbackDeliveryKind: "completion_uncertain_notification" },
     statePath: input.statePath, logPath: input.logPath, conversation: next, message
   });
+  if (result.prepared?.outcome === "duplicate") {
+    // Semantic outbox deduplication does not save the proposed Conversation.
+    // Retain this episode's diagnostic without claiming a new sent message ID.
+    const duplicateDiagnostic = { ...diagnostic, notification_duplicate: true };
+    return { conversation: { ...conversation, native_session_takeover: {
+      ...recordValue(conversation.native_session_takeover),
+      terminal_bridge_detector_diagnostic: duplicateDiagnostic
+    } }, diagnostic: duplicateDiagnostic };
+  }
   return result.prepared
     ? { conversation: result.prepared.conversation, diagnostic: notified, prepared: result.prepared }
     : { conversation, diagnostic };
@@ -49,6 +59,8 @@ export function detectorDiagnostic(
     return {
       ...(existing?.status === "limited" && existing.notification_message_id
         ? { notification_message_id: existing.notification_message_id } : {}),
+      ...(existing?.status === "limited" && existing.notification_duplicate === true
+        ? { notification_duplicate: true } : {}),
       status: "limited",
       source: "terminal_completion_detector",
       fingerprint: input.fingerprint,

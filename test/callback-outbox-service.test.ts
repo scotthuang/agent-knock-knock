@@ -1,4 +1,4 @@
-import { prepareDetectorNotification } from "../src/terminal-monitor-diagnostic-notification.js";
+import { detectorDiagnostic, prepareDetectorNotification } from "../src/terminal-monitor-diagnostic-notification.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -1593,4 +1593,35 @@ test("accepted uncertainty notice does not suppress the later timeout notice", (
   assert.equal((h.stored().callback_notification_delivery as Record<string, unknown>).status, "delivered");
   assert.equal(h.stored().stalled_notification_sent_at, undefined);
   assert.equal(h.stored().status, "waiting_for_agent");
+});
+
+
+test("deduplicated detector notice preserves the new diagnostic without claiming delivery", () => {
+  const events: Array<Record<string, unknown>> = [];
+  const h = createHarness(events);
+  Object.assign(h.conversation, { callback_route: GENERIC_ROUTE });
+  const prepare = (conversation: Conversation, diagnostic: Record<string, unknown>) =>
+    prepareDetectorNotification({ conversation, diagnostic, statePath: STATE_PATH, logPath: LOG_PATH,
+      prepare: input => h.service.prepareStallNotification(input) });
+  const first = prepare(h.conversation, { status: "limited", fingerprint: "missing-anchor" });
+  assert.ok(first.prepared);
+  events.push({ event: "message", message: first.prepared.message });
+  // A recovered/new detector episode, or recovery of a lagging state file,
+  // retains the immutable notification ledger even without the first marker.
+  const restored = { ...h.conversation, native_session_takeover: {} };
+  h.replaceStored(restored);
+  const diagnostic = { status: "limited", fingerprint: "unreadable-rollout", detail: "unreadable" };
+  const duplicate = prepare(restored, diagnostic);
+  assert.equal(duplicate.prepared, undefined, "no transport or new outbox attempt for a semantic duplicate");
+  assert.equal(duplicate.diagnostic.fingerprint, diagnostic.fingerprint);
+  assert.equal(duplicate.diagnostic.notification_duplicate, true);
+  assert.equal(duplicate.diagnostic.notification_message_id, undefined, "do not invent an accepted message ID");
+  assert.deepEqual((duplicate.conversation.native_session_takeover as Record<string, unknown>)
+    .terminal_bridge_detector_diagnostic, duplicate.diagnostic,
+    "the outer state transaction must be able to persist the changed diagnostic");
+  const repeated = detectorDiagnostic({ limitation: "unreadable", fingerprint: diagnostic.fingerprint },
+    duplicate.diagnostic, NOW.toISOString())!;
+  const operations = h.order.length;
+  assert.equal(prepare(duplicate.conversation, repeated).prepared, undefined);
+  assert.equal(h.order.length, operations, "the same degraded episode does not prepare again per poll");
 });

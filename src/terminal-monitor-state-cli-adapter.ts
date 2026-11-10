@@ -863,16 +863,19 @@ class TerminalMonitorStateCliApplication {
       };
     }
     const unchanged = sameDetectorDiagnostic(existing, nextDiagnostic);
+    const diagnostic = unchanged && existing ? existing : nextDiagnostic;
     const notification = prepareDetectorNotification({
       conversation: { ...conversation, native_session_takeover: {
         ...takeover, terminal_bridge_detector_diagnostic: unchanged ? existing : nextDiagnostic
       }, updated_at: now },
-      diagnostic: unchanged && existing ? existing : nextDiagnostic,
+      diagnostic,
       statePath: input.statePath, logPath: input.logPath,
       prepare: request => this.#dependencies.callbacks.prepareStallNotification(request)
     });
     const nextConversation = notification.conversation;
-    if (!notification.prepared && !unchanged) saveState(input.statePath, nextConversation);
+    if (!notification.prepared && (!unchanged || notification.diagnostic !== diagnostic)) {
+      saveState(input.statePath, nextConversation);
+    }
     if (!unchanged) this.#recordDetectorDiagnostic(
       input,
       conversation,

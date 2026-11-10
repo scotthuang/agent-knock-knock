@@ -1465,7 +1465,8 @@ function persistDetectorDiagnostic(input: SampledPollInput): {
   const changed = limitation
     ? fingerprint !== state.persistedDetectorDiagnosticFingerprint ||
       state.persistedDetectorDiagnosticStatus !== "limited" ||
-      !recordValue(input.takeover?.terminal_bridge_detector_diagnostic)?.notification_message_id
+      (!recordValue(input.takeover?.terminal_bridge_detector_diagnostic)?.notification_message_id &&
+       recordValue(input.takeover?.terminal_bridge_detector_diagnostic)?.notification_duplicate !== true)
     : state.persistedDetectorDiagnosticStatus === "limited";
   if (!changed) {
     return { proceed: true, takeover: input.takeover };
