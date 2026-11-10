@@ -1,3 +1,4 @@
+import { hasBlockingCompletionWork, hasUnresolvedBackgroundWork } from "./claude-transcript-background-policy.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -689,7 +690,7 @@ export function captureClaudeTranscriptAnchor(
     agentStartedAtMs === undefined ||
     agent.sessionId !== sessionId ||
     normalizePath(agent.cwd) !== normalizePath(cwd) ||
-    !isClaudeAgentIdleState(agent)
+    (!isClaudeAgentIdleState(agent) && agent.status !== "shell")
   ) {
     return undefined;
   }
@@ -700,6 +701,7 @@ export function captureClaudeTranscriptAnchor(
   const configDir = agent.configDir ? { config_dir: claudeHome } : {};
   const projectsRoot = projectsRootPath(claudeHome);
   if (!isRealDirectory(projectsRoot)) {
+    if (agent.status === "shell") return undefined;
     if (
       lstatOrUndefined(projectsRoot) !== undefined ||
       !isRealDirectory(claudeHome)
@@ -723,6 +725,7 @@ export function captureClaudeTranscriptAnchor(
   const located = locateTranscript(projectsRoot, sessionId);
   const relativePath = located?.relativePath ?? expectedTranscriptRelativePath(sessionId, cwd);
   if (!located) {
+    if (agent.status === "shell") return undefined;
     return {
       schema_version: CLAUDE_TRANSCRIPT_ANCHOR_VERSION,
       ...configDir,
@@ -740,6 +743,9 @@ export function captureClaudeTranscriptAnchor(
   try {
     if (located.stat.size > 0 && !fileEndsWithNewline(located.fd, located.stat.size)) {
       throw new Error("Claude transcript did not end at a complete JSONL record before send");
+    }
+    if (agent.status === "shell" && !latestForegroundCompleted(located, sessionId, cwd)) {
+      return undefined;
     }
     const stableStat = fs.fstatSync(located.fd);
     if (!sameStableTranscriptFile(located.stat, stableStat)) {
@@ -764,6 +770,25 @@ export function captureClaudeTranscriptAnchor(
   } finally {
     fs.closeSync(located.fd);
   }
+}
+
+/** A shell process is sendable only after its latest root prompt has ended. */
+function latestForegroundCompleted(
+  opened: { fd: number; stat: fs.Stats }, sessionId: string, cwd: string
+): boolean {
+  const entries = readBoundedCompleteJsonlTail(opened.fd, opened.stat.size,
+    CLAUDE_TRANSCRIPT_MAX_TURN_BYTES);
+  const prompt = latestClaudeRootHumanPromptEntry(entries)?.record;
+  if (!prompt) return false;
+  const hash = exactRequestFingerprint(userPromptText(prompt));
+  const promptUuid = uuidValue(prompt.uuid);
+  if (!hash || !promptUuid) return false;
+  // completionFromRecords only uses the immutable snapshot's prompt/chain fields.
+  return completionFromRecords({
+    sessionId, cwd, expectedRequestHash: hash, expectedPromptUuid: promptUuid,
+    records: orderClaudePrewrittenAttachments(entries.map(entry => entry.record)),
+    transcriptFileId: transcriptFileId(sessionId, `${opened.stat.dev}:${opened.stat.ino}`)
+  }) !== undefined;
 }
 
 /** Capture the latest exact, unfinished root prompt in a live Claude process. */
@@ -1797,7 +1822,7 @@ export function detectClaudeTranscriptCompletion(
   request: TerminalDurableCompletionRequest,
   options: DetectClaudeTranscriptCompletionOptions
 ): TerminalCompletionEvidence | undefined {
-  const snapshot = readClaudeTranscriptTurnSnapshot(request, options, "idle");
+  const snapshot = readClaudeTranscriptTurnSnapshot(request, options, "foreground_complete");
   if (!snapshot) {
     return undefined;
   }
@@ -2096,7 +2121,7 @@ export function detectClaudeTranscriptPendingApproval(
 function readClaudeTranscriptTurnSnapshot(
   request: TerminalDurableCompletionRequest,
   options: DetectClaudeTranscriptCompletionOptions,
-  requiredAgentStatus?: "idle",
+  requiredAgentStatus?: "idle" | "foreground_complete",
   readMode:
     | "live_monitor"
     | "verified_dead_process"
@@ -2166,7 +2191,9 @@ function readClaudeTranscriptTurnSnapshot(
     ) {
       throw new Error("the Claude process session identity changed after the managed send");
     }
-    if (requiredAgentStatus && agent.status !== requiredAgentStatus) {
+    if (requiredAgentStatus && !(requiredAgentStatus === "foreground_complete"
+      ? isClaudeAgentIdleState(agent) || agent.status === "shell"
+      : agent.status === requiredAgentStatus)) {
       return unavailable(
         `the exact Claude process is ${agent.status}, not ${requiredAgentStatus}`
       );
@@ -2252,7 +2279,7 @@ function readClaudeTranscriptTurnSnapshot(
 }
 
 function matchingManagedPrompt(
-  snapshot: ClaudeTranscriptTurnSnapshot
+  snapshot: Pick<ClaudeTranscriptTurnSnapshot, "records" | "sessionId" | "cwd" | "expectedRequestHash" | "expectedPromptText" | "expectedPromptUuid">
 ): TranscriptRecord | undefined {
   const promptCandidates = snapshot.records.filter((record) => {
     const promptText = userPromptText(record);
@@ -2290,7 +2317,7 @@ function matchingManagedPrompt(
 }
 
 function completionFromRecords(
-  snapshot: ClaudeTranscriptTurnSnapshot,
+  snapshot: Pick<ClaudeTranscriptTurnSnapshot, "records" | "sessionId" | "cwd" | "expectedRequestHash" | "expectedPromptText" | "expectedPromptUuid" | "transcriptFileId">,
   options: { requireVerifiableCompletionSignal?: boolean } = {}
 ): TerminalCompletionEvidence | undefined {
   const {
@@ -2383,7 +2410,7 @@ function completionFromRecords(
   if (descendants.some((record) =>
     record.isSidechain === true ||
     nonEmptyString(record.agentId) !== undefined ||
-    hasUnresolvedBackgroundWork(record)
+    hasBlockingCompletionWork(record, descendants)
   )) {
     return absentOrUnverifiable();
   }
@@ -2451,6 +2478,8 @@ function completionFromRecords(
       }
     };
   }
+  if (turnRecords.slice(turnRecords.indexOf(duration) + 1).some(record =>
+    record.type === "assistant" || record.type === "user")) return absentOrUnverifiable();
   assertSupportedRecord(duration, sessionId);
   if (validTimestampMs(duration.timestamp) === undefined) {
     throw new Error("Claude turn_duration has no valid timestamp");
@@ -2503,6 +2532,7 @@ function completionFromRecords(
     confidence: "high",
     metadata: {
       match: "claude_transcript_turn_duration",
+      completion_scope: "foreground_turn",
       session_id: sessionId,
       prompt_uuid: promptUuid,
       ...(promptId ? { prompt_id: promptId } : {}),
@@ -3181,56 +3211,6 @@ function userPromptText(record: TranscriptRecord): string | undefined {
   return typeof content === "string" ? content : undefined;
 }
 
-function hasUnresolvedBackgroundWork(record: TranscriptRecord): boolean {
-  if ([
-    record.pendingBackgroundAgentCount,
-    record.pendingWorkflowCount
-  ].some((value) =>
-    value !== undefined &&
-    (!Number.isSafeInteger(value) || Number(value) !== 0)
-  )) {
-    return true;
-  }
-  if (
-    record.type === "assistant" &&
-    isRecord(record.message) &&
-    Array.isArray(record.message.content)
-  ) {
-    for (const block of record.message.content) {
-      if (!isRecord(block) || block.type !== "tool_use") {
-        continue;
-      }
-      const toolName = nonEmptyString(block.name)?.toLowerCase();
-      if (
-        toolName?.startsWith("cron") ||
-        toolName === "agent" ||
-        toolName === "sendmessage" ||
-        structuredBoolean(block.input, ["run_in_background", "runInBackground"]) === true
-      ) {
-        return true;
-      }
-    }
-  }
-  const toolUseResult = isRecord(record.toolUseResult)
-    ? record.toolUseResult
-    : undefined;
-  const backgroundStatus = nonEmptyString(toolUseResult?.status);
-  return nonEmptyString(toolUseResult?.backgroundTaskId) !== undefined ||
-    structuredBoolean(toolUseResult, ["isAsync"]) === true ||
-    (
-      backgroundStatus !== undefined &&
-      ["async_launched", "remote_launched", "teammate_spawned"].includes(backgroundStatus)
-    ) ||
-    structuredBoolean(toolUseResult, [
-    "run_in_background",
-    "runInBackground",
-    "is_background",
-    "isBackground",
-    "backgroundedByUser",
-    "assistantAutoBackgrounded"
-  ]) === true;
-}
-
 function hasUnresolvedToolUse(records: readonly TranscriptRecord[]): boolean {
   const toolUses = new Map<string, { count: number; ownerUuid?: string }>();
   const toolResults = new Map<string, {
@@ -3311,18 +3291,6 @@ function hasTurnCompletionSignal(record: TranscriptRecord): boolean {
       nonEmptyString(record.message.stop_reason) !== undefined &&
       record.message.stop_reason !== "tool_use"
     );
-}
-
-function structuredBoolean(value: unknown, keys: readonly string[]): boolean | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  for (const key of keys) {
-    if (typeof value[key] === "boolean") {
-      return value[key] as boolean;
-    }
-  }
-  return undefined;
 }
 
 function assertSupportedRecord(

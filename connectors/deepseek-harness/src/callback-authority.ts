@@ -284,7 +284,7 @@ function checkedCallbackRoute(value: DshCallbackRoute, controllerId: string): Ds
       value.controller_session_id !== controllerId) throw new Error("DSH persisted callback route is invalid");
   cleanText(value.profile_revision);
   if (value.capabilities && Object.entries(value.capabilities).some(([key, item]) =>
-    !["wake", "respond"].includes(key) || typeof item !== "boolean")) throw new Error("DSH callback capabilities are invalid");
+    !["wake", "respond", "idempotent_delivery"].includes(key) || typeof item !== "boolean")) throw new Error("DSH callback capabilities are invalid");
   return freezeRoute({ schema: value.schema, version: value.version, transport: value.transport,
     profile_id: value.profile_id, profile_revision: value.profile_revision, controller_session_id: controllerId,
     ...(value.capabilities ? { capabilities: { ...value.capabilities } } : {}) });

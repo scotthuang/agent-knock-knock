@@ -408,6 +408,11 @@ test("explicit callback recovery delivers only authorized historical identities 
   assert.equal(hostProfileCallbackRouteMatchesRuntime(original, { ...runtime,
     recoveryRoutes: [{ ...original, capabilities: { wake: true, respond: false } }] }), false);
   assert.equal(hostProfileCallbackRouteMatchesRuntime(original, { ...runtime, recoveryRoutes: [] }), false);
+  const forgedReplay = { ...original, capabilities: { ...original.capabilities, idempotent_delivery: true } };
+  assert.equal(hostProfileCallbackRouteMatchesRuntime(forgedReplay, runtime), false);
+  assert.equal(hostProfileCallbackRouteMatchesRuntime({ ...runtime.callbackRoute,
+    capabilities: { idempotent_delivery: true } }, runtime), false,
+    "persisted metadata cannot upgrade an administrator's transport guarantees");
 });
 
 test("callback recovery catalogues reject tampering, cross-Profile authority and executable configuration", t => {

@@ -55,7 +55,8 @@ export function connectorCallbackRoute(
     transport: "command_json_v1", profile_id: String(resources.profile.id),
     profile_revision: String(resources.profile.revision),
     controller_session_id: controllerId,
-    capabilities: Object.freeze({ wake: true, respond: true }),
+    capabilities: Object.freeze({ wake: true, respond: true,
+      ...((resources.profile.callback as { idempotentDelivery?: boolean }).idempotentDelivery ? { idempotent_delivery: true } : {}) }),
   });
 }
 
@@ -117,6 +118,7 @@ export function createConnectorProfileResources(
     },
     callback: {
       driver: "command_json_v1",
+      ...(recovery ? { idempotentDelivery: true } : {}),
       executable: process.execPath,
       arguments: [
         helperPath,

@@ -699,6 +699,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-transcript-background-policy.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-transcript-config.ts",
       "owner": "agent-session-core"
     },
@@ -1909,6 +1913,10 @@
     {
       "path": "src/terminal-monitor-decision-policy.ts",
       "owner": "terminal-monitor-policy"
+    },
+    {
+      "path": "src/terminal-monitor-diagnostic-notification.ts",
+      "owner": "terminal-monitor-state"
     },
     {
       "path": "src/terminal-monitor-interaction-projection.ts",

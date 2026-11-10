@@ -255,7 +255,8 @@ export function callbackRouteForHostProfile(
       controllerSessionId,
       "controller session id"
     ),
-    capabilities: Object.freeze({ wake: true, respond: true })
+    capabilities: Object.freeze({ wake: true, respond: true,
+      ...(profile.callback.idempotentDelivery === true ? { idempotent_delivery: true } : {}) })
   });
 }
 

@@ -1,3 +1,4 @@
+import { deliverDetectorNotification } from "./terminal-monitor-diagnostic-notification.js";
 import {
   executorForConversation,
   turnIdForConversation,
@@ -34,6 +35,7 @@ import type { TerminalMonitorPollState } from
   "./terminal-monitor-poll-policy.js";
 import {
   isRecord,
+  recordValue,
   nonBlankString as stringValue
 } from "./value-guards.js";
 import {
@@ -212,6 +214,7 @@ export interface TerminalMonitorServicePorts {
     }): {
       conversation: Conversation;
       diagnostic?: JsonRecord;
+      prepared?: PreparedCallback;
     };
     markApprovalPromptCleared(input: {
       expectedConversationId: string;
@@ -1470,7 +1473,8 @@ function persistDetectorDiagnostic(input: SampledPollInput): {
     : undefined;
   const changed = limitation
     ? fingerprint !== state.persistedDetectorDiagnosticFingerprint ||
-      state.persistedDetectorDiagnosticStatus !== "limited"
+      state.persistedDetectorDiagnosticStatus !== "limited" ||
+      !recordValue(input.takeover?.terminal_bridge_detector_diagnostic)?.notification_message_id
     : state.persistedDetectorDiagnosticStatus === "limited";
   if (!changed) {
     return { proceed: true, takeover: input.takeover };
@@ -1484,6 +1488,9 @@ function persistDetectorDiagnostic(input: SampledPollInput): {
     });
     if (persisted.diagnostic) {
       state.conversation = persisted.conversation;
+      if (persisted.prepared) {
+        state.conversation = deliverDetectorNotification(persisted.prepared, ports);
+      }
       const takeover = takeoverFor(state.conversation);
       state.persistedDetectorDiagnosticFingerprint = stringValue(
         persisted.diagnostic.fingerprint

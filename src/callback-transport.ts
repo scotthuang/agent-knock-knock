@@ -15,6 +15,8 @@ export const CALLBACK_ENVELOPE_VERSION = 1 as const;
 export interface CallbackRouteCapabilitiesV1 {
   wake?: boolean;
   respond?: boolean;
+  /** Receiver persists and deduplicates admissions across restarts. */
+  idempotent_delivery?: boolean;
 }
 
 /**
@@ -480,14 +482,18 @@ function parseRouteCapabilities(
   if (!isRecord(value)) {
     throw new Error("callback_route capabilities must be an object");
   }
-  assertOnlyKeys(value, ["wake", "respond"], "callback_route capabilities");
+  assertOnlyKeys(value, ["wake", "respond", "idempotent_delivery"], "callback_route capabilities");
   if (value.wake !== undefined && typeof value.wake !== "boolean") {
     throw new Error("callback_route capabilities.wake must be boolean");
   }
   if (value.respond !== undefined && typeof value.respond !== "boolean") {
     throw new Error("callback_route capabilities.respond must be boolean");
   }
+  if (value.idempotent_delivery !== undefined && typeof value.idempotent_delivery !== "boolean") {
+    throw new Error("callback_route capabilities.idempotent_delivery must be boolean");
+  }
   return {
+    ...(value.idempotent_delivery !== undefined ? { idempotent_delivery: value.idempotent_delivery as boolean } : {}),
     ...(typeof value.wake === "boolean" ? { wake: value.wake } : {}),
     ...(typeof value.respond === "boolean" ? { respond: value.respond } : {})
   };

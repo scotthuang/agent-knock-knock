@@ -1,5 +1,7 @@
 import {
   callbackDeliveryHasAcceptedTransport,
+  callbackDeliverySupportsReplay,
+  callbackRetryDelay,
   type CallbackDeliveryOutcome
 } from "./callback-outbox-policy.js";
 import {
@@ -199,10 +201,11 @@ export function createCallbackOutboxSettlement({
       });
       const decision = reduceDurableNotificationSettlement({
         attempt: prepared.deliveryAttempt,
-        outcome,
+        outcome: outcome.disposition === "uncertain" && callbackDeliverySupportsReplay(currentDelivery)
+          ? { ...outcome, disposition: "retryable_failure" } : outcome,
         retryEnabled: prepared.options.retryPending !== true &&
           prepared.options.disableCallbackRetry !== true,
-        maxRetryAttempts: retryDelaysMs.length
+        maxRetryAttempts: currentDelivery.callback_route ? undefined : retryDelaysMs.length
       });
       if (decision.state === "accepted") {
         return persistDelivered({
@@ -219,7 +222,7 @@ export function createCallbackOutboxSettlement({
         currentDelivery,
         prepared,
         result.error,
-        decision.outcome,
+        outcome.disposition === "uncertain" ? outcome : decision.outcome,
         decision.state === "failed" && decision.retryAuthorized
       );
     });
@@ -283,7 +286,8 @@ export function createCallbackOutboxSettlement({
       ...notificationAcceptanceFields(
         callbackOutboxLane,
         callbackMessage,
-        acceptedAt
+        acceptedAt,
+        callbackDelivery.kind
       )
     };
     state.save(statePath, settled);
@@ -361,7 +365,8 @@ export function createCallbackOutboxSettlement({
       ...notificationAcceptanceFields(
         lane,
         prepared.message,
-        outcome.accepted_at
+        outcome.accepted_at,
+        currentDelivery.kind
       )
     };
     state.save(prepared.statePath, nextConversation);
@@ -398,9 +403,7 @@ export function createCallbackOutboxSettlement({
       : error instanceof Error ? error.message : String(error);
     const normalizedCurrent = normalizeLegacyCallbackStatus(current);
     const shouldLaunchRetry = retryAuthorized;
-    const retryDelayMs = retryDelaysMs[
-      Math.max(0, prepared.deliveryAttempt - 1)
-    ];
+    const retryDelayMs = callbackRetryDelay(retryDelaysMs, prepared.deliveryAttempt);
     const launchedRetryMonitor = shouldLaunchRetry
       ? retryMonitor.start({
           statePath: prepared.statePath,
@@ -497,9 +500,10 @@ function preparedCallbackOutboxLane(
 function notificationAcceptanceFields(
   lane: CallbackOutboxLane,
   message: { id?: unknown },
-  acceptedAt: string
+  acceptedAt: string,
+  kind?: unknown
 ): Record<string, unknown> {
-  return lane === "notification"
+  return lane === "notification" && (kind === undefined || kind === "stall_notification")
     ? {
         stalled_notification_sent_at: acceptedAt,
         stalled_notification_message_id: message.id

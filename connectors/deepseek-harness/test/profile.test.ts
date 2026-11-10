@@ -71,6 +71,8 @@ test("uses a new Profile revision and token for each Host incarnation", () => {
 test("durable owner retains revision across restart while rotating authenticated IPC", () => {
   const first = createConnectorProfileResources("0.2.1-rc.2", {}, { ownerScope: "profile-web:owner-one", routes: [] });
   const route = connectorCallbackRoute(first, "persisted-controller");
+  assert.equal(route.capabilities?.idempotent_delivery, true);
+  assert.equal((first.profile.callback as { idempotentDelivery?: boolean }).idempotentDelivery, true);
   const second = createConnectorProfileResources("0.2.1-rc.2", {}, {
     ownerScope: "profile-web:owner-one", routes: [route],
   });

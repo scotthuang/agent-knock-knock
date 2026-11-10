@@ -2720,3 +2720,34 @@ test("dispatch fencing is presented before the poll terminal lock releases", asy
     "terminal.release"
   ]);
 });
+
+
+test("detector failure notifies without ending monitoring and recovery still delivers completion", async () => {
+  const trace: string[] = [];
+  const owner = conversation();
+  const ports = fakePorts(trace, owner);
+  let polls = 0;
+  let advisory = false;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 6);
+    return { kind: "observed", poll: polls === 1
+      ? { status: { ...status(), capability_limitation: "reader temporarily unavailable" } }
+      : { status: status(), completion: COMPLETION } };
+  };
+  ports.state.persistDetectorDiagnostic = input => {
+    const diagnostic = { status: input.limitation ? "limited" : "recovered",
+      fingerprint: input.fingerprint, notification_message_id: "notice-1" };
+    return { conversation: owner, diagnostic,
+      ...(input.limitation ? { prepared: fakePrepared(owner) } : {}) };
+  };
+  ports.callbacks.run = prepared => {
+    if (!advisory) { advisory = true; throw new Error("controller offline"); }
+    trace.push("final.delivered");
+    return callbackResult(prepared.conversation);
+  };
+  await runTerminalMonitor({ initialConversation: owner, expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION, lifecycle: { startedRecorded: true }, ports });
+  assert.equal(advisory, true);
+  assert.equal(trace.includes("state.markStalled"), false);
+  assert.equal(trace.filter(item => item === "final.delivered").length, 1);
+});

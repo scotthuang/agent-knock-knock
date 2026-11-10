@@ -44,8 +44,8 @@ export function captureClaudeManagedSendAdmission(
     return anchor ? { readiness: { ready: true }, anchor } : {
       readiness: {
         ready: false, reason: "claude_completion_monitor_unavailable",
-        message: "AKK cannot verify this Claude session's idle process and transcript for managed completion tracking. " +
-          "Wait for Claude to finish, check Status and the Claude reader, then refresh List and retry. No task text was sent."
+        message: "AKK cannot verify this Claude session's completed foreground turn and transcript for managed completion tracking. " +
+          "Claude may still be busy; a background shell alone is allowed only with verified foreground completion. Wait for the task result or check Status for the blocking reason, then refresh List and retry through AKK. No task text was sent."
       }
     };
   } catch {

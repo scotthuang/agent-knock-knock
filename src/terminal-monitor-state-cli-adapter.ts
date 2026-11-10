@@ -1,4 +1,5 @@
 import path from "node:path";
+import { prepareDetectorNotification, detectorDiagnostic, sameDetectorDiagnostic } from "./terminal-monitor-diagnostic-notification.js";
 import { loadDeferredForegroundTransfer } from "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from "./deferred-foreground-transfer-policy.js";
 import {
@@ -842,7 +843,7 @@ class TerminalMonitorStateCliApplication {
       : undefined;
     const now = cliNow().toISOString();
     const nextDiagnostic = detectorDiagnostic(input, existing, now);
-    if (!nextDiagnostic || sameDetectorDiagnostic(existing, nextDiagnostic)) {
+    if (!nextDiagnostic) {
       return {
         persisted: false as const,
         conversation,
@@ -850,16 +851,18 @@ class TerminalMonitorStateCliApplication {
         reason: "detector_diagnostic_unchanged"
       };
     }
-    const nextConversation: Conversation = {
-      ...conversation,
-      native_session_takeover: {
-        ...takeover,
-        terminal_bridge_detector_diagnostic: nextDiagnostic
-      },
-      updated_at: now
-    };
-    saveState(input.statePath, nextConversation);
-    this.#recordDetectorDiagnostic(
+    const unchanged = sameDetectorDiagnostic(existing, nextDiagnostic);
+    const notification = prepareDetectorNotification({
+      conversation: { ...conversation, native_session_takeover: {
+        ...takeover, terminal_bridge_detector_diagnostic: unchanged ? existing : nextDiagnostic
+      }, updated_at: now },
+      diagnostic: unchanged && existing ? existing : nextDiagnostic,
+      statePath: input.statePath, logPath: input.logPath,
+      prepare: request => this.#dependencies.callbacks.prepareStallNotification(request)
+    });
+    const nextConversation = notification.conversation;
+    if (!notification.prepared && !unchanged) saveState(input.statePath, nextConversation);
+    if (!unchanged) this.#recordDetectorDiagnostic(
       input,
       conversation,
       nextDiagnostic,
@@ -868,7 +871,8 @@ class TerminalMonitorStateCliApplication {
     return {
       persisted: true as const,
       conversation: nextConversation,
-      diagnostic: nextDiagnostic
+      diagnostic: notification.diagnostic,
+      prepared: notification.prepared
     };
   }
 
@@ -1055,33 +1059,6 @@ function approvalCanBeCleared(
     validTerminalMonitorTimestampMs(
       takeover.terminal_bridge_last_approval_prompt_cleared_at
     ) === undefined;
-}
-
-function detectorDiagnostic(
-  input: { limitation?: string; fingerprint?: string },
-  existing: Record<string, unknown> | undefined,
-  now: string
-): Record<string, unknown> | undefined {
-  if (input.limitation && input.fingerprint) {
-    return {
-      status: "limited",
-      source: "terminal_completion_detector",
-      fingerprint: input.fingerprint,
-      detail: truncateText(redactString(input.limitation), 1000),
-      observed_at: now
-    };
-  }
-  return existing && nonBlankString(existing.status) === "limited"
-    ? { ...existing, status: "recovered", recovered_at: now }
-    : undefined;
-}
-
-function sameDetectorDiagnostic(
-  existing: Record<string, unknown> | undefined,
-  next: Record<string, unknown>
-): boolean {
-  return nonBlankString(existing?.status) === nonBlankString(next.status) &&
-    nonBlankString(existing?.fingerprint) === nonBlankString(next.fingerprint);
 }
 
 function stalledMessage(

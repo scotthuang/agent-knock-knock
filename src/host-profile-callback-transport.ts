@@ -111,7 +111,8 @@ export function hostProfileCallbackRouteMatchesRuntime(
   route: CallbackRouteV1,
   runtime: Pick<TrustedHostProfileRuntimeV1, "callbackRoute" | "controllerScope" | "recoveryRoutes">
 ): boolean {
-  const current = runtime.callbackRoute.transport === route.transport &&
+  const current = (!route.capabilities?.idempotent_delivery || runtime.callbackRoute.capabilities?.idempotent_delivery === true) &&
+    runtime.callbackRoute.transport === route.transport &&
     runtime.callbackRoute.profile_id === route.profile_id &&
     runtime.callbackRoute.profile_revision === route.profile_revision &&
     (runtime.controllerScope === "route_bound_v1" ||
@@ -121,7 +122,8 @@ export function hostProfileCallbackRouteMatchesRuntime(
     allowed.profile_revision === route.profile_revision &&
     allowed.controller_session_id === route.controller_session_id &&
     (!route.capabilities?.wake || allowed.capabilities?.wake === true) &&
-    (!route.capabilities?.respond || allowed.capabilities?.respond === true)) === true;
+    (!route.capabilities?.respond || allowed.capabilities?.respond === true) &&
+    (!route.capabilities?.idempotent_delivery || allowed.capabilities?.idempotent_delivery === true)) === true;
 }
 
 function permanentFailure(errorCode: string): CallbackAttemptOutcome {

@@ -1,3 +1,4 @@
+import { prepareDetectorNotification } from "../src/terminal-monitor-diagnostic-notification.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -1512,4 +1513,84 @@ test("persisted generic and legacy routes beat changed current routing", () => {
   assert.equal(legacyPrepared.options.gatewaySession, "persisted-controller");
   assert.equal(legacyPrepared.options.openclawBin, "/persisted/openclaw");
   assert.equal(legacyPrepared.options.gatewayUrl, "ws://persisted.invalid");
+});
+
+
+test("detector uncertainty is saved in the advisory outbox once without ending the task", () => {
+  const h = createHarness();
+  Object.assign(h.conversation, { callback_route: GENERIC_ROUTE });
+  const prepare = (conversation: Conversation, diagnostic: Record<string, unknown>) => prepareDetectorNotification({
+    conversation, diagnostic, statePath: STATE_PATH, logPath: LOG_PATH,
+    prepare: input => h.service.prepareStallNotification(input)
+  });
+  const notice = prepare(h.conversation, { status: "limited", fingerprint: "reader-missing" });
+  assert.ok(notice.prepared);
+  assert.equal(h.stored().status, "waiting_for_agent");
+  const delivery = h.stored().callback_notification_delivery as Record<string, unknown>;
+  assert.equal(delivery.kind, "completion_uncertain_notification");
+  assert.equal(delivery.status, "pending");
+  assert.match(String((delivery.message as { body: string }).body), /Monitoring continues/u);
+  assert.equal(prepare(h.stored(), notice.diagnostic).prepared, undefined);
+  assert.equal(prepare(h.stored(), { status: "limited", fingerprint: "other-error" }).prepared, undefined,
+    "never overwrite a pending advisory outbox");
+  const completed = h.service.prepare({ options: { statePath: STATE_PATH,
+    preserveMessageId: true, messageJson: JSON.stringify(callbackMessage(h.stored())) }, logPath: LOG_PATH });
+  assert.equal(completed.outcome, "deliver", "advisory failure does not block the eventual result");
+  assert.equal((h.stored().callback_notification_delivery as Record<string, unknown>).status, "superseded");
+});
+
+for (const crash of [false, true]) {
+  test(`durable callback survives prolonged offline and process recovery (crash=${crash})`, () => {
+    const h = createHarness();
+    Object.assign(h.conversation, { callback_route: {
+      ...GENERIC_ROUTE, capabilities: { ...GENERIC_ROUTE.capabilities, idempotent_delivery: true }
+    } });
+    h.service.prepare({ options: { statePath: STATE_PATH, preserveMessageId: true,
+      messageJson: JSON.stringify(callbackMessage(h.conversation)) }, logPath: LOG_PATH });
+    const delivery = h.stored().callback_delivery as Record<string, unknown>;
+    const envelope = delivery.callback_envelope;
+    const restarted = createHarness([{ event: "message", message: delivery.message as Record<string, unknown> }]);
+    restarted.replaceStored({ ...h.stored(), callback_delivery: { ...delivery,
+      status: crash ? "pending" : "failed", attempts: 8,
+      attempt_pid: undefined, attempt_lease_expires_at: undefined, retry_monitor_pid: undefined,
+      ...(crash ? { transport_started_at: NOW.toISOString() }
+        : { attempt_outcome: { disposition: "retryable_failure", error_code: "offline" } })
+    } });
+    assert.equal(restarted.service.reconcileDelivery({ statePath: STATE_PATH, logPath: LOG_PATH }).status, "launched");
+    let attempts = 0;
+    restarted.ports.delivery.deliver = input => {
+      assert.deepEqual(input.envelope, envelope, "every attempt retains the exact durable idempotency key and payload");
+      return { kind: "local_ipc", injection: {}, wake: {}, attempt_outcome: ++attempts < 6
+        ? { disposition: "retryable_failure", error_code: "offline" }
+        : { disposition: "accepted", acceptance_id: "durable-receipt", accepted_at: NOW.toISOString() } };
+    };
+    const preparationErrors: string[] = [];
+    restarted.ports.delivery.runTransaction = options => {
+      let prepared;
+      try { prepared = restarted.service.prepare({ options, logPath: LOG_PATH }); }
+      catch (error) { preparationErrors.push(String(error)); throw error; }
+      return restarted.service.runPrepared(prepared);
+    };
+    restarted.service.runRetryMonitor({ statePath: STATE_PATH, initialDelayMs: 0 });
+    assert.deepEqual(preparationErrors, []);
+    assert.equal(attempts, 6);
+    assert.equal((restarted.stored().callback_delivery as Record<string, unknown>).status, "delivered");
+  });
+}
+
+
+test("accepted uncertainty notice does not suppress the later timeout notice", () => {
+  const h = createHarness();
+  Object.assign(h.conversation, { callback_route: GENERIC_ROUTE });
+  const notice = prepareDetectorNotification({ conversation: h.conversation,
+    diagnostic: { status: "limited", fingerprint: "reader-missing" },
+    statePath: STATE_PATH, logPath: LOG_PATH,
+    prepare: input => h.service.prepareStallNotification(input) });
+  assert.ok(notice.prepared);
+  h.ports.delivery.deliver = () => ({ kind: "local_ipc", injection: {}, wake: {},
+    attempt_outcome: { disposition: "accepted", accepted_at: NOW.toISOString(), acceptance_id: "notice-received" } });
+  h.service.runPrepared(notice.prepared);
+  assert.equal((h.stored().callback_notification_delivery as Record<string, unknown>).status, "delivered");
+  assert.equal(h.stored().stalled_notification_sent_at, undefined);
+  assert.equal(h.stored().status, "waiting_for_agent");
 });

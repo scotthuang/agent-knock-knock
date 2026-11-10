@@ -669,3 +669,22 @@ test("transport-started callback reports a live attempt but never becomes retrya
     reason: "callback transport started without a durable final outcome"
   });
 });
+
+
+test("durable replay keeps live leases and only retries an uncertain delivery for a deduplicating receiver", () => {
+  const delivery = { status: "pending", attempts: 20, message: MESSAGE,
+    callback_route: { capabilities: { idempotent_delivery: true } },
+    callback_envelope: { idempotency_key: "same-task-notice" },
+    transport_started_at: NOW_ISO, attempt_pid: 42,
+    attempt_lease_expires_at: "2026-08-14T12:02:00.000Z" };
+  const first = beginCallbackRetryPolicy(delivery, LIMITS);
+  const alive = reduceCallbackRetryPolicy(first, { kind: "process_alive", alive: true });
+  assert.equal(disposition(reduceCallbackRetryPolicy(alive, { kind: "clock", now_ms: Date.parse(NOW_ISO) })).state, "in_flight");
+  assert.equal(disposition(reduceCallbackRetryPolicy(first, { kind: "process_alive", alive: false })).state, "retryable");
+  assert.equal(disposition(beginCallbackRetryPolicy({ ...delivery, status: "failed",
+    attempt_outcome: { disposition: "uncertain", error_code: "ack_lost", observed_at: NOW_ISO } }, LIMITS)).state, "retryable");
+  assert.equal(disposition(beginCallbackRetryPolicy({ ...delivery, status: "failed", callback_route: {},
+    attempt_outcome: { disposition: "uncertain", error_code: "ack_lost", observed_at: NOW_ISO } }, LIMITS)).state, "uncertain");
+  assert.equal(disposition(beginCallbackRetryPolicy({ ...delivery, status: "failed",
+    attempt_outcome: { disposition: "permanent_failure", error_code: "route_revoked" } }, LIMITS)).state, "permanent_failure");
+});
