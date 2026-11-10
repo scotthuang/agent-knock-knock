@@ -75,7 +75,7 @@ That is the terminal first-task flow. For terminal setup and multiple panes, see
 ## Install for Pi
 
 Pi can be the controller Host without OpenClaw. The connector supports Pi `1.2.0`
-and retains `0.84.4` compatibility. It includes AKK `0.16.12`, with direct CLI and
+and retains `0.84.4` compatibility. It includes AKK `0.16.13`, with direct CLI and
 Desktop capabilities governed by the same target-specific boundaries above.
 
 ```bash
@@ -91,7 +91,9 @@ Pi should show `AKK ready`. With a supported coding-agent conversation open, ent
 Let DeepSeek Harness delegate to your existing Codex CLI, Codex Desktop and
 Claude Code sessions. Use a resident POSIX **DSH Web 0.2.1-rc.2** Host (the
 reviewed baseline), Node.js `>=22.19.0`, and `pnpm`. The connector pins AKK
-**0.16.12**; newer unlisted DSH versions are not automatically compatible.
+**0.16.12** by default; newer unlisted DSH versions are not automatically compatible.
+For the latest managed-Claude result-delivery fixes, use `@next`
+(**0.1.0-rc.25**, pinned core **0.16.13**) or that exact connector version.
 
 ```bash
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness
@@ -141,7 +143,7 @@ question boundaries. Codex 0.157.x retains its [partial compatibility](docs/code
 - **Set Codex permissions before a task.** `/akk permissions <exact-terminal-id>` reads the current setting and native choices; `/akk set-permissions <exact-terminal-id> <advertised-mode-id>` applies your selected mode to that idle session and verifies it before Send. Full Access works like the other options; AKK handles its native confirmation automatically without an extra user prompt. See [Codex permissions](docs/codex-permissions.md).
 - **Switch models through the native catalog.** `/akk models <exact-terminal-id>` lists the choices currently offered by one exact physical Codex or Claude Code pane; a Codex rollout/native-thread attribution is not required, so this also works before the first rollout materializes. `/akk set-model ...` consumes one exact advertised model/reasoning-effort tuple without accepting raw slash commands, keys, or menu indexes. Codex synchronizes the model and ordinary efforts through `max` to the current and future-session defaults; its `ultra` effort is current-session-only, and the native UI does not expose the exact non-Ultra effort chosen for future sessions, so AKK omits that unobservable field. Claude Code changes only the current session.
 - **Continue or clear only a proven model-control residue.** If a failed model-control attempt in a reviewed Codex profile leaves an exact `/model` completion surface or bare `/model` Composer, a fresh List may advertise both `/akk models <exact-terminal-id>` and `/akk repair-model-control <exact-terminal-id>`. Models uses a separate residual-bound authority to continue that exact native slash command into read-only catalog discovery without retyping it. If the exact native picker is already open, List marks the pane non-idle and exposes repair where supported. Repair remains the cleanup-only escape hatch, never presses Enter, and must prove an empty Composer.
-- **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Direct CLI and Desktop Status also include a short public progress summary. Send and Watch default to a 12-hour hard deadline; managed terminal tasks retain their separate 60-minute inactivity limit. Durable callback records and Watches provide a recovery path after transient Host failures. See [Backend Recovery](docs/backend-task-recovery.md).
+- **Inspect and recover.** `/akk status <turn-or-watch>` shows current state when a callback is delayed. Direct CLI and Desktop Status also include a short public progress summary. Send and Watch default to a 12-hour hard deadline; managed terminal tasks retain their separate 60-minute inactivity threshold. Accepted Claude terminal tasks notify uncertainty at these thresholds and continue observation until a result or explicit release; other timeout policies are unchanged. See [managed task results](docs/managed-task-result-delivery.md). Durable callback records and Watches provide a recovery path after transient Host failures. See [Backend Recovery](docs/backend-task-recovery.md).
 - **Approve deliberately in supported conversations.** AKK can surface Codex or Claude Code permission requests and submit an explicit human decision. It preserves the coding agent's existing permission mode. Desktop exposes typed command/file approvals and blocking or asynchronous answers through the original conversation owner.
 - **Hand control back and forth.** Return to the same Codex CLI, Desktop conversation, or tmux/Herdr pane whenever you want. AKK does not create a parallel hidden conversation.
 
@@ -217,8 +219,8 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Claude Code direct connection | macOS, compatible native peer protocol `1`, and Python 3 available to AKK. Live observations include `2.1.295` and `2.1.296`; these are not minimum versions. Standard `claude` and configured wrappers use the same adapter. See the [direct guide](docs/claude-cli-direct.md) for task and interaction boundaries. |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0`, `0.162.1`, `0.164.0`, `0.165.0`, `0.166.0` and `0.167.0`; Claude fixtures include `2.1.285`, with live observations on `2.1.295`/`2.1.296`. An otherwise eligible, complete `x.y.z` Claude version may attempt supported controls through runtime validation even without an exact regression profile. Actual identity, protocol and UI evidence determine availability; unknown dialogs are not guessed. |
 | OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
-| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.20` (`next`), pinned AKK `0.16.12` |
-| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); recommended connector `0.1.0-rc.24` (`latest`, still RC), pinned AKK `0.16.12`. See its guide for previous RC, alpha and legacy coverage. |
+| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.21` (`next`), pinned AKK `0.16.13` |
+| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); recommended connector `0.1.0-rc.24` (`latest`, still RC), pinned AKK `0.16.12`; `next` rc.25 pins core `0.16.13`. See its guide for previous RC, alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr versions are observations, not an allowlist: discovery verifies live identity and read capabilities, while input requires a matching CLI schema declaration or verified baseline behavior. An untested server without input evidence exposes only verified read capabilities. Desktop controls validate the live native contract. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.
