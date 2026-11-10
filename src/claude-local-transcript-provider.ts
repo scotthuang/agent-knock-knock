@@ -1826,7 +1826,15 @@ export function detectClaudeTranscriptCompletion(
   if (!snapshot) {
     return undefined;
   }
-  return completionFromRecords(snapshot);
+  const completion = completionFromRecords(snapshot);
+  const agent = exactInteractiveAgent(options.agentRows, runtimePidFromContext(request.context)!);
+  if (agent && !isClaudeAgentIdleState(agent) && agent.status !== "shell") {
+    if (completion) {
+      throw new Error("claude_completion_observation_conflict: bound process reports active but the managed foreground transcript is complete");
+    }
+    return undefined;
+  }
+  return completion;
 }
 
 /**
@@ -2130,7 +2138,7 @@ function readClaudeTranscriptTurnSnapshot(
   acceptedPromptUuid?: string
 ): ClaudeTranscriptTurnSnapshot | undefined {
   const unavailable = (reason: string): undefined => {
-    if (readMode !== "live_monitor") {
+    if (readMode !== "live_monitor" || requiredAgentStatus === "foreground_complete") {
       throw new Error(reason);
     }
     return undefined;
@@ -2191,9 +2199,8 @@ function readClaudeTranscriptTurnSnapshot(
     ) {
       throw new Error("the Claude process session identity changed after the managed send");
     }
-    if (requiredAgentStatus && !(requiredAgentStatus === "foreground_complete"
-      ? isClaudeAgentIdleState(agent) || agent.status === "shell"
-      : agent.status === requiredAgentStatus)) {
+    if (requiredAgentStatus && requiredAgentStatus !== "foreground_complete" &&
+      agent.status !== requiredAgentStatus) {
       return unavailable(
         `the exact Claude process is ${agent.status}, not ${requiredAgentStatus}`
       );
@@ -2227,6 +2234,8 @@ function readClaudeTranscriptTurnSnapshot(
 
     const bytesToRead = opened.stat.size - anchor.offset_bytes;
     if (bytesToRead === 0) {
+      // A verified file with no post-send bytes is ordinary pending work.
+      if (readMode === "live_monitor") return undefined;
       return unavailable(
         "the anchored Claude transcript contains no post-send records"
       );
@@ -2257,6 +2266,7 @@ function readClaudeTranscriptTurnSnapshot(
       );
     }
     if (records.length === 0) {
+      if (readMode === "live_monitor") return undefined;
       return unavailable(
         "Claude transcript contains no complete post-send records"
       );

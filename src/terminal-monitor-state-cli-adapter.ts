@@ -1,4 +1,5 @@
 import path from "node:path";
+import { recoverTimedOutClaudeMonitor } from "./terminal-monitor-timeout-recovery.js";
 import { prepareDetectorNotification, detectorDiagnostic, sameDetectorDiagnostic } from "./terminal-monitor-diagnostic-notification.js";
 import { loadDeferredForegroundTransfer } from "./deferred-foreground-transfer.js";
 import { isFinalDeferredForegroundTransferStatus } from "./deferred-foreground-transfer-policy.js";
@@ -337,6 +338,16 @@ class TerminalMonitorStateCliApplication {
             );
           }
         },
+        recoverTimedOut: (storeDir, _conversation, paths) => recoverTimedOutClaudeMonitor({
+          storeDir, ...paths, now: cliNow,
+          lock: work => {
+            const release = this.#stateFileLock.acquire(`${paths.statePath}.lock`);
+            try { return work(); } finally { release(); }
+          },
+          assertBindingCurrent: conversation => this.#dependencies.authority.assertBindingCurrent(
+            conversation, "resume timed-out monitor for"),
+          eligible: conversation => this.eligibility(conversation).eligible
+        }),
         eligibility: (conversation) => this.eligibility(conversation)
       }
     };

@@ -41,7 +41,7 @@ export interface CliCommandDependencies<Options extends CliDependencyOptions = C
   codexThreadLifecycleProvider?: TerminalThreadLifecycleCandidateProvider;
   loadClaudeAgentRows?: (
     options: Options,
-    observation: { required?: boolean }
+    observation: { required?: boolean; pid?: number }
   ) => ClaudeAgentRow[];
   agentVersionForRunningProcess?: (
     agent: ExecutorKind,

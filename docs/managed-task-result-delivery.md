@@ -10,6 +10,9 @@ terminal injection is not a recovery step.
 
 For Claude terminal Turns, AKK still requires the exact process incarnation,
 session, transcript anchor, matching submitted prompt and linked record chain.
+Detached monitors read the exact PID registry using the bound Turn context, just
+as targeted Send does. They do not use the aggregate `agents --all` state, which
+can report `busy` while the owned PID registry reports `shell`.
 An `end_turn` reply followed by its `turn_duration` can complete that foreground
 Turn while the registry reports `shell`. A Bash tool result acknowledging a
 background launch, including a timeout that moved the build into the background,
@@ -37,10 +40,20 @@ Monitoring continues when delivery of that notice fails. Once detection recovers
 the ordinary completion path saves and sends the final result. A final result
 supersedes an unaccepted obsolete advisory; accepted notification evidence is
 retained. An accepted uncertainty notice does not count as a timeout notice.
-Configured inactivity and hard-lifetime limits still apply: reaching a limit
-produces the existing stalled notification and ends active monitoring. This
-change does not promise automatic final detection after that explicit timeout,
-Close, or loss of the original session identity.
+For accepted Claude terminal Turns, configured inactivity and hard-lifetime
+limits trigger a durable uncertainty notice rather than ending observation.
+The monitor continues checking the original task; verified completion uses the
+original callback route. Truly active processes without a completion chain remain
+pending. Active status contradicting an exact complete transcript, unreadable
+anchors, and invalid request metadata produce detector diagnostics; a partial
+JSONL write is ordinary pending observation.
+
+Startup reconciliation also resumes legacy Claude timeout stalls after checking
+the original binding, dispatch generation, callback route and acceptance. It
+never resends task text. Close, supersession, an existing final callback or a
+non-timeout stall prevents this recovery. Losing session identity remains an
+uncertainty, never permission to attribute another task’s result. Other executor
+timeout policies are unchanged.
 
 ## Durable delivery
 
@@ -81,6 +94,9 @@ restart after an unacknowledged transport start, stable callback identities,
 live-lease and route-capability fences. Existing DSH receiver tests cover durable
 flush, accepted receipt recovery, absent-message recovery and deduplication.
 
+Composed monitor regressions also cover aggregate `busy` versus exact PID `shell`,
+old background work before the anchor, active/transcript contradictions, pending
+foreground work, both timeout thresholds, recovery and legacy timeout fences.
 These are isolated component tests. Installing the reviewed build, restarting
 DSH and repeating the original live Claude task are separate authorized steps.
 Full/integration tests remain the publication gate under repository policy.

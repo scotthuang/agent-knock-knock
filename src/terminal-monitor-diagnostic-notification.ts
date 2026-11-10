@@ -75,12 +75,15 @@ export function deliverDetectorNotification(prepared: PreparedCallback, ports: {
   callbacks: { run(prepared: PreparedCallback, options: { emit: boolean }): CallbackExecutionResult };
   state: { load(): Conversation };
   runtime: { log(level: "warn", event: string, fields: Record<string, unknown>): void };
+}, failure: { event: string; terminalTarget?: string } = {
+  event: "completion_uncertain_notification_delivery_deferred"
 }): Conversation {
   try {
     ports.callbacks.run(prepared, { emit: false });
   } catch {
     // The durable outbox owns retries; keep detecting the task's final result.
-    ports.runtime.log("warn", "completion_uncertain_notification_delivery_deferred", {
+    ports.runtime.log("warn", failure.event, {
+      ...(failure.terminalTarget ? { terminal_target: failure.terminalTarget } : {}),
       conversation_id: prepared.conversation.conversation_id
     });
   }

@@ -1,4 +1,5 @@
 import { deliverDetectorNotification } from "./terminal-monitor-diagnostic-notification.js";
+import { continuesClaudeCompletionObservation, statusWithCompletionDeadline } from "./terminal-monitor-continuation-policy.js";
 import {
   executorForConversation,
   turnIdForConversation,
@@ -1053,7 +1054,10 @@ interface CompletionPollInput extends SampledPollInput {
 async function handleObservedPoll(
   input: ObservedPollInput
 ): Promise<"continue" | "finished"> {
-  const terminalStatus = input.poll.status;
+  const terminalStatus = continuesClaudeCompletionObservation(input.state.conversation)
+    ? statusWithCompletionDeadline(input.state.conversation, input.poll,
+      input.ports.runtime.nowMs(), input.state, input.configuration)
+    : input.poll.status;
   const sampledStatus = { ...input, terminalStatus };
   const diagnostic = persistDetectorDiagnostic(sampledStatus);
   if (!diagnostic.proceed) {
@@ -1105,6 +1109,7 @@ async function handleObservedPoll(
     completionFingerprint
   });
 }
+
 
 interface ManagedMonitorInteractionContext {
   projection: TerminalInteractionSubjectProjection;
@@ -1336,7 +1341,9 @@ function handleRecordedMonitorInteraction(
     return asynchronous ? "proceed" : "finished";
   }
   if (asynchronous) {
-    runAsyncInteractionNotification(input, prepared);
+    input.state.conversation = deliverDetectorNotification(prepared, input.ports, {
+      event: "terminal_bridge_async_question_callback_deferred", terminalTarget: input.terminalControl.target
+    });
     return "proceed";
   }
   return finishBlockingInteractionNotification(input, {
@@ -1437,22 +1444,6 @@ function retireAbsentAsyncQuestion(input: SampledPollInput): void {
   if (retired) input.state.conversation = retired;
 }
 
-function runAsyncInteractionNotification(
-  input: SampledPollInput,
-  prepared: PreparedCallback
-): void {
-  try {
-    input.ports.callbacks.run(prepared, { emit: false });
-  } catch {
-    // The independent notification outbox owns retries. Failure to notify an
-    // optional question must not stop observing the still-running native task.
-    input.ports.runtime.log("warn", "terminal_bridge_async_question_callback_deferred", {
-      conversation_id: input.state.conversation.conversation_id,
-      terminal_target: input.terminalControl.target
-    });
-  }
-  input.state.conversation = input.ports.state.load();
-}
 
 
 function persistDetectorDiagnostic(input: SampledPollInput): {
@@ -1936,6 +1927,12 @@ function handleTimeout(
     inactivityTimeoutMinutes: configuration.timeoutMinutes
   });
   if (decision.kind === "poll") {
+    ports.runtime.sleep(configuration.pollIntervalMs);
+    return "continue";
+  }
+  if (continuesClaudeCompletionObservation(state.conversation)) {
+    // The durable diagnostic was prepared before effects. A deadline is not a
+    // terminal outcome; retain the exact monitor so recovery can deliver done.
     ports.runtime.sleep(configuration.pollIntervalMs);
     return "continue";
   }

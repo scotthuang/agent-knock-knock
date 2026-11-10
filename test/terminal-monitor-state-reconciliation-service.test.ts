@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { recoverTimedOutClaudeMonitor } from "../src/terminal-monitor-timeout-recovery.js";
 
 import type {
   CallbackExecutionResult,
@@ -1296,4 +1297,59 @@ test("service and CLI declarations retain narrow canonical facade boundaries", (
     assert.notEqual(end, -1, `missing ${endToken}`);
     return source.slice(start, end);
   }
+});
+
+// Persisted timeout recovery is deliberately separate from dispatch retry: no text is resent.
+test("legacy Claude timeout resumes exact observation once and fences closed, replaced and unrelated stalls", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-timeout-recovery-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const storeDir = path.join(root, "store");
+  ensureStoreWritable(storeDir);
+  const paths = pathsForConversation("turn-timeout-recovery", storeDir);
+  const owner: Conversation = { ...createConversation({ userRequest: "check ports",
+    sessionId: "session-timeout", turnId: "turn-timeout-recovery", executorKind: "claude" }),
+    store_dir: path.resolve(storeDir), conversation_dir: path.dirname(paths.statePath),
+    state_path: paths.statePath, event_log_path: paths.logPath,
+    status: "stalled", stalled_reason: "terminal bridge observed no activity for 60 minutes",
+    stalled_at: "2026-11-10T10:18:50.856Z", native_session_takeover: {
+      terminal_bridge: true, terminal_bridge_message_id: "message-1",
+      terminal_bridge_submission: { message_id: "message-1", status: "agent_accepted" },
+      claude_transcript_anchor: { schema_version: 1 }
+    } };
+  const order: string[] = [];
+  let eligible = true;
+  const recover = () => recoverTimedOutClaudeMonitor({ ...paths,
+    lock: work => { order.push("locked"); return work(); },
+    assertBindingCurrent: candidate => {
+      order.push("binding"); assert.equal(loadState(paths.statePath).status, "stalled");
+      assert.equal(candidate.status, "waiting_for_agent");
+    },
+    eligible: candidate => {
+      order.push("ledger-and-route"); assert.equal((candidate.native_session_takeover as Record<string, unknown>)?.terminal_bridge_message_id, "message-1");
+      return eligible;
+    }, now: () => new Date("2026-11-10T11:00:00.000Z") });
+  for (const variant of [
+    { ...owner, stalled_reason: "native acceptance is uncertain" },
+    { ...owner, callback_delivery: { status: "delivered" } },
+    { ...owner, native_session_takeover: { ...(owner.native_session_takeover as Record<string, unknown>),
+      terminal_bridge_submission: { message_id: "other-message", status: "agent_accepted" } } }
+  ]) {
+    saveState(paths.statePath, variant); const before = fs.readFileSync(paths.statePath, "utf8");
+    recover(); assert.equal(fs.readFileSync(paths.statePath, "utf8"), before);
+  }
+  saveState(paths.statePath, owner); eligible = false;
+  const before = fs.readFileSync(paths.statePath, "utf8"); recover();
+  assert.equal(fs.readFileSync(paths.statePath, "utf8"), before, "replaced ledger/route cannot resume");
+  eligible = true; order.length = 0;
+  const resumed = recover();
+  assert.deepEqual(order, ["locked", "binding", "ledger-and-route"]);
+  assert.equal(resumed.status, "waiting_for_agent");
+  assert.equal(resumed.stalled_reason, undefined);
+  assert.equal((resumed.native_session_takeover as Record<string, unknown>)?.terminal_bridge_message_id, "message-1");
+  const persisted = fs.readFileSync(paths.statePath, "utf8");
+  recover(); assert.equal(fs.readFileSync(paths.statePath, "utf8"), persisted);
+  assert.equal(fs.readFileSync(paths.logPath, "utf8").trim().split("\n").length, 1);
+  saveState(paths.statePath, { ...resumed, status: "closed", disposition: "user_abandoned_management" });
+  const closed = fs.readFileSync(paths.statePath, "utf8");
+  recover(); assert.equal(fs.readFileSync(paths.statePath, "utf8"), closed);
 });
