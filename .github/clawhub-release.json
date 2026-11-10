@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.12",
+  "version": "0.16.13",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "f0f7f7ac36efe22dfac44d69e6ef502e4fef0483",
-  "asset": "scotthuang-agent-knock-knock-0.16.12.tgz",
-  "sha256": "46c014659a6bbfd995721709a41de59b6a719670b552f5b59c6d6f65b8d5b885",
-  "bytes": 3984516,
-  "changelog": "Codex CLI/app-server 0.167.0 compatibility: reviewed terminal profiles and person-only approval boundaries. Preserves exact task ownership, ordinary backend approvals, 800-code-point progress and 720-minute monitoring. Coordinated Pi poc.20 / DSH rc.24 pin core 0.16.12. Reports confirmed submission separately from later platform scanning/public availability."
+  "commit": "66afa5e213fd245ee8d5aaa3cb9a45db9b6d467e",
+  "asset": "scotthuang-agent-knock-knock-0.16.13.tgz",
+  "sha256": "989eefad1f0bc49c0c1ee506e908340022961c850f8282ef3e340f0b13480c27",
+  "bytes": 3997415,
+  "changelog": "Claude foreground result delivery and managed callback recovery: exact-PID observation, durable uncertainty notices while accepted observation continues, guarded timeout-stall recovery and receiver-deduplicated delivery. Preserves exact ownership and no task replay. Coordinated Pi poc.21 / DSH rc.25 pin core 0.16.13. Confirmed submission is separate from later platform scanning/public availability."
 }
