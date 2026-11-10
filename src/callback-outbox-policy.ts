@@ -330,6 +330,7 @@ export function beginCallbackRetryPolicy(
       reason: "no pending or failed callback outbox is available"
     });
   }
+  const replaySafe = callbackDeliverySupportsReplay(delivery);
   const attemptOutcome = callbackAttemptOutcomeEvidence(delivery);
   if (attemptOutcome.kind === "invalid") {
     return decided({
@@ -349,7 +350,7 @@ export function beginCallbackRetryPolicy(
         reason: attemptOutcome.outcome.error_code
       });
     }
-    if (attemptOutcome.outcome.disposition === "uncertain") {
+    if (attemptOutcome.outcome.disposition === "uncertain" && !replaySafe) {
       return decided({
         state: "uncertain",
         attempt,
@@ -376,7 +377,7 @@ export function beginCallbackRetryPolicy(
     });
   }
   const transportStartedWithoutOutcome = Boolean(
-    transportStartedAt &&
+    transportStartedAt && !replaySafe &&
     !(
       attemptOutcome.kind === "present" &&
       attemptOutcome.outcome.disposition === "retryable_failure"
@@ -392,7 +393,7 @@ export function beginCallbackRetryPolicy(
   if (decideDurableNotificationRetry({
     phase: "ready",
     attempt,
-    maxAttempts: limits.retryDelayCount
+    maxAttempts: recordValue(delivery.callback_route) ? undefined : limits.retryDelayCount
   }).state === "exhausted") {
     return decided({ state: "exhausted", attempt });
   }
@@ -511,6 +512,20 @@ function uncertainTransportStart(attempt: number): CallbackRetryPolicyState {
     attempt,
     reason: "callback transport started without a durable final outcome"
   });
+}
+
+/** Replay is authorized only for a persisted route with durable receiver deduplication. */
+export function callbackDeliverySupportsReplay(value: unknown): boolean {
+  const delivery = recordValue(value);
+  const route = recordValue(delivery?.callback_route);
+  const envelope = recordValue(delivery?.callback_envelope);
+  return recordValue(route?.capabilities)?.idempotent_delivery === true &&
+    typeof envelope?.idempotency_key === "string" && envelope.idempotency_key.length > 0;
+}
+
+/** Back off indefinitely at the final configured delay for durable outboxes. */
+export function callbackRetryDelay(delays: readonly number[], attempt: number): number {
+  return delays[Math.min(Math.max(0, attempt - 1), delays.length - 1)] ?? 60_000;
 }
 
 export function callbackDeliveryHasAcceptedTransport(

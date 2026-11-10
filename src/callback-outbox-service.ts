@@ -29,6 +29,7 @@ import type {
 } from "./callback-outbox-policy.js";
 import {
   beginCallbackRetryPolicy,
+  callbackRetryDelay,
   reduceCallbackRetryPolicy,
   supersedeCallbackNotificationDelivery
 } from "./callback-outbox-policy.js";
@@ -943,7 +944,7 @@ function prepareStallNotification(
         gatewayUrl: input.conversation.gateway_url,
         token: stringValue(input.conversation.gateway_token),
         preserveMessageId: true,
-        callbackDeliveryKind: "stall_notification",
+        callbackDeliveryKind: input.options.callbackDeliveryKind ?? "stall_notification",
         conversationOverride: input.conversation
       },
       logPath: input.logPath
@@ -1582,7 +1583,7 @@ function reconcileCallbackDelivery(
     const retryDelayMs = Number.isFinite(configuredDelayMs) &&
       configuredDelayMs >= 0
       ? configuredDelayMs
-      : ports.retry.delaysMs[Math.max(0, attempts - 1)];
+      : callbackRetryDelay(ports.retry.delaysMs, attempts);
     const retryMonitor = ports.retry.startMonitor({
       statePath,
       delayMs: retryDelayMs,
@@ -1693,13 +1694,12 @@ function runCallbackRetryMonitor(
     }
     if (
       latest.kind !== "retryable" ||
-      latest.attempts > ports.retry.delaysMs.length ||
       latest.attempts <= observed.attempts
     ) {
       return;
     }
     ports.runtime.sleepSync(
-      ports.retry.delaysMs[Math.max(0, latest.attempts - 1)]
+      callbackRetryDelay(ports.retry.delaysMs, latest.attempts)
     );
   }
 }

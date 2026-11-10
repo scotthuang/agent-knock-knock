@@ -340,7 +340,7 @@ async function claudeAgentRowsForDiscovery(input: Pick<CreateTerminalRuntimeCliA
 
 function claudeAgentRows(
   input: Pick<CreateTerminalRuntimeCliAdapterInput, "options" | "dependencies">,
-  observation: { required?: boolean }
+  observation: { required?: boolean; pid?: number }
 ): ClaudeAgentRow[] {
   const injected = input.dependencies.loadClaudeAgentRows;
   if (injected) {
@@ -349,7 +349,7 @@ function claudeAgentRows(
   const options = input.options;
   if (options.claudeAgentsJson === undefined) {
     if (options.processesJson || options.terminalsJson || options.terminalScreensJson) return [];
-    const pid = claudeTargetPid(options);
+    const pid = observation.pid ?? claudeTargetPid(options);
     const result = (pid === undefined ? undefined : readClaudeTerminalAgent(options, pid)) ?? readClaudeTerminalAgents(options);
     if (observation.required && result.errors.length) {
       throw new Error(claudeTerminalObservationFailure(result));
@@ -393,18 +393,28 @@ function terminalAgentRegistry(
         detectPendingApproval(request) {
           return detectClaudeTranscriptPendingApproval(request, {
             claudeHome: expandHome(input.options.claudeHome as string | undefined),
-            agentRows: loadClaudeAgentRows()
+            agentRows: claudeRequestAgentRows(input, request)
           });
         },
         async detectDurableCompletion(request) {
           return detectClaudeTranscriptCompletion(request, {
             claudeHome: expandHome(input.options.claudeHome as string | undefined),
-            agentRows: loadClaudeAgentRows()
+            agentRows: claudeRequestAgentRows(input, request)
           });
         }
       })
     ]
   });
+}
+
+/** Detached monitors carry their target in durable Turn context, not CLI selectors. */
+function claudeRequestAgentRows(input: CreateTerminalRuntimeCliAdapterInput,
+  request: TerminalDurableCompletionRequest): ClaudeAgentRow[] {
+  const pid = isRecord(request.context) ? request.context.pid : undefined;
+  if (!Number.isSafeInteger(pid) || Number(pid) < 1) {
+    throw new Error("Claude completion observation requires the bound Turn PID");
+  }
+  return claudeAgentRows(input, { required: true, pid: Number(pid) });
 }
 async function detectCodexCompletion(
   request: TerminalDurableCompletionRequest,

@@ -548,6 +548,7 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
   const claudeSessionId = "55555555-5555-4555-8555-555555555555";
   const request = "Remove the exact handoff fixture";
   const command = `rm ${path.join(workspace, ".akk-autoapprove-handoff")}`;
+  let timeoutMonitor: ReturnType<typeof spawnAgentCliCaptured> | undefined;
 
   try {
     fs.mkdirSync(fakeBinDir, { recursive: true });
@@ -1571,7 +1572,11 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     assignTerminalDispatchOwner(consumedTimeoutStatePath);
     fs.writeFileSync(transcriptPath, pendingTranscript, { mode: 0o600 });
     fs.writeFileSync(screenPath, approvalScreen);
-    const consumedTimeout = await runAgentCliInProcess([
+    const callsBeforeTimeout = readJsonLines(openclawCallsPath).length;
+    const terminalInputs = () => readJsonLines(tmuxCallsPath)
+      .filter(call => call.args[0] === "send-keys").length;
+    const inputCallsBeforeTimeout = terminalInputs();
+    timeoutMonitor = spawnAgentCliCaptured([
       "monitor",
       "--terminal-bridge",
       "--state",
@@ -1591,15 +1596,40 @@ test("hookless Claude Gateway auto approval keeps the original monitor through c
     ], {
       PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
     });
-    assert.equal(
-      consumedTimeout.status,
-      0,
-      consumedTimeout.stderr || consumedTimeout.stdout
-    );
-    const consumedTimeoutParsed = JSON.parse(consumedTimeout.stdout);
-    assert.equal(consumedTimeoutParsed.stalled, true);
-    assert.equal(consumedTimeoutParsed.hard_timeout, true);
+    await waitForCondition(() => {
+      const current = JSON.parse(fs.readFileSync(consumedTimeoutStatePath, "utf8"));
+      return current.callback_notification_delivery?.status === "delivered";
+    }, "the hard-timeout uncertainty notice to be accepted");
+    const uncertainState = JSON.parse(fs.readFileSync(consumedTimeoutStatePath, "utf8"));
+    assert.equal(uncertainState.status, "waiting_for_agent");
+    assert.equal(uncertainState.stalled_reason, undefined);
+    assert.equal(timeoutMonitor.child.exitCode, null);
+    assert.equal(uncertainState.callback_notification_delivery.message.metadata.reason,
+      "completion_detection_unavailable");
+    assert.equal(terminalInputs(), inputCallsBeforeTimeout,
+      "a consumed approval must not submit another terminal input on timeout");
+    fs.appendFileSync(transcriptPath,
+      completionRecords.map(record => JSON.stringify(record)).join("\n") + "\n");
+    fs.writeFileSync(screenPath, "AKK auto-approval handoff completed.\n❯ ");
+    await waitForChildExit(timeoutMonitor.child);
+    const consumedTimeout = await timeoutMonitor.result;
+    assert.equal(consumedTimeout.status, 0, consumedTimeout.stderr || consumedTimeout.stdout);
+    const completedState = JSON.parse(fs.readFileSync(consumedTimeoutStatePath, "utf8"));
+    assert.equal(completedState.conversation_id, uncertainState.conversation_id);
+    assert.equal(completedState.openclaw_session, uncertainState.openclaw_session);
+    assert.equal(completedState.callback_delivery.status, "delivered");
+    assert.equal(completedState.callback_delivery.message.type, "done");
+    assert.deepEqual(readJsonLines(openclawCallsPath).slice(callsBeforeTimeout)
+      .filter(entry => entry.kind === "gateway").map(entry => {
+        const paramsIndex = entry.args.indexOf("--params");
+        return JSON.parse(entry.args[paramsIndex + 1]).message.type;
+      }), ["error", "done"], "one uncertainty notice followed by one final result");
   } finally {
+    if (timeoutMonitor && timeoutMonitor.child.exitCode === null &&
+        timeoutMonitor.child.signalCode === null) {
+      timeoutMonitor.child.kill("SIGKILL");
+      await waitForChildExit(timeoutMonitor.child);
+    }
     fs.rmSync(tempDir, {
       recursive: true,
       force: true,

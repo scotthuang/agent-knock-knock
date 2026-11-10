@@ -257,6 +257,7 @@
           "minimum": 1,
           "maximum": 1048576
         },
+        "idempotentDelivery": { "type": "boolean", "description": "Receiver durably deduplicates retries by idempotency key, including across restarts." },
         "acknowledgement": {
           "$ref": "#/$defs/acknowledgement"
         }

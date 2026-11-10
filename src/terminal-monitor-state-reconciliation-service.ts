@@ -80,6 +80,8 @@ export interface TerminalMonitorStateReconciliationPorts {
       conversation: Conversation,
       paths: TerminalMonitorStatePaths
     ): Promise<Conversation>;
+    recoverTimedOut?(storeDir: string, conversation: Conversation,
+      paths: TerminalMonitorStatePaths): Conversation;
     assertBindingCurrent(storeDir: string, conversation: Conversation): void;
     eligibility(conversation: Conversation): TerminalMonitorEligibility;
   };
@@ -204,6 +206,8 @@ export async function reconcileTerminalMonitorStateCandidate(input: {
     input.paths
   );
   input.ports.authority.assertBindingCurrent(input.storeDir, conversation);
+  conversation = input.ports.authority.recoverTimedOut?.(
+    input.storeDir, conversation, input.paths) ?? conversation;
   const eligibility = input.ports.authority.eligibility(conversation);
   return eligibility.eligible
     ? { kind: "candidate", conversation, eligibility }

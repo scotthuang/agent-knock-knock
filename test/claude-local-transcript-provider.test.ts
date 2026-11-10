@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { captureClaudeManagedSendAdmission } from "../src/claude-terminal-admission.js";
 import { redactString } from "../src/runtime-log.js";
 import {
   captureClaudeHumanStartedActiveTaskAnchor,
@@ -2530,7 +2531,43 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
   );
 });
 
-test("requires an idle unchanged process and stalls on all known background work", (t) => {
+// Protect the incident contract at the real transcript/admission boundary:
+// a shell launch is not an unfinished foreground tool once its result is linked.
+for (const background of [false, true]) {
+  test(`completed Claude foreground admits follow-up with shell registry (explicit background=${background})`, (t) => {
+    const fixture = createFixture(t);
+    const anchor = fixture.capture();
+    const request = "Build and report the result";
+    const records = pendingBashRecords({ request, command: "webpack", ids: 8800 });
+    const tool = pendingToolBlock(records);
+    if (background) (tool.input as Record<string, unknown>).run_in_background = true;
+    const owner = records[2];
+    records.push({
+      ...baseRecord(uuid(8810), String(owner.uuid), PROMPT_AT, SESSION_ID, VERSION),
+      type: "user", sourceToolAssistantUUID: owner.uuid,
+      toolUseResult: { backgroundTaskId: "build-1", ...(background ? {} : { timedOutAfterMs: 600000 }) },
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: tool.id, content: "Build moved to background" }] }
+    });
+    const admission = () => captureClaudeManagedSendAdmission({
+      sessionId: fixture.sessionId, cwd: fixture.workspace, pid: PID,
+      claudeHome: fixture.claudeHome, agentRows: fixture.agentRows
+    });
+    fixture.agentRows[0].status = "shell";
+    fixture.write(records);
+    assert.equal(fixture.detect(anchor, request), undefined);
+    assert.equal(admission().readiness.ready, false, "a launch receipt is not foreground completion");
+    records.push(assistantRecord({ uuid: uuid(8811), parentUuid: uuid(8810), messageId: uuid(9811), text: "Build launched; foreground done" }),
+      durationRecord({ uuid: uuid(8812), parentUuid: uuid(8811), timestamp: COMPLETED_AT }));
+    fixture.write(records);
+    assert.equal(fixture.detect(anchor, request)?.text, "Build launched; foreground done");
+    assert.equal(admission().readiness.ready, true);
+    assert.equal(admission().anchor?.offset_bytes, fs.statSync(fixture.transcriptPath).size);
+    fixture.append([userRecord({ uuid: uuid(8820), parentUuid: uuid(8812), request: "New work", timestamp: COMPLETED_AT })]);
+    assert.equal(admission().readiness.ready, false, "an older completion cannot admit over a newer active prompt");
+  });
+}
+
+test("requires exact process identity and distinguishes returned shells from pending tools and background agents", (t) => {
   const fixture = createFixture(t);
   const anchor = fixture.capture();
   const background = turnRecords({
@@ -2641,7 +2678,8 @@ test("requires an idle unchanged process and stalls on all known background work
         sessionId: native.sessionId
       })
     ]);
-    assert.equal(native.detect(nativeAnchor, request), undefined);
+    assert.equal(native.detect(nativeAnchor, request)?.outcome,
+      toolName === "Bash" ? "success" : undefined);
   });
 });
 

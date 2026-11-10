@@ -1,4 +1,5 @@
 import test from "node:test";
+import { claudeMonitorIncident } from "./support/claude-monitor-incident.js";
 import assert from "node:assert/strict";
 import { callbackRouteFingerprintForConversation } from
   "../src/callback-route-authority.js";
@@ -2720,3 +2721,79 @@ test("dispatch fencing is presented before the poll terminal lock releases", asy
     "terminal.release"
   ]);
 });
+
+
+test("detector failure notifies without ending monitoring and recovery still delivers completion", async () => {
+  const trace: string[] = [];
+  const owner = conversation();
+  const ports = fakePorts(trace, owner);
+  let polls = 0;
+  let advisory = false;
+  ports.authority.poll = async () => {
+    assert.ok(++polls < 6);
+    return { kind: "observed", poll: polls === 1
+      ? { status: { ...status(), capability_limitation: "reader temporarily unavailable" } }
+      : { status: status(), completion: COMPLETION } };
+  };
+  ports.state.persistDetectorDiagnostic = input => {
+    const diagnostic = { status: input.limitation ? "limited" : "recovered",
+      fingerprint: input.fingerprint, notification_message_id: "notice-1" };
+    return { conversation: owner, diagnostic,
+      ...(input.limitation ? { prepared: fakePrepared(owner) } : {}) };
+  };
+  ports.callbacks.run = prepared => {
+    if (!advisory) { advisory = true; throw new Error("controller offline"); }
+    trace.push("final.delivered");
+    return callbackResult(prepared.conversation);
+  };
+  await runTerminalMonitor({ initialConversation: owner, expectedTerminalMessageId: "message-1",
+    configuration: () => CONFIGURATION, lifecycle: { startedRecorded: true }, ports });
+  assert.equal(advisory, true);
+  assert.equal(trace.includes("state.markStalled"), false);
+  assert.equal(trace.filter(item => item === "final.delivered").length, 1);
+});
+
+for (const scenario of ["completed", "conflicting", "timeout", "inactivity", "running", "unreadable"] as const) {
+  test(`Claude detached monitor ${scenario}: exact observation survives old background shell and delivers final result`, async t => {
+    const incident = claudeMonitorIncident(t);
+    const owner = conversation(incident.takeover);
+    owner.executor = { ...owner.executor, kind: "claude", actor: "codex", display_name: "Claude" };
+    const trace: string[] = [], ports = fakePorts(trace, owner);
+    let polls = 0;
+    const limitations: string[] = [];
+    const now = new Date(scenario === "timeout" ? "2026-11-10T11:20:00.000Z" : scenario === "inactivity" ? "2026-11-10T09:30:00.000Z" : "2026-11-10T09:21:00.000Z");
+    ports.runtime.now = () => now; ports.runtime.nowMs = () => now.getTime();
+    ports.authority.poll = async () => {
+      assert.ok(++polls <= 5, "completion must converge without waiting for the old shell");
+      incident.row.status = ["conflicting", "running"].includes(scenario) && polls === 1 ? "busy" : "shell";
+      incident.write(!["timeout", "inactivity", "running"].includes(scenario) || polls > 1);
+      const savedHash = incident.request.requestHash;
+      if (scenario === "unreadable" && polls === 1) incident.request.requestHash = "invalid";
+      const poll = await incident.poll();
+      incident.request.requestHash = savedHash;
+      return { kind: "observed", poll };
+    };
+    ports.state.persistDetectorDiagnostic = input => {
+      if (input.limitation) limitations.push(input.limitation);
+      return { conversation: owner, diagnostic: { status: input.limitation ? "limited" : "recovered",
+        fingerprint: input.fingerprint, notification_message_id: "notice-1" },
+        ...(input.limitation ? { prepared: fakePrepared(owner) } : {}) };
+    };
+    const completions: string[] = [];
+    const prepare = ports.callbacks.prepareCompletion;
+    ports.callbacks.prepareCompletion = input => {
+      completions.push(input.completion.text);
+      return prepare(input);
+    };
+    await runTerminalMonitor({ initialConversation: owner, expectedTerminalMessageId: "message-1",
+      configuration: () => CONFIGURATION, lifecycle: { startedRecorded: true }, ports });
+    assert.equal(completions.length, 1);
+    assert.match(completions[0], /Foreground done/u);
+    assert.equal(trace.includes("state.markStalled"), false);
+    assert.ok(incident.selected.includes(incident.row.pid));
+    if (["completed", "running"].includes(scenario)) assert.deepEqual(limitations, []);
+    else assert.match(limitations.join(" "), scenario === "conflicting" ? /observation_conflict/u
+      : scenario === "timeout" ? /completion_hard_timeout/u : scenario === "inactivity" ? /completion_inactivity_timeout/u : /metadata cannot be verified/u);
+    assert.equal(trace.filter(s => s === "callback.run").length, ["completed", "running"].includes(scenario) ? 1 : 2);
+  });
+}

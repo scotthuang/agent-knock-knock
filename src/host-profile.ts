@@ -85,6 +85,7 @@ export interface HostProfileAcknowledgementV1 {
 }
 
 export interface HostProfileCommandJsonCallbackV1 {
+  readonly idempotentDelivery?: boolean;
   readonly driver: "command_json_v1";
   readonly executable: string;
   readonly arguments: readonly string[];
@@ -682,6 +683,7 @@ function parseCommandJsonCallback(
     "environment",
     "timeoutMs",
     "maxOutputBytes",
+    "idempotentDelivery",
     "acknowledgement"
   ], "host profile callback");
   if (
@@ -720,6 +722,9 @@ function parseCommandJsonCallback(
     HOST_PROFILE_MAX_OUTPUT_BYTES,
     "host profile callback"
   );
+  if (callback.idempotentDelivery !== undefined && typeof callback.idempotentDelivery !== "boolean") {
+    throw new Error("host profile callback.idempotentDelivery must be boolean");
+  }
   const acknowledgement = parseAcknowledgement(callback.acknowledgement);
   return Object.freeze({
     driver: "command_json_v1" as const,
@@ -729,7 +734,8 @@ function parseCommandJsonCallback(
     environment,
     timeoutMs,
     maxOutputBytes,
-    acknowledgement
+    acknowledgement,
+    ...(callback.idempotentDelivery !== undefined ? { idempotentDelivery: callback.idempotentDelivery as boolean } : {})
   });
 }
 
