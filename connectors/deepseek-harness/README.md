@@ -19,7 +19,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.24** pins AKK **0.16.12** in its package and lockfile,
+Connector **0.1.0-rc.25** pins AKK **0.16.13** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the 0.165.0 adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
@@ -29,9 +29,9 @@ returns current discoverable conversations in compact v5; `watches` separately
 returns recent monitoring records (24 hours by default), plus active or
 unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
-RC remains a prerelease. As of **2026-11-08**, its separately reviewed
-`latest` recommendation is **0.1.0-rc.24**; `next` also points to rc.24 at that
-promotion and remains the channel for future experiments.
+RC is published on `next`. The separately reviewed default `latest` remains
+**0.1.0-rc.24 / core 0.16.12** from 2026-11-08; this release does not promote it.
+Use `@next` or exact **0.1.0-rc.25** for the new managed-result delivery fixes.
 
 The reviewed baseline is **DeepSeek Harness Web 0.2.1-rc.2** and **Cordis
 4.0.5**. These are prerelease compatibility claims, not a stable-version
@@ -74,8 +74,8 @@ Headless/one-shot Harness processes, Windows named pipes, and DSH Desktop's
 embedded launcher are outside this connector's validated scope. Existing Codex CLI backend and Desktop connections need no
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
-see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.12/README.md#compatibility) and the
-[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.12/docs/pi-dsh-compatibility.md). This connector does
+see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/README.md#compatibility) and the
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
 
 ## Demo
@@ -452,7 +452,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.24
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.25
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -480,16 +480,18 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.12`; building the current repository
+tests against its pinned AKK runtime `0.16.13`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
-[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.12/CONTRIBUTING.md#coordinated-package-releases);
+[coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/CONTRIBUTING.md#coordinated-package-releases);
 the registry-based `npm ci` above requires that exact core to be published.
 Testing connector changes against another AKK runtime requires an explicit
 dependency change and
 compatibility review rather than an implicit local link.
 
 ## Tests and release status
+
+Connector **`0.1.0-rc.25`** pins core **`0.16.13`** and carries PR #508. Exact-PID managed Claude observation can confirm a completed foreground reply despite a returned Bash background launch. Accepted Claude terminal tasks notify uncertainty at configured timeout thresholds and keep observing; explicit Close and identity/route fences still stop recovery. The DSH profile advertises idempotent delivery only when its existing persistent receiver ledger and flush-before-ack recovery are available. Model consumption and human-visible channel delivery remain separate from Host acceptance. See [managed task results](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/docs/managed-task-result-delivery.md). No new DSH Host version is added.
 
 Connector **`0.1.0-rc.24`** pins AKK **`0.16.12`** and its synchronized Skill.
 Its Host tools explicitly opt into compact List **v5**, removing derived usage
@@ -654,7 +656,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.24` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
+`0.1.0-rc.25` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
 SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -699,7 +701,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.24
+npm run release:check -- --publish --confirm-version 0.1.0-rc.25
 ```
 
 New prereleases publish to `next`; stable publications use `latest`. A reviewed

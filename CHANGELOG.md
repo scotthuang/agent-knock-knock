@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.13 / Pi 0.1.0-poc.21 / DeepSeek Harness 0.1.0-rc.25 — 2026-11-10
+
+- Deliver accepted Claude terminal foreground results even when a returned Bash background launch keeps the registry in shell state. Detached monitors inspect the exact bound PID; a newer unfinished prompt, unresolved tools, stop hooks and identity conflicts still block completion or further input. Foreground completion does not certify background build success.
+- Persist completion diagnostics and timeout uncertainty notices while accepted Claude terminal observation continues. Safely resume only eligible legacy Claude timeout stalls after original binding/ledger/generation/route checks, without resending task text. Other executor timeout policies remain unchanged.
+- Keep managed callback retries durable through transient failures. Unknown-outcome replay requires a trusted idempotent-delivery capability and an authorized receiver; preserve immutable envelopes, leases, permanent failures and Close/supersession fences. DSH declares this capability only with its existing persistent receiver ledger and flush-before-ack recovery.
+- Publish coordinated Pi/DSH connectors pinned to core **0.16.13**, with synchronized Skills and unchanged Host ranges. Both new prereleases use `next`; DSH `latest` remains the separately recommended rc.24/core 0.16.12.
+
 ## 0.16.12 / Pi 0.1.0-poc.20 / DeepSeek Harness 0.1.0-rc.24 — 2026-11-08
 
 - Adapt reviewed Codex CLI/app-server **0.167.0** profiles for status, model/permission controls, blocking and asynchronous questions, and exact paginated observation. Validate the existing native task contracts against the actual 0.167.0 pair; retain old reviewed profiles and mixed-pair restrictions.

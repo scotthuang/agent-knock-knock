@@ -5,18 +5,18 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
-## Current install channels — 2026-11-08
+## Current install channels — 2026-11-10
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
 | --- | --- | --- | --- |
-| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; `next` also rc.24 at promotion and may advance separately |
-| Pi | `next`: `0.1.0-poc.20` | `0.16.12` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.25 pins core 0.16.13 |
+| Pi | `next`: `0.1.0-poc.21` | `0.16.13` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
 Existing installations, lockfiles and explicit pins are unchanged. The supported
 DSH Web baseline remains `0.2.1-rc.2`; upstream Host `0.2.2-rc.1` is outside the
-connector's declared and validated range. The market index already pins rc.24
-and is unchanged. See the [promotion procedure](../CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest).
+connector's declared and validated range. The market index selects a separately pinned published connector and does not
+resolve the npm default tag. See the [promotion procedure](../CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest).
 
 The dated release records below describe channels and validation at that time,
 not the current recommendation.
