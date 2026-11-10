@@ -747,7 +747,19 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
       JSON.parse(fs.readFileSync(statePath, "utf8")).status,
       "waiting_for_agent"
     );
-    assert.equal(fs.existsSync(openclawCallsPath), false);
+    await waitForCondition(
+      () => JSON.parse(fs.readFileSync(statePath, "utf8"))
+        .callback_notification_delivery?.status === "delivered",
+      "the detector uncertainty notice to be durably accepted before monitor replacement"
+    );
+    const callbackMessages = () => readJsonLines(openclawCallsPath).map(call => {
+      const paramsIndex = call.args.indexOf("--params");
+      assert.notEqual(paramsIndex, -1);
+      return JSON.parse(call.args[paramsIndex + 1]).message;
+    });
+    assert.deepEqual(callbackMessages().map(message => message.type), ["error"]);
+    assert.equal(callbackMessages()[0].metadata.reason, "completion_detection_unavailable");
+    const uncertaintyMessageId = callbackMessages()[0].id;
     missingAnchorMonitor.kill("SIGKILL");
     await waitForChildExit(missingAnchorMonitor);
     missingAnchorMonitor = undefined;
@@ -759,7 +771,8 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
     await waitForCondition(
       () => JSON.parse(fs.readFileSync(statePath, "utf8"))
         .native_session_takeover.terminal_bridge_detector_diagnostic?.detail
-        ?.includes("codex_exact_bound_rollout:rollout_unreadable") === true,
+        ?.includes("codex_exact_bound_rollout:rollout_unreadable") === true &&
+        eventCount(logPath, "terminal_bridge_completion_detector_limited") > limitationsBeforeUnreadable,
       "the unreadable exact rollout diagnostic to be durably retained"
     );
     assert.equal(eventCount(logPath, "terminal_bridge_completion_detector_limited"),
@@ -789,7 +802,9 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
       JSON.parse(fs.readFileSync(statePath, "utf8")).status,
       "waiting_for_agent"
     );
-    assert.equal(fs.existsSync(openclawCallsPath), false);
+    assert.deepEqual(callbackMessages().map(message => message.type), ["error"],
+      "diagnostic recovery must not claim completion or resend the deduplicated notice");
+    assert.equal(callbackMessages()[0].id, uncertaintyMessageId);
     fs.appendFileSync(
       logPath,
       `${JSON.stringify({
@@ -875,11 +890,13 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
     const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(finalState.status, "idle");
     const callbackCalls = readJsonLines(openclawCallsPath);
-    assert.equal(callbackCalls.length, 1);
-    const callbackParamsIndex = callbackCalls[0].args.indexOf("--params");
+    assert.deepEqual(callbackMessages().map(message => message.type), ["error", "done"]);
+    assert.equal(callbackMessages()[0].id, uncertaintyMessageId);
+    assert.equal(callbackCalls.length, 2);
+    const callbackParamsIndex = callbackCalls[1].args.indexOf("--params");
     assert.notEqual(callbackParamsIndex, -1);
     const callbackParams = JSON.parse(
-      callbackCalls[0].args[callbackParamsIndex + 1]
+      callbackCalls[1].args[callbackParamsIndex + 1]
     );
     assert.equal(callbackParams.message.type, "done");
     assert.equal(callbackParams.message.body, "Recovered exact completion.");
@@ -890,7 +907,7 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
     assert.equal(eventCount(logPath, "terminal_bridge_completion_detected"), 1);
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
     assert.equal(eventCount(logPath, "terminal_bridge_monitor_started"), 3);
-    assert.equal(readJsonLines(openclawCallsPath).length, 1);
+    assert.equal(readJsonLines(openclawCallsPath).length, 2);
   } finally {
     await supervisorService?.stop?.();
     if (missingAnchorMonitor && missingAnchorMonitor.exitCode === null) {
