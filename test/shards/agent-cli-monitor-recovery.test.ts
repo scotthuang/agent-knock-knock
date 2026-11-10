@@ -752,13 +752,19 @@ test("supervised Codex monitor retains detector diagnostics and completes the ex
     await waitForChildExit(missingAnchorMonitor);
     missingAnchorMonitor = undefined;
 
+    const limitationsBeforeUnreadable = eventCount(logPath, "terminal_bridge_completion_detector_limited");
     fs.writeFileSync(statePath, `${JSON.stringify(exactState, null, 2)}\n`);
     fs.chmodSync(exactRolloutPath, 0o666);
     firstMonitor = spawnAgentCliProcess(monitorArgs, testEnv);
     await waitForCondition(
-      () => eventCount(logPath, "terminal_bridge_completion_detector_limited") === 2,
-      "the exact detector limitation to be retained"
+      () => JSON.parse(fs.readFileSync(statePath, "utf8"))
+        .native_session_takeover.terminal_bridge_detector_diagnostic?.detail
+        ?.includes("codex_exact_bound_rollout:rollout_unreadable") === true,
+      "the unreadable exact rollout diagnostic to be durably retained"
     );
+    assert.equal(eventCount(logPath, "terminal_bridge_completion_detector_limited"),
+      limitationsBeforeUnreadable + 1,
+      "the new monitor records its own diagnostic exactly once");
     let limitedState = JSON.parse(fs.readFileSync(statePath, "utf8"));
     assert.equal(
       limitedState.native_session_takeover.terminal_bridge_detector_diagnostic.status,
