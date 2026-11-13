@@ -32,10 +32,16 @@ test("Claude 2.1.303 completed shell footer admits empty input but rejects draft
     "                                                                                    Debug", ""].join("\n");
   assert.equal(isExactClaudeIdleComposer(screen), true);
   assert.equal(claudeUserExplicitReadiness(screen).ready, true);
+  assert.ok(exactTerminalComposerCapture("claude", screen, ""), "submission agrees with preflight on the same capture");
+  const draft = screen.replace("❯", "❯ PONG\n  keep this exact line");
+  assert.ok(exactTerminalComposerCapture("claude", draft, "PONG\nkeep this exact line"));
+  assert.equal(exactTerminalComposerCapture("claude", draft, ""), undefined);
+  assert.equal(exactTerminalComposerCapture("claude", draft, "PONG\nkeep this other line"), undefined);
   for (const altered of [screen.replace("❯", "❯ unsent draft"), screen + "Select an option",
     screen.replace("362.8k tokens", "362.8k tokens unknown overlay")]) {
     assert.equal(isExactClaudeIdleComposer(altered), false);
     assert.equal(claudeUserExplicitReadiness(altered).ready, false);
+    assert.equal(exactTerminalComposerCapture("claude", altered, ""), undefined);
   }
   assert.equal(claudeUserExplicitReadiness(screen.replace("Debug", "› stashed")).reason, "stash_not_empty");
   assert.equal(claudeUserExplicitReadiness(screen.replace(/✻ Cogitated[^\n]+/u, "✻ Working…")).reason, "foreground_running");
