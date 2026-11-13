@@ -7,14 +7,20 @@ and workflow filename. No stored ClawHub token or manual override is required.
 The reviewed `.github/clawhub-release.json` identifies the already-tested GitHub
 Release TGZ, original source commit, version, size and SHA-256. The workflow never
 rebuilds it, publishes to npm, installs AKK locally, or changes the publisher binding.
-For 0.16.13, the release gate passed 3,963 core tests, both connector verification
-gates, isolated OpenClaw 2026.9.1, runtime Inspector and package dry-run checks.
-The product commit is `66afa5e213fd245ee8d5aaa3cb9a45db9b6d467e` (PR #509, following #508).
-This publication update changes only the release manifest and this workflow
-documentation. Pi `0.1.0-poc.21` and DeepSeek Harness `0.1.0-rc.25` are separate
-npm publications pinned to core `0.16.13`; this workflow publishes only the core
-ClawHub package. Both new connector prereleases use `next`; the separately selected DSH
-`latest=rc.24` recommendation is unchanged.
+For 0.16.14, the manual macOS publication gate passed **3,966/3,966** core tests,
+both connector offline gates, isolated OpenClaw 2026.9.1, runtime Inspector,
+type checking, architecture/evidence validation and package dry-run checks.
+[Gate run 43476417909, attempt 2](https://github.com/scotthuang/agent-knock-knock/actions/runs/43476417909/attempts/2)
+tested tree `28c55b2b88f63d6fa724025f522a89f40591d9b6`; the release product commit
+`f31724452a6f18396d8c9b93b673438ca1d88a76` has the same tree (PR #519, following #518).
+This publication update changes only the release manifest and this documentation.
+The coordinated Pi `0.1.0-poc.22` and DSH `0.1.0-rc.27` npm packages pin core
+`0.16.14`; this workflow uploads only the frozen core ClawHub archive.
+Both new connector prereleases use `next`; DSH `latest=rc.24` remains unchanged.
+
+The workflow also supports an explicit read-only `verify_release=true` gate on
+`release/` branches with `publish=false`. It does not run automatically on PRs
+and grants that verification job no publishing or OIDC permission.
 
 ClawHub requires the trusted source SHA/ref to match the running workflow. The
 workflow therefore checks that its commit descends from the artifact's original
