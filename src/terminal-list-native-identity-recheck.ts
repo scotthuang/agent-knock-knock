@@ -23,6 +23,7 @@ export interface TerminalListNativeIdentitySnapshot {
 /** Scope reader snapshots to one List invocation, including exact-terminal List. */
 export function withClaudeListIdentityRecheck<Options extends TerminalListInventoryOptions>(input: {
   loadRows?(options: Options, observation: { required: true }): readonly ClaudeIdentityRow[] | Promise<readonly ClaudeIdentityRow[]>;
+  loadTargetRows?(options: Options, pid: number): readonly ClaudeIdentityRow[] | Promise<readonly ClaudeIdentityRow[]>;
   observeWindowRole?(options: Options, pid: number, cwd?: string): "background_view" | undefined;
   observe(request: { options: Options; agent: "claude"; pid: number; cwd?: string;
     claudeAgentRows: readonly ClaudeIdentityRow[] }): Promise<TerminalNativeIdentityObservation>;
@@ -39,6 +40,7 @@ export function withClaudeListIdentityRecheck<Options extends TerminalListInvent
           discoveryOnly: request.options.listDiscoveryOnly,
           claudeHome: typeof configuredHome === "string" ? expandHome(configuredHome) : undefined,
           loadRows: () => loadRows(request.options, { required: true }),
+          ...(input.loadTargetRows ? { loadTargetRows: (pid: number) => input.loadTargetRows!(request.options, pid) } : {}),
           observeWindowRole: session => input.observeWindowRole?.(request.options, session.pid,
             session.cwd ?? session.terminalControl?.currentPath),
           observe: (session, claudeAgentRows) => input.observe({ options: request.options,
@@ -56,6 +58,7 @@ export async function observeClaudeListIdentitySnapshots(input: {
   claudeHome?: string;
   discoveryOnly?: boolean;
   loadRows(): readonly ClaudeIdentityRow[] | Promise<readonly ClaudeIdentityRow[]>;
+  loadTargetRows?(pid: number): readonly ClaudeIdentityRow[] | Promise<readonly ClaudeIdentityRow[]>;
   observeWindowRole?(session: ActiveTerminalProcess): "background_view" | undefined;
   observe(session: ActiveTerminalProcess, rows: readonly ClaudeIdentityRow[]):
     Promise<TerminalNativeIdentityObservation>;
@@ -63,6 +66,10 @@ export async function observeClaudeListIdentitySnapshots(input: {
   const sessions = input.sessions.filter(session => session.agent === "claude");
   const result = new Map<number, TerminalListNativeIdentitySnapshot>();
   if (sessions.length === 0) return result;
+  // Discovery aggregates background shells as busy. Input admission must use
+  // the same exact-PID observation as Send, including its failure fences.
+  const loadCurrentRows = (pid: number, discovered: readonly ClaudeIdentityRow[]) =>
+    !input.discoveryOnly && input.loadTargetRows ? input.loadTargetRows(pid) : discovered;
   const observeBatch = async (selected: readonly ActiveTerminalProcess[], retry: boolean) => {
     let rows: readonly ClaudeIdentityRow[];
     try {
@@ -76,8 +83,9 @@ export async function observeClaudeListIdentitySnapshots(input: {
     }
     for (const session of selected) {
       try {
-        const observation = await input.observe(session, rows);
-        const row = (observation.status === "resolved" ? rows.find(row =>
+        const currentRows = await loadCurrentRows(session.pid, rows);
+        const observation = await input.observe(session, currentRows);
+        const row = (observation.status === "resolved" ? currentRows.find(row =>
           row.pid === session.pid && row.sessionId === observation.identity.sessionId) : undefined) as ClaudeAgentRow | undefined;
         const activity = row?.status === "busy" ? "working" : row?.status;
         result.set(session.pid, { observation,
@@ -88,7 +96,7 @@ export async function observeClaudeListIdentitySnapshots(input: {
             cwd: session.cwd ?? session.terminalControl?.currentPath,
             sessionId: observation.status === "resolved" ? observation.identity.sessionId : undefined,
             processStartedAt: observation.status === "resolved" ? observation.identity.processStartedAt : undefined,
-            agentRows: rows, claudeHome: input.claudeHome }) } : {}),
+            agentRows: currentRows, claudeHome: input.claudeHome }) } : {}),
           ...(retry ? { recheck: { attempted: true,
             status: observation.status === "resolved" ? "resolved" : "unresolved"
           } as const } : {}) });

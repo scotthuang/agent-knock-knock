@@ -282,10 +282,31 @@ export function exactClaudeComposerFrame(screen: string): {
   };
 }
 
+const STASH = /\s+(?:Draft restored\s*·\s*)?› stashed\s*$/u;
+const AUXILIARY = /^(?:(?:Draft restored\s*·\s*)?› stashed|[●○◐◉]\s+(?:low|medium|high|xhigh|max|ultracode)\s*·\s*\/effort)$/iu;
+const MODE = /^(?:[⏵⏴⏸]{1,2}\s+(?:manual mode|auto mode|accept edits|bypass permissions|plan mode|don't ask) on(?:\s+\(shift\+tab to cycle\))?|\? for shortcuts)$/u;
+const HINT = /^(?:\? for shortcuts|[1-9]\d* shells?|esc to interrupt|← for (?:agents|ag…)|(?:↓ to manage|\(↓ to manage\)))$/u;
+
+/** Closed native vocabulary; joining wrapped rows never licenses unknown text. */
+export function knownClaudeComposerFooter(lines: readonly string[]): boolean {
+  // 2.1.303 right-aligns this native hint beside the mode footer. A separate
+  // unknown notification row is not covered by this exact layout proof.
+  const rows = lines.map(line => line.trim()
+    .replace(/\s{2,}new task\? \/clear to save \d+(?:\.\d)?[kmbt]? tokens\s*$/u, ""))
+    .filter(line => !AUXILIARY.test(line));
+  if (rows.length === 0) return true;
+  if (rows.length > 4) return false;
+  const footer = rows.join(" ").replace(STASH, "").replace(/\s+Debug\s*$/u, "")
+    .replace(STASH, "").replace(/\s+/gu, " ").trim();
+  const [mode, ...hints] = footer.split(/\s*·\s*/u);
+  return MODE.test(mode ?? "") && hints.every(hint => HINT.test(hint));
+}
+
 export function claudeNativeInspectionTrailingIsFooter(
   lines: readonly string[]
 ): boolean {
-  return lines.length <= 2 && lines.every(isClaudeNativeComposerFooterLine);
+  return knownClaudeComposerFooter(lines) ||
+    lines.length <= 2 && lines.every(isClaudeNativeComposerFooterLine);
 }
 
 export function isClaudeNativeComposerFooterLine(line: string): boolean {

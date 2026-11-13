@@ -689,8 +689,7 @@ function createTerminalProcessSource(options) {
   return terminalRuntime(options).createProcessSource();
 }
 
-function loadClaudeAgentRows(options: CliCommandOptions = {},
-  observation: { required?: boolean } = {}) {
+function loadClaudeAgentRows(options: CliCommandOptions = {}, observation: { required?: boolean; pid?: number } = {}) {
   return terminalRuntime(options).loadClaudeAgentRows(observation);
 }
 
@@ -1260,7 +1259,8 @@ const terminalListCliFacade = createTerminalListCliFacade({
   },
   discovery: {
     localCodexList: localCodexListForCli,
-    loadClaudeAgentRows, loadClaudeAgentRowsForDiscovery: options => terminalRuntime(options).loadClaudeAgentRowsForDiscovery(), observeClaudeWindowRole: (options, pid, cwd) => terminalRuntime(options).observeClaudeWindowRole(pid, cwd),
+    loadClaudeAgentRows, loadClaudeAgentRowsForTarget: (options, pid) => loadClaudeAgentRows(options, { required: true, pid }),
+    loadClaudeAgentRowsForDiscovery: options => terminalRuntime(options).loadClaudeAgentRowsForDiscovery(), observeClaudeWindowRole: (options, pid, cwd) => terminalRuntime(options).observeClaudeWindowRole(pid, cwd),
     agentVersionForRunningProcess,
     codexLatentClearResumeObservation,
     codexManagedIdentityResolutionContext,

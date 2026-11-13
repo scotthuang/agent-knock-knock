@@ -1546,13 +1546,19 @@ test("managed user Send recaptures exact empty immediately before text", async (
     );
   });
 
-  await t.test("Claude default permission mode submits once and proves native acceptance", async (t) => {
-    for (const userExplicitEnterAfterTextWithoutComposerVeto of [false, true]) {
-      await t.test(userExplicitEnterAfterTextWithoutComposerVeto
-        ? "managed explicit Enter" : "strict Composer proof", async (t) => {
+  await t.test("Claude verified footers submit once and prove native acceptance", async (t) => {
+    for (const completedShell of [false, true]) for (const userExplicitEnterAfterTextWithoutComposerVeto of [false, true]) {
+      await t.test(`${completedShell ? "2.1.303 completed shell" : "manual mode"}: ${userExplicitEnterAfterTextWithoutComposerVeto
+        ? "managed explicit Enter" : "strict Composer proof"}`, async (t) => {
+        const version = completedShell ? "2.1.303" : "2.1.295";
+        const request = completedShell ? "Reply with PONG\nDo not run commands or modify files." : "the user's newest managed request";
         const divider = "────────────────────────────────────────────────";
-        const idleFooter = "  ⏸ manual mode on";
-        const injectedFooter = "  ⏸ manual mode on";
+        // Redacted live 2.1.303 layout: footer is outside the Composer frame.
+        const idleFooter = completedShell
+          ? "  ⏵⏵ auto mode on · 1 shell · ↓ to manage          new task? /clear to save 362.8k tokens\n                                                                                    Debug"
+          : "  ⏸ manual mode on";
+        const injectedFooter = idleFooter;
+        const history = completedShell ? "✻ Cogitated for 1h 48m 39s · done 19:43 · 1 shell still running\n" : "";
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-manual-send-"));
         t.after(() => fs.rmSync(root, { recursive: true, force: true }));
         const claudeHome = path.join(root, ".claude");
@@ -1628,7 +1634,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
               timestamp: acceptedAt,
               sessionId,
               cwd: workspace,
-              version: "2.1.295",
+              version,
               permissionMode: "default",
               message: { role: "user", content: this.injectedText }
             }) + "\n");
@@ -1636,7 +1642,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
           }
         }
         const provider = new ManualModeClaudeProvider([{ ...PANE, currentPath: workspace }], {
-          [PANE.target]: [divider, "❯ ", divider, idleFooter].join("\n")
+          [PANE.target]: history + [divider, "❯ ", divider, idleFooter].join("\n")
         });
         const adapter = createClaudeTerminalAgentAdapter({ agentRows });
         const bridge = createBridge(adapter, provider);
@@ -1647,7 +1653,7 @@ test("managed user Send recaptures exact empty immediately before text", async (
           { ...terminalControl(adapter), currentPath: workspace },
           request,
           {
-            runtime: { ...MANAGED_CLAUDE_RUNTIME, cwd: workspace, agentVersion: "2.1.295" },
+            runtime: { ...MANAGED_CLAUDE_RUNTIME, cwd: workspace, agentVersion: version },
             requireExactEmptyComposerBeforeText: true,
             requireExactComposerBeforeEnter: true,
             userExplicitEnterAfterTextWithoutComposerVeto,

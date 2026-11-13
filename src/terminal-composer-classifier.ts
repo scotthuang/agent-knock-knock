@@ -971,26 +971,13 @@ function exactClaudeComposerCapture(
   screen: string,
   expectedText: string
 ): { digest: string } | undefined {
-  const lines = screen.replace(/\r\n?/gu, "\n").split("\n");
-  const dividerIndexes = lines
-    .map((line, index) => /^\s*[─━]{8,}\s*$/u.test(line) ? index : -1)
-    .filter((index) => index >= 0);
-  if (dividerIndexes.length < 2) {
+  // Share frame/footer proof with readiness; only the Composer body is compared
+  // with the exact intended text, both before injection and before Enter.
+  const frame = exactClaudeComposerFrame(screen);
+  if (!frame || !claudeNativeInspectionTrailingIsFooter(frame.trailing)) {
     return undefined;
   }
-  const closeIndex = dividerIndexes.at(-1)!;
-  const openIndex = dividerIndexes.at(-2)!;
-  const trailing = lines.slice(closeIndex + 1)
-    .filter((line) => line.trim().length > 0);
-  if (
-    trailing.length > 2 ||
-    trailing.some((line) =>
-      !/^\s*(?:[⏵⏴⏸]{1,2}|\?)\s*.*(?:manual mode|shift\+tab|accept edits|bypass permissions|for shortcuts|← for agents)/iu
-        .test(line)
-    )
-  ) {
-    return undefined;
-  }
+  const { lines, openIndex, closeIndex } = frame;
   const region = lines.slice(openIndex + 1, closeIndex);
   while (region.length > 1 && region.at(-1)?.trim() === "") {
     region.pop();

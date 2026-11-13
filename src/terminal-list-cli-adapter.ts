@@ -252,6 +252,7 @@ export interface TerminalListDiscoveryPorts {
   loadClaudeAgentRows?(options: TerminalListCliOptions,
     observation: { required: true }): readonly ClaudeIdentityRow[];
   loadClaudeAgentRowsForDiscovery?(options: TerminalListCliOptions): Promise<readonly ClaudeIdentityRow[]>;
+  loadClaudeAgentRowsForTarget?(options: TerminalListCliOptions, pid: number): readonly ClaudeIdentityRow[];
   observeClaudeWindowRole?(options: TerminalListCliOptions, pid: number, cwd?: string): "background_view" | undefined;
   createRuntimeTerminalAgentRegistry(
     options: TerminalListCliOptions
@@ -966,6 +967,7 @@ async function buildTerminalListGroup({
       createProcessSource: (currentOptions) =>
         runtime.createTerminalProcessSource(currentOptions),
       projectTerminal: withClaudeListIdentityRecheck({
+        loadTargetRows: runtime.loadClaudeAgentRowsForTarget,
         loadRows: (options.listDiscoverySnapshot || options.listDiscoveryOnly) && runtime.loadClaudeAgentRowsForDiscovery
           ? current => runtime.loadClaudeAgentRowsForDiscovery!(current) : runtime.loadClaudeAgentRows,
         observeWindowRole: runtime.observeClaudeWindowRole,
