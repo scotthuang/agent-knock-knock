@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.13",
+  "version": "0.16.14",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "66afa5e213fd245ee8d5aaa3cb9a45db9b6d467e",
-  "asset": "scotthuang-agent-knock-knock-0.16.13.tgz",
-  "sha256": "989eefad1f0bc49c0c1ee506e908340022961c850f8282ef3e340f0b13480c27",
-  "bytes": 3997415,
-  "changelog": "Claude foreground result delivery and managed callback recovery: exact-PID observation, durable uncertainty notices while accepted observation continues, guarded timeout-stall recovery and receiver-deduplicated delivery. Preserves exact ownership and no task replay. Coordinated Pi poc.21 / DSH rc.25 pin core 0.16.13. Confirmed submission is separate from later platform scanning/public availability."
+  "commit": "f31724452a6f18396d8c9b93b673438ca1d88a76",
+  "asset": "scotthuang-agent-knock-knock-0.16.14.tgz",
+  "sha256": "c3f7ad3a5f581c65838260fbe946f30c27dcedbc62606e0dfa1cd2bf9942a404",
+  "bytes": 4000579,
+  "changelog": "Restore Claude managed Send after foreground completion: exact-PID admission and shared native Composer frame/footer proof. Keeps drafts, approvals, identity and no-replay guards. Pi poc.22 and DSH rc.27 pin core 0.16.14; DSH 0.2.2-rc.3 compatibility retained. Submission acceptance is separate from scanning and public availability."
 }
