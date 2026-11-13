@@ -5,6 +5,23 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## DSH 0.2.2-rc.3 local adaptation
+
+The checkout accepts the exact coherent DSH `0.2.2-rc.3` runtime and Cordis
+`4.1.0`, without a version-risk exemption. Schemastery is aligned to `3.19.0`.
+DSH now separates its tool registry from its executor: the connector still
+registers ordinary tool definitions, while the Host owns executor selection.
+The real-SDK fast witnesses mount `NativeToolExecutor`, pass raw JSON calls
+through the batch API, and verify correlated results, validation failures,
+exact Agent ownership and callback aliases. They do not inject into live users.
+The installed launcher resolves both message/schema helpers and the durable
+session recovery APIs. Existing compatibility entries are historical coverage;
+this change does not claim that unlisted versions work.
+
+This is a local build/install workflow, not an npm or ClawHub release. Only fast
+tiers and non-test health/build checks run; full/release tests are deferred under
+the repository's policy. No channel or market-index changes are included.
+
 ## Current install channels — 2026-11-10
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
@@ -13,9 +30,9 @@ requires a new core release.
 | Pi | `next`: `0.1.0-poc.21` | `0.16.13` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
-Existing installations, lockfiles and explicit pins are unchanged. The supported
-DSH Web baseline remains `0.2.1-rc.2`; upstream Host `0.2.2-rc.1` is outside the
-connector's declared and validated range. The market index selects a separately pinned published connector and does not
+Existing installations, lockfiles and explicit pins are unchanged. The published
+DSH Web baseline remains `0.2.1-rc.2`; the unreleased adaptation above adds
+`0.2.2-rc.3`. Host `0.2.2-rc.1` remains outside the explicit range. The market index selects a separately pinned published connector and does not
 resolve the npm default tag. See the [promotion procedure](../CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest).
 
 The dated release records below describe channels and validation at that time,
