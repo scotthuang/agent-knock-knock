@@ -5,9 +5,9 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
-## DSH 0.2.2-rc.3 adaptation — unreleased
+## DSH 0.2.2-rc.3 adaptation — connector rc.26 / core 0.16.13
 
-The checkout accepts the exact coherent DSH `0.2.2-rc.3` runtime and Cordis
+Connector **0.1.0-rc.26**, published on `next`, accepts the exact coherent DSH `0.2.2-rc.3` runtime and Cordis
 `4.1.0`, without a version-risk exemption. Schemastery is aligned to `3.19.0`.
 DSH now separates its tool registry from its executor: the connector still
 registers ordinary tool definitions, while the Host owns executor selection.
@@ -31,23 +31,26 @@ Dual-Host operation, downgrade, lossless callbacks across Host versions, and a
 real dispatch-to-final-callback lifecycle were not tested. Accepted version
 entries are explicit declarations, not a continuous range or new live evidence.
 
-This PR does not publish a package or allocate a new release version. The
-published rc.25 artifact does not contain the adaptation; a later publication
-must allocate a fresh connector version and run its publication gates. Only
-fast tiers and non-test health/build checks run here; full/release tests are
-deferred under repository policy. No channel or market-index changes are included.
+The independent release publishes connector **0.1.0-rc.26** on `next`, with an
+exact dependency on the existing public core **0.16.13**. No private development
+core is needed, no core/Pi package is republished, and `latest` is not promoted.
+The connector's canonical release gate covers type checking, fast tests and
+packed artifacts; root fast/architecture checks and the isolated public
+Host/core/connector List/Status smoke are recorded with the release. That smoke
+uses the real native batch executor with synthetic discovery data and no model
+or external channel. The published rc.25 artifact does not contain this adaptation.
 
-## Current install channels — 2026-11-10
+## Current install channels — 2026-11-13
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
 | --- | --- | --- | --- |
-| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.25 pins core 0.16.13 |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.26 pins core 0.16.13 and adds DSH 0.2.2-rc.3 |
 | Pi | `next`: `0.1.0-poc.21` | `0.16.13` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
 Existing installations, lockfiles and explicit pins are unchanged. The published
-DSH Web baseline remains `0.2.1-rc.2`; the unreleased adaptation above adds
-`0.2.2-rc.3`. Host `0.2.2-rc.1` remains outside the explicit range. The market index selects a separately pinned published connector and does not
+DSH rc.26 uses `0.2.2-rc.3` as its new SDK/isolated-smoke baseline; the older
+supported sets retain only their historical coverage. Host `0.2.2-rc.1` remains outside the explicit range. The market index selects a separately pinned published connector and does not
 resolve the npm default tag. See the [promotion procedure](../CONTRIBUTING.md#recommend-an-existing-dsh-connector-on-npm-latest).
 
 The dated release records below describe channels and validation at that time,
