@@ -15,13 +15,13 @@ const manifestPath = requireRoot.resolve("@scotthuang/agent-knock-knock-deepseek
 const packageRoot = path.dirname(fs.realpathSync(manifestPath));
 assert.ok(packageRoot.startsWith(root + path.sep), "connector must be inside the isolated install");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-assert.equal(manifest.version, "0.1.0-rc.26");
-assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.16.13");
+assert.equal(manifest.version, "0.1.0-rc.27");
+assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.16.14");
 const requireConnector = createRequire(manifestPath);
 const coreManifestPath = requireConnector.resolve("@scotthuang/agent-knock-knock/package.json");
 assert.ok(fs.realpathSync(coreManifestPath).startsWith(root + path.sep));
 const coreManifest = JSON.parse(fs.readFileSync(coreManifestPath, "utf8"));
-assert.equal(coreManifest.version, "0.16.13");
+assert.equal(coreManifest.version, "0.16.14");
 const hostAdapterEntry = coreManifest.exports["./host-adapter"].import;
 assert.equal(typeof hostAdapterEntry, "string");
 const launcherManifestPath = requireRoot.resolve("@deepseek-ai/dsh/package.json");
@@ -115,7 +115,7 @@ try {
   const dispatched = fs.readFileSync(calls, "utf8").trim().split("\n").map(JSON.parse);
   assert.deepEqual(dispatched.map(args => args[0]), ["list", "status"]);
   assert.equal(fs.readdirSync(store).length, 0);
-  console.log(JSON.stringify({ ok: true, connector: manifest.version, core: "0.16.13",
+  console.log(JSON.stringify({ ok: true, connector: manifest.version, core: "0.16.14",
     host: runtime.version, launcher_owned_runtime_verified: true, recovery_api_exports_verified: true,
     tool_count: handshake.toolCount, skill_sha256: createHash("sha256").update(skill).digest("hex"),
     list_projection: list.projection.version, exact_status: true,

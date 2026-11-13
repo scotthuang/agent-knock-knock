@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.14 / Pi 0.1.0-poc.22 / DeepSeek Harness 0.1.0-rc.27 — 2026-11-14
+
+- Restore managed Claude Send after verified foreground completion while a background shell remains. Detailed identity/admission now use the same exact-PID observation as Send; new work, unresolved tools, failed reads and identity conflicts still block input.
+- Share the native Composer frame/footer proof at preflight and the text/Enter submission boundaries. Recognize the captured Claude Code 2.1.303 completed-shell footer without bypassing draft equality, stash, unknown overlays, approvals or input ownership. No user draft is cleared and no task is replayed.
+- Publish coordinated Pi/DSH prereleases pinned to the actual fixed core **0.16.14**, retaining #508 and #512. DSH rc.27 keeps the exact 0.2.2-rc.3 / Cordis 4.1.0 adaptation; both connectors use `next` and DSH `latest` remains rc.24. This adds no Host support or live-model/channel-delivery claim.
+
 ## DeepSeek Harness 0.1.0-rc.26 — 2026-11-13
 
 - Adapt the exact DSH 0.2.2-rc.3 / Cordis 4.1.0 package set, Schemastery 3.19.0, separate native executor and raw-JSON batch tool calls. Keep exact ownership, validation and callback admission guards.

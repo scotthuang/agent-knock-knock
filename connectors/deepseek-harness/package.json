@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock-deepseek-harness",
-  "version": "0.1.0-rc.26",
+  "version": "0.1.0-rc.27",
   "description": "Delegate from DeepSeek Harness Web to existing Codex CLI, Codex Desktop and Claude Code sessions with progress and completion callbacks.",
   "license": "MIT",
   "type": "module",
@@ -48,7 +48,7 @@
     "skill:check": "node ../../scripts/sync-connector-skills.js --check --connector deepseek-harness",
     "build": "npm run clean && npm run skill:sync && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test:fast": "npm run build && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "test:fast": "npm run build && tsc -p tsconfig.test.json && node ../../scripts/run-connector-fast-tests.js",
     "prepublishOnly": "npm run skill:check",
     "prepack": "npm run build && npm run skill:check",
     "pack:check": "npm run build && npm run skill:check && node ../../scripts/verify-connector-skill-pack.js --connector deepseek-harness",
@@ -64,7 +64,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.19.0",
-    "@scotthuang/agent-knock-knock": "0.16.13",
+    "@scotthuang/agent-knock-knock": "0.16.14",
     "ajv": "8.20.0"
   },
   "devDependencies": {
