@@ -10,6 +10,8 @@ import { CommandRuntime } from "@deepseek-ai/dsh-commands";
 import { createUserMessage, ToolCallId } from "@deepseek-ai/dsh-llm";
 import { SkillRegistry } from "@deepseek-ai/dsh-skill";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
+import { NativeToolExecutor } from "@deepseek-ai/dsh-tool-executor-native";
+import { executeNativeTool } from "./runtime-tools.js";
 import { ToolRuntime, assertSupportedJsonSchema } from "@deepseek-ai/dsh-tools";
 import { createHostAdapter } from "@scotthuang/agent-knock-knock/host-adapter";
 
@@ -38,7 +40,8 @@ test("published DSH and core separate current List from retained Watches", async
   ].join("\n"));
   const ctx = new Context();
   new SystemPrompt(ctx, {});
-  new ToolRuntime(ctx, { mode: "native" });
+  new ToolRuntime(ctx);
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx));
   new AgentRegistry(ctx);
   new CommandRuntime(ctx);
   new SkillRegistry(ctx);
@@ -54,7 +57,7 @@ test("published DSH and core separate current List from retained Watches", async
   try {
     cleanup = await applyWithDependencies(ctx, {}, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.1-rc.2", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
       },
       createHostAdapter(options) {
         assert.equal(options.listProjectionVersion, 5);
@@ -63,8 +66,8 @@ test("published DSH and core separate current List from retained Watches", async
     });
     assert.equal(ctx.tools.schemas().length, 27);
     const agent = { id: "inventory-owner", session: { id: "inventory-owner" }, status: "idle", ctx } as unknown as Agent;
-    const detach = ctx.agents.enter(agent, undefined);
-    const invoke = (name: string, args: Record<string, unknown>, id: string) => ctx.tools.execute({
+    const detach = ctx.agents.enter(agent);
+    const invoke = (name: string, args: Record<string, unknown>, id: string) => executeNativeTool(ctx, {
       name, arguments: args, agent, callId: ToolCallId(id), signal: new AbortController().signal,
     });
     const list = await invoke("agent_knock_knock_list", {}, "list-current");

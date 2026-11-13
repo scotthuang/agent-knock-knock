@@ -55,28 +55,29 @@
     "release:check": "node scripts/release-check.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.1 || 4.0.2 || 4.0.4 || 4.0.5-alpha.1 || 4.0.5",
-    "@deepseek-ai/dsh-agent": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2",
-    "@deepseek-ai/dsh-commands": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2",
-    "@deepseek-ai/dsh-llm": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2",
-    "@deepseek-ai/dsh-skill": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2"
+    "@deepseek-ai/cordis": "4.0.1 || 4.0.2 || 4.0.4 || 4.0.5-alpha.1 || 4.0.5 || 4.1.0",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-commands": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-skill": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/schemastery": "3.19.0",
     "@scotthuang/agent-knock-knock": "0.16.13",
     "ajv": "8.20.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-skill": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-commands": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
     "@types/node": "22.20.0",
     "typescript": "6.0.3",
-    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.3"
   },
   "author": {
     "name": "scotthuang",

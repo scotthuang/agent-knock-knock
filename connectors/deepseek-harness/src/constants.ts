@@ -11,6 +11,7 @@ export const SUPPORTED_DSH_VERSIONS = Object.freeze([
   "0.2.0-rc.2",
   "0.2.1-alpha.2",
   "0.2.1-rc.2",
+  "0.2.2-rc.3",
 ] as const);
 export type SupportedDeepSeekHarnessVersion =
   (typeof SUPPORTED_DSH_VERSIONS)[number];

@@ -33,25 +33,27 @@ RC is published on `next`. The separately reviewed default `latest` remains
 **0.1.0-rc.24 / core 0.16.12** from 2026-11-08; this release does not promote it.
 Use `@next` or exact **0.1.0-rc.25** for the new managed-result delivery fixes.
 
-The reviewed baseline is **DeepSeek Harness Web 0.2.1-rc.2** and **Cordis
-4.0.5**. These are prerelease compatibility claims, not a stable-version
-endorsement. Upstream DSH `latest` was observed as `0.2.2-rc.1` on
-2026-11-08; it is **not validated or accepted by this connector**. Moving the
-connector recommendation does not add Host compatibility. Do not replace an
-existing Host with a different release merely to follow a tag.
+This checkout adds **DeepSeek Harness Web 0.2.2-rc.3 / Cordis 4.1.0**
+compatibility. Its development SDK and runtime tests use that exact Host set,
+including the separately mounted native tool executor and raw JSON batch calls.
+This is an unreleased adaptation, not a new npm publication or channel promotion.
+The published rc.25 artifact does not contain it. A future publication must use
+a fresh connector version; the existing rc.25 version must not be republished.
+Earlier reviewed package sets remain explicitly listed; unlisted releases,
+including `0.2.2-rc.1`, remain rejected.
 
 | Scope | Declared / validated boundary |
 | --- | --- |
-| Current Web baseline | DSH `0.2.1-rc.2`, Cordis `4.0.5` |
-| Previously reviewed DSH RCs | `0.1.1-rc.2`, `0.1.5-rc.2`, `0.2.0-rc.2` |
+| Current checkout Web baseline | DSH `0.2.2-rc.3`, Cordis `4.1.0` |
+| Previously reviewed DSH RCs | `0.1.1-rc.2`, `0.1.5-rc.2`, `0.2.0-rc.2`, `0.2.1-rc.2` |
 | Separate preview coverage | `0.1.2-alpha.1`, `0.2.1-alpha.2` |
-| Accepted Cordis peers | `4.0.1`, `4.0.2`, `4.0.4`, `4.0.5-alpha.1`, `4.0.5` (not a continuous range) |
-| Platform / runtime | Resident POSIX Web Host, Node.js `>=22.19.0`, `pnpm` on `PATH` |
+| Accepted Cordis peers | `4.0.1`, `4.0.2`, `4.0.4`, `4.0.5-alpha.1`, `4.0.5`, `4.1.0` (not a continuous range) |
+| Platform / runtime | Resident POSIX Web Host; DSH 0.2.2 requires Node.js `>=24.9.0`; `pnpm` on `PATH` |
 | Outside validated scope | DSH Desktop embedded launcher, headless/one-shot Host, Windows named pipes; newer unlisted DSH releases |
 
 The versioned validation notes below distinguish live Host checks from fixtures
-and earlier compatibility runs. This List presentation update does not add a
-new Host compatibility claim.
+and earlier compatibility runs. The new SDK tests exercise exact argument
+validation, native tool execution, List/Watches separation and callback ownership.
 
 Activation locates the real `@deepseek-ai/dsh` launcher and requires the
 launcher, `dsh-base`, `dsh-agent`, `dsh-commands`, `dsh-llm`, `dsh-skill`, and
@@ -656,8 +658,8 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.25` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
-SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
+checkout lockfile uses the published DeepSeek Harness `0.2.2-rc.3`
+SDK packages and Cordis `4.1.0`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
 an isolated registry test, not a live-model acceptance claim. The `rc.7`

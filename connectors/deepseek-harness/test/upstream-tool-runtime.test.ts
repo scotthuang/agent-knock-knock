@@ -10,6 +10,8 @@ import { CommandRuntime } from "@deepseek-ai/dsh-commands";
 import { createUserMessage, ToolCallId } from "@deepseek-ai/dsh-llm";
 import { SkillRegistry } from "@deepseek-ai/dsh-skill";
 import SystemPrompt from "@deepseek-ai/dsh-system-prompt";
+import { NativeToolExecutor } from "@deepseek-ai/dsh-tool-executor-native";
+import { executeNativeTool } from "./runtime-tools.js";
 import { ToolRuntime, assertSupportedJsonSchema } from "@deepseek-ai/dsh-tools";
 import {
   createHostAdapter,
@@ -27,7 +29,8 @@ import type { AgentRouteTable } from "../src/routes.js";
 test("published DSH ToolRuntime preserves exact targets, typed answers and canonical results", async () => {
   const ctx = new Context();
   new SystemPrompt(ctx, {});
-  new ToolRuntime(ctx, { mode: "native" });
+  new ToolRuntime(ctx);
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx));
   new AgentRegistry(ctx);
   new CommandRuntime(ctx);
   new SkillRegistry(ctx);
@@ -55,7 +58,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
   try {
     cleanup = await applyWithDependencies(ctx, { pluginConfig: { storeDir: "/private/explicit-dsh-store" } }, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.1-rc.2", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
       },
       createHostAdapter(options) {
         assert.equal(options.pluginConfig?.storeDir, "/private/explicit-dsh-store");
@@ -76,7 +79,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
       status: "idle",
       ctx,
     } as unknown as Agent;
-    const detach = ctx.agents.enter(agent, undefined);
+    const detach = ctx.agents.enter(agent);
     const signal = new AbortController().signal;
     const args = {
       conversation_id: "desktop:v1:exact_thread",
@@ -86,7 +89,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
         { question_id: "two", response_kind: "free_text", text: "中文 👩🏽‍💻 é\nline two" },
       ],
     };
-    const outcome = await ctx.tools.execute({
+    const outcome = await executeNativeTool(ctx, {
       name: "agent_knock_knock_respond_interaction",
       callId: ToolCallId("call-exact"),
       arguments: args,
@@ -103,7 +106,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
 
     // DSH's discovery projection cannot encode target exclusivity. The full
     // core validator must still reject it before reaching the executor.
-    const ambiguous = await ctx.tools.execute({
+    const ambiguous = await executeNativeTool(ctx, {
       name: "agent_knock_knock_status",
       callId: ToolCallId("call-ambiguous"),
       arguments: { conversation_id: "desktop:v1:exact_thread", watch_id: "desktop-watch:other" },
@@ -114,7 +117,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
     assert.equal(acceptedCalls.length, 1);
 
     detach();
-    const stale = await ctx.tools.execute({
+    const stale = await executeNativeTool(ctx, {
       name: "agent_knock_knock_approve",
       callId: ToolCallId("call-stale"),
       arguments: {
@@ -154,7 +157,8 @@ process.stdout.write(JSON.stringify(process.argv[2] === "list" ? { conversations
 `);
   const ctx = new Context();
   new SystemPrompt(ctx, {});
-  new ToolRuntime(ctx, { mode: "native" });
+  new ToolRuntime(ctx);
+  ctx.tools.setExecutor(new NativeToolExecutor(ctx));
   new AgentRegistry(ctx);
   new CommandRuntime(ctx);
   new SkillRegistry(ctx);
@@ -175,13 +179,13 @@ process.stdout.write(JSON.stringify(process.argv[2] === "list" ? { conversations
     ctx,
     followup(message: ReturnType<typeof createUserMessage>) { admitted.push(message); },
   } as unknown as Agent;
-  const detach = ctx.agents.enter(agent, undefined);
+  const detach = ctx.agents.enter(agent);
   let routes: AgentRouteTable | undefined;
   let cleanup: (() => Promise<void>) | undefined;
   let restored = 0;
   let callSequence = 0;
   const execute = async (name: string, args: Record<string, unknown>) => {
-    const outcome = await ctx.tools.execute({
+    const outcome = await executeNativeTool(ctx, {
       name,
       callId: ToolCallId(`alias-call-${++callSequence}`),
       arguments: args,
@@ -193,7 +197,7 @@ process.stdout.write(JSON.stringify(process.argv[2] === "list" ? { conversations
   try {
     cleanup = await applyWithDependencies(ctx, { pluginConfig: { storeDir: storeDirectory } }, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.1-rc.2", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
       },
       createDshRecoveryHostPorts() {
         return {

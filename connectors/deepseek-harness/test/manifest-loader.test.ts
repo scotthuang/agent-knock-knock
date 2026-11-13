@@ -50,7 +50,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.deepEqual(lock.packages[""].peerDependencies, manifest.peerDependencies);
   assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies);
   assert.equal(manifest.dsh.bundle.patch, "./cordis.patch.yml");
-  assert.equal(manifest.peerDependencies["@deepseek-ai/cordis"], "4.0.1 || 4.0.2 || 4.0.4 || 4.0.5-alpha.1 || 4.0.5");
+  assert.equal(manifest.peerDependencies["@deepseek-ai/cordis"], "4.0.1 || 4.0.2 || 4.0.4 || 4.0.5-alpha.1 || 4.0.5 || 4.1.0");
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-agent"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-commands"], supportedRange);
   assert.equal(manifest.peerDependencies["@deepseek-ai/dsh-llm"], supportedRange);
@@ -61,7 +61,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   ));
   assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], coreManifest.version);
   assert.equal(lock.packages["node_modules/@scotthuang/agent-knock-knock"].version, coreManifest.version);
-  assert.equal(manifest.dependencies["@deepseek-ai/schemastery"], "3.18.2");
+  assert.equal(manifest.dependencies["@deepseek-ai/schemastery"], "3.19.0");
   for (const packageName of [
     "@deepseek-ai/dsh-agent",
     "@deepseek-ai/dsh-commands",
@@ -69,9 +69,9 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     "@deepseek-ai/dsh-skill",
     "@deepseek-ai/dsh-tools",
   ]) {
-    assert.equal(manifest.devDependencies[packageName], "0.2.1-rc.2");
+    assert.equal(manifest.devDependencies[packageName], "0.2.2-rc.3");
   }
-  assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.0.5");
+  assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.1.0");
   assert.ok(manifest.files.includes("skills/**/*.md"));
 
   const bundledSkill = fs.readFileSync(
