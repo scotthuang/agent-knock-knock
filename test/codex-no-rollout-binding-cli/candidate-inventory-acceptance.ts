@@ -169,6 +169,9 @@ test("an accepted deferred Turn recovers before Session commit without replay", 
     codexVersion: "0.147.0",
     rolloutInitiallyAbsent: true
   });
+  // Keep wall time from accidentally hiding a rewound virtual crash clock.
+  // This advances only fixture time, not a timeout or a real sleep.
+  fixture.clockMs = Date.now() + 60_000;
   const message = "Recover an accepted Turn before deferred Session commit.";
   try {
     const source = persistStatusCardSession(fixture, LIVE_PROCESS_BIRTH);

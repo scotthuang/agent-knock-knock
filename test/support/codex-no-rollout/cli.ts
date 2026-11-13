@@ -111,6 +111,10 @@ export async function runCliCrashCheckpoint(
           });
           rewriteSnapshotLockOwners(snapshotPath, SIMULATED_DEAD_CLI_PID);
           captured = { status, snapshotRoot, snapshotPath };
+          // The durable snapshot includes time advanced by this command.
+          // Restoring the pre-command clock would rewind a fast recovery;
+          // wall-clock delay on a slow machine must not be required for safety.
+          mutableCheckpoint.clockMs = Math.max(mutableCheckpoint.clockMs, fixture.clockMs);
         } catch (error) {
           fs.rmSync(snapshotRoot, { recursive: true, force: true });
           throw error;
