@@ -1,5 +1,11 @@
 # Changelog
 
+## DeepSeek Harness 0.1.0-rc.26 — 2026-11-13
+
+- Adapt the exact DSH 0.2.2-rc.3 / Cordis 4.1.0 package set, Schemastery 3.19.0, separate native executor and raw-JSON batch tool calls. Keep exact ownership, validation and callback admission guards.
+- Pin the already-published AKK core 0.16.13, preserving #508 without distributing the older private development core. Publish this independent connector on `next`; core, Pi and the separate DSH `latest` recommendation are unchanged.
+- Provide a reproducible clean-install List/Status smoke using real Host packages and synthetic discovery. The six older accepted versions, real model/task completion delivery, downgrade and cross-version callback handoff were not revalidated.
+
 ## 0.16.13 / Pi 0.1.0-poc.21 / DeepSeek Harness 0.1.0-rc.25 — 2026-11-10
 
 - Deliver accepted Claude terminal foreground results even when a returned Bash background launch keeps the registry in shell state. Detached monitors inspect the exact bound PID; a newer unfinished prompt, unresolved tools, stop hooks and identity conflicts still block completion or further input. Foreground completion does not certify background build success.
