@@ -20,6 +20,26 @@ import {
 } from "../src/terminal-agent-bridge.js";
 import { captureCodexFullscreenComposerFrame, exactCodexFullscreenSlashComposerCapture } from
   "../src/codex-fullscreen-composer-proof.js";
+import { isExactClaudeIdleComposer } from "../src/terminal-native-inspection-proof.js";
+import { claudeUserExplicitReadiness } from "../src/claude-user-explicit-input-proof.js";
+
+test("Claude 2.1.303 completed shell footer admits empty input but rejects drafts and unknown overlays", () => {
+  // Redacted actual captured footer; no task text or workspace information.
+  const screen = ["✻ Cogitated for 1h 48m 39s · done 19:43 · 1 shell still running", "",
+    "───────────────────────────────────────────────────────────────────────────────────────────", "❯",
+    "───────────────────────────────────────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on · 1 shell · ↓ to manage          new task? /clear to save 362.8k tokens",
+    "                                                                                    Debug", ""].join("\n");
+  assert.equal(isExactClaudeIdleComposer(screen), true);
+  assert.equal(claudeUserExplicitReadiness(screen).ready, true);
+  for (const altered of [screen.replace("❯", "❯ unsent draft"), screen + "Select an option",
+    screen.replace("362.8k tokens", "362.8k tokens unknown overlay")]) {
+    assert.equal(isExactClaudeIdleComposer(altered), false);
+    assert.equal(claudeUserExplicitReadiness(altered).ready, false);
+  }
+  assert.equal(claudeUserExplicitReadiness(screen.replace("Debug", "› stashed")).reason, "stash_not_empty");
+  assert.equal(claudeUserExplicitReadiness(screen.replace(/✻ Cogitated[^\n]+/u, "✻ Working…")).reason, "foreground_running");
+});
 
 const FULLSCREEN_IDLE = [
   "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m",

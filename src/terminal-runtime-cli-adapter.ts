@@ -108,7 +108,7 @@ export interface TerminalRuntimeCliAdapter {
   createControlProviderRegistry(): TerminalControlProviderRegistry;
   createControlProvider(registry?: TerminalControlProviderRegistry): TerminalControlProvider;
   createProcessSource(): TerminalProcessSource;
-  loadClaudeAgentRows(observation?: { required?: boolean }): ClaudeAgentRow[];
+  loadClaudeAgentRows(observation?: { required?: boolean; pid?: number }): ClaudeAgentRow[];
   loadClaudeAgentRowsForDiscovery(): Promise<ClaudeAgentRow[]>;
   observeClaudeWindowRole(pid: number, cwd?: string): "background_view" | undefined;
   createAgentRegistry(): TerminalAgentAdapterRegistry;

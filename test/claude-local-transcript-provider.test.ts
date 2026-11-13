@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { captureClaudeManagedSendAdmission } from "../src/claude-terminal-admission.js";
+import { observeClaudeListIdentitySnapshots } from "../src/terminal-list-native-identity-recheck.js";
+import type { ActiveTerminalProcess } from "../src/terminal-agent-adapter.js";
 import { redactString } from "../src/runtime-log.js";
 import {
   captureClaudeHumanStartedActiveTaskAnchor,
@@ -2534,7 +2536,7 @@ test("fails closed on duplicate prompts, unsupported schemas, and multiple durat
 // Protect the incident contract at the real transcript/admission boundary:
 // a shell launch is not an unfinished foreground tool once its result is linked.
 for (const background of [false, true]) {
-  test(`completed Claude foreground admits follow-up with shell registry (explicit background=${background})`, (t) => {
+  test(`completed Claude foreground admits follow-up with shell registry (explicit background=${background})`, async (t) => {
     const fixture = createFixture(t);
     const anchor = fixture.capture();
     const request = "Build and report the result";
@@ -2562,8 +2564,33 @@ for (const background of [false, true]) {
     assert.equal(fixture.detect(anchor, request)?.text, "Build launched; foreground done");
     assert.equal(admission().readiness.ready, true);
     assert.equal(admission().anchor?.offset_bytes, fs.statSync(fixture.transcriptPath).size);
+    // Incident: discovery says busy, exact process says shell, durable turn is complete.
+    const session = { agent: "claude", pid: PID, cwd: fixture.workspace } as ActiveTerminalProcess;
+    let exactReads = 0;
+    const scan = (discoveryOnly = false, status = "shell") => observeClaudeListIdentitySnapshots({
+      sessions: [session], claudeHome: fixture.claudeHome, discoveryOnly,
+      loadRows: () => [{ ...fixture.agentRows[0], status: "busy" }],
+      loadTargetRows: pid => {
+        assert.equal(pid, PID); exactReads++;
+        if (status === "unavailable") throw new Error("exact identity unavailable");
+        return [{ ...fixture.agentRows[0], status }];
+      },
+      observe: async (_session, rows) => ({ status: "resolved", identity: {
+        sessionId: rows[0].sessionId!, processStartedAt: AGENT_STARTED_AT_MS, evidence: "claude_agents_exact_pid"
+      } })
+    });
+    assert.equal((await scan()).get(PID)?.admission?.managedSend.ready, true);
+    assert.equal(exactReads, 1);
+    assert.equal((await scan(false, "busy")).get(PID)?.admission?.managedSend.ready, false,
+      "actual busy state must not be overridden by old completion");
+    await scan(true);
+    assert.equal(exactReads, 2, "discovery-only List does not perform target admission probes");
+    const failed = (await scan(false, "unavailable")).get(PID);
+    assert.equal(failed?.observation.status, "unavailable");
+    assert.equal(failed?.admission, undefined, "failed exact reads never fall back to discovery authority");
     fixture.append([userRecord({ uuid: uuid(8820), parentUuid: uuid(8812), request: "New work", timestamp: COMPLETED_AT })]);
     assert.equal(admission().readiness.ready, false, "an older completion cannot admit over a newer active prompt");
+    assert.equal((await scan()).get(PID)?.admission?.managedSend.ready, false);
   });
 }
 

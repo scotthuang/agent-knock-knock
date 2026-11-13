@@ -1,4 +1,4 @@
-import { exactClaudeComposerFrame, stripTerminalEscapeSequences } from "./terminal-native-inspection-proof.js";
+import { exactClaudeComposerFrame, knownClaudeComposerFooter, stripTerminalEscapeSequences } from "./terminal-native-inspection-proof.js";
 
 export interface ClaudeUserExplicitReadiness {
   readonly ready: boolean;
@@ -9,24 +9,9 @@ export interface ClaudeUserExplicitReadiness {
 
 const STASH_BADGE_SUFFIX = /›\s+stashed\s*$/u;
 const CLEAR_HINT = /^\s*(?:Draft restored\s*·\s*)?new task\? \/clear to save \d+(?:\.\d)?[kmbt]? tokens\s*$/u;
-const STASH = /\s+(?:Draft restored\s*·\s*)?› stashed\s*$/u;
-const AUXILIARY = /^(?:(?:Draft restored\s*·\s*)?› stashed|[●○◐◉]\s+(?:low|medium|high|xhigh|max|ultracode)\s*·\s*\/effort)$/iu;
-const MODE = /^(?:[⏵⏴⏸]{1,2}\s+(?:manual mode|auto mode|accept edits|bypass permissions|plan mode|don't ask) on(?:\s+\(shift\+tab to cycle\))?|\? for shortcuts)$/u;
-const HINT = /^(?:\? for shortcuts|[1-9]\d* shells?|esc to interrupt|← for (?:agents|ag…)|(?:↓ to manage|\(↓ to manage\)))$/u;
 // Native 2.1.295 spinner frames include the middle dot and reduced-motion dot.
 const SPINNER = /^\s*[·✢✳✶✻✽●✣✤✥✦✧]\s+.+(?:…|\.\.\.)(?:\s+\([^)]*\))?\s*$/u;
 const COMPLETED = /^\s*[·✢✳✶✻✽●✣✤✥✦✧]\s+(?:Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Sautéed|Worked) for \d+(?:\.\d+)?(?:ms|s|m|h)(?: \d+(?:\.\d+)?(?:ms|s|m|h))*(?: · done \d{1,2}:\d{2}(?:[ \u202f]+[AP]M)?)?(?: · [1-9]\d* shells? still running)?\s*$/u;
-
-/** Closed native vocabulary; joining wrapped rows never licenses unknown text. */
-function knownFooter(lines: readonly string[]): boolean {
-  const rows = lines.map(line => line.trim()).filter(line => !AUXILIARY.test(line));
-  if (rows.length === 0) return true;
-  if (rows.length > 4) return false;
-  const footer = rows.join(" ").replace(STASH, "").replace(/\s+Debug\s*$/u, "")
-    .replace(STASH, "").replace(/\s+/gu, " ").trim();
-  const [mode, ...hints] = footer.split(/\s*·\s*/u);
-  return MODE.test(mode ?? "") && hints.every(hint => HINT.test(hint));
-}
 
 /** Footer esc can outlive foreground work; it is not, by itself, idle evidence. */
 function foregroundFailure(lines: readonly string[], interruptHint: boolean): ClaudeUserExplicitReadiness | undefined {
@@ -70,7 +55,7 @@ export function claudeUserExplicitReadiness(
       "AKK cannot identify the hidden contents. If you see [AKK replacing current draft ...], it may be an earlier AKK cleanup marker: " +
       "remove only that marker (Ctrl+E then Ctrl+U if it is the entire single-line input), preserve any other text, and do not submit the marker. Empty the input box, refresh List, and retry. No task text was sent."
   };
-  if (!knownFooter(frame.trailing)) return {
+  if (!knownClaudeComposerFooter(frame.trailing)) return {
     ready: false, reason: "footer_unrecognized",
     message: "Claude main Composer is visible, but its footer contains an unknown or unsupported component. Return to the native main prompt; if it persists, report the footer layout. Task text was not sent."
   };
