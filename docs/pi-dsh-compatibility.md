@@ -5,6 +5,23 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Claude managed Send repair — core 0.16.14 / Pi poc.22 / DSH rc.27
+
+The coordinated release contains PR #518's exact-PID foreground admission and
+shared Composer frame/footer checks. Background shells alone do not make a
+completed foreground turn busy; newer work, pending tools, identity failures,
+drafts/stash and unknown overlays retain their existing input protections.
+Both connectors pin **0.16.14**; an older connector/core does not gain this fix
+from a newer source checkout. DSH rc.27 retains rc.26's #512 adaptation and
+uses DSH **0.2.2-rc.3 / Cordis 4.1.0** as its SDK smoke baseline.
+
+Validation distinguishes synthetic regression/SDK tests from the earlier
+controller-reported live private overlay. The final public artifacts are not
+installed into production by this release. The other six DSH versions, dual
+Hosts, downgrade, lossless in-flight callback migration, real model consumption
+and WeChat delivery are not newly verified. See PR #518 and the release's
+verification record for actual commands and results.
+
 ## DSH 0.2.2-rc.3 adaptation — connector rc.26 / core 0.16.13
 
 Connector **0.1.0-rc.26**, published on `next`, accepts the exact coherent DSH `0.2.2-rc.3` runtime and Cordis
@@ -40,12 +57,12 @@ Host/core/connector List/Status smoke are recorded with the release. That smoke
 uses the real native batch executor with synthetic discovery data and no model
 or external channel. The published rc.25 artifact does not contain this adaptation.
 
-## Current install channels — 2026-11-13
+## Current install channels — 2026-11-14
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
 | --- | --- | --- | --- |
-| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.26 pins core 0.16.13 and adds DSH 0.2.2-rc.3 |
-| Pi | `next`: `0.1.0-poc.21` | `0.16.13` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.27 pins core 0.16.14 and retains DSH 0.2.2-rc.3 |
+| Pi | `next`: `0.1.0-poc.22` | `0.16.14` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
 Existing installations, lockfiles and explicit pins are unchanged. The published

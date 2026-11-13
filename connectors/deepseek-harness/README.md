@@ -19,7 +19,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.26** pins AKK **0.16.13** in its package and lockfile,
+Connector **0.1.0-rc.27** pins AKK **0.16.14** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the 0.165.0 adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
@@ -31,15 +31,16 @@ unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
 RC is published on `next`. The separately reviewed default `latest` remains
 **0.1.0-rc.24 / core 0.16.12** from 2026-11-08; this release does not promote it.
-Use `@next` or exact **0.1.0-rc.26** for the new managed-result delivery fixes.
+Use `@next` or exact **0.1.0-rc.27** for the new managed-result delivery fixes.
 
-This release adds **DeepSeek Harness Web 0.2.2-rc.3 / Cordis 4.1.0**
+This release retains **DeepSeek Harness Web 0.2.2-rc.3 / Cordis 4.1.0**
 compatibility. Its development SDK and runtime tests use that exact Host set,
 including the separately mounted native tool executor and raw JSON batch calls.
-Connector rc.26 is the new `next` publication for this adaptation. It uses the
-already-published core 0.16.13, including #508; it does not require or publish
-the private 0.16.12-dsh022 development core. Earlier rc.25 packages do not
-contain this adaptation, and `latest` remains the separate rc.24 recommendation.
+Connector rc.27 is the coordinated `next` publication pinned to core 0.16.14.
+It includes #518: detailed Claude admission uses the exact bound PID, and
+preflight/submission share the native Composer proof. It retains #508 and
+rc.26's #512 Host adaptation; rc.26/core 0.16.13 does not contain #518.
+The private development core is unnecessary; `latest` remains rc.24.
 Earlier reviewed package sets remain explicitly listed; unlisted releases,
 including `0.2.2-rc.1`, remain rejected.
 
@@ -78,7 +79,7 @@ embedded launcher are outside this connector's validated scope. Existing Codex C
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
 see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/README.md#compatibility) and the
-[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.26/docs/pi-dsh-compatibility.md). This connector does
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.27/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
 
 ## Demo
@@ -149,7 +150,7 @@ For DSH **0.2.2-rc.3**, install this exact connector version (or verify that
 notes rather than treating retained peer entries as a new live acceptance run.
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.26
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.27
 ```
 
 Stop the current Web Host cleanly if it is running, then start a fresh process
@@ -456,7 +457,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.26
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.27
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -484,7 +485,7 @@ dsh plugin --profile web add "file:$(pwd -P)/connectors/deepseek-harness"
 ```
 
 Restart `dsh web` after installation. The child package currently installs and
-tests against its pinned AKK runtime `0.16.13`; building the current repository
+tests against its pinned AKK runtime `0.16.14`; building the current repository
 root does not silently replace that dependency. Before core publication, test
 the candidate core tarball in isolation as described in the
 [coordinated release policy](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/CONTRIBUTING.md#coordinated-package-releases);
@@ -705,7 +706,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.26
+npm run release:check -- --publish --confirm-version 0.1.0-rc.27
 ```
 
 New prereleases publish to `next`; stable publications use `latest`. A reviewed
@@ -717,17 +718,17 @@ use the connector-specific namespace
 `deepseek-harness-v<version>` and are created separately after npm verification.
 
 
-### Reproduce the isolated rc.26 install smoke
+### Reproduce the isolated rc.27 install smoke
 
 Install the exact public Host and connector into a fresh directory, then run
-[`scripts/smoke-installed.mjs`](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.26/connectors/deepseek-harness/scripts/smoke-installed.mjs)
+[`scripts/smoke-installed.mjs`](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.27/connectors/deepseek-harness/scripts/smoke-installed.mjs)
 from this release's source checkout:
 
 ```sh
 smoke_dir="$(mktemp -d)"
 npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund \
   @deepseek-ai/dsh@0.2.2-rc.3 \
-  @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.26
+  @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.27
 node connectors/deepseek-harness/scripts/smoke-installed.mjs "$smoke_dir"
 ```
 
