@@ -33,14 +33,14 @@
       },
       "versions": [
         {
-          "version": "0.1.0-rc.25",
-          "publishTimestamp": 1794316237,
+          "version": "0.1.0-rc.26",
+          "publishTimestamp": 1794579607,
           "source": {
             "type": "npm",
             "registry": "https://registry.npmjs.org"
           },
           "engines": {
-            "dsh": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2"
+            "dsh": "0.1.1-rc.2 || 0.1.2-alpha.1 || 0.1.5-rc.2 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.2-rc.3"
           }
         }
       ]
