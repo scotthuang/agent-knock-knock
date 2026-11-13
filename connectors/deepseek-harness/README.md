@@ -36,7 +36,9 @@ Use `@next` or exact **0.1.0-rc.25** for the new managed-result delivery fixes.
 This checkout adds **DeepSeek Harness Web 0.2.2-rc.3 / Cordis 4.1.0**
 compatibility. Its development SDK and runtime tests use that exact Host set,
 including the separately mounted native tool executor and raw JSON batch calls.
-This is a local adaptation, not a new npm publication or channel promotion.
+This is an unreleased adaptation, not a new npm publication or channel promotion.
+The published rc.25 artifact does not contain it. A future publication must use
+a fresh connector version; the existing rc.25 version must not be republished.
 Earlier reviewed package sets remain explicitly listed; unlisted releases,
 including `0.2.2-rc.1`, remain rejected.
 
@@ -656,8 +658,8 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-`0.1.0-rc.25` lockfile uses the published DeepSeek Harness `0.2.1-rc.2`
-SDK packages and Cordis `4.0.5`. Its real ToolRuntime regression checks
+checkout lockfile uses the published DeepSeek Harness `0.2.2-rc.3`
+SDK packages and Cordis `4.1.0`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
 an isolated registry test, not a live-model acceptance claim. The `rc.7`
