@@ -53,8 +53,9 @@ export async function verifyFullHost({
   const { inspect, relayPath } = verifyInstalledHost(prepared);
   const { env, workspace, port, token, pluginInstallArgs } = prepared;
   const gateway = startGateway({ env, host, port, token, workspace });
+  let doctorCommand;
   try {
-    await verifyGatewayScenario({
+    doctorCommand = await verifyGatewayScenario({
       ...prepared, gateway, host, version, relayPath
     });
   } finally {
@@ -73,6 +74,7 @@ export async function verifyFullHost({
     gateway_method: "agent-knock-knock.callback",
     callback: "passed",
     akk_doctor_command: "passed",
+    doctor_command_evidence: doctorCommand,
     bundled_skill: "eligible",
     tmux_read_only_fixture: "passed",
     tmux_diagnostics: "passed",
@@ -336,7 +338,7 @@ async function verifyGatewayScenario({
   });
   assert.equal(hasAkkCommand(commands), true);
 
-  await verifyAkkDoctorCommand({
+  const doctorCommand = await verifyAkkDoctorCommand({
     env,
     host,
     port,
@@ -370,6 +372,7 @@ async function verifyGatewayScenario({
   assert.equal(doctor.openclaw?.package_ready, true);
   assert.equal(doctor.openclaw?.gateway_ready, true);
   assert.equal(doctor.capabilities?.tmux?.status, "ready");
+  return doctorCommand;
 }
 
 function verifyUpdatedHost({
