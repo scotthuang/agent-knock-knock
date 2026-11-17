@@ -5,6 +5,15 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## OpenClaw install-floor alignment — core 0.16.16 / Pi poc.24 / DSH rc.29
+
+Both connectors pin **0.16.16** and its matching Skill. The core package's
+OpenClaw install declaration is now `>=2026.5.12`; plugin API, Gateway and peer
+floors remain at `2026.5.12`. See the [Linux evidence and installation boundaries](openclaw-operations.md#linux-headless-validation).
+This metadata change retains the Codex 0.169.0 and managed Claude fixes; it adds
+no Pi/DSH Host version, live model or channel-delivery claim. New prereleases
+use `next`; the separately recommended DSH `latest` remains rc.24/core 0.16.12.
+
 ## Codex 0.169.0 — core 0.16.15 / Pi poc.23 / DSH rc.28
 
 Both connectors pin core **0.16.15** and its synchronized Skill. This adds the
@@ -71,8 +80,8 @@ or external channel. The published rc.25 artifact does not contain this adaptati
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
 | --- | --- | --- | --- |
-| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.28 pins core 0.16.15 and retains DSH 0.2.2-rc.3 |
-| Pi | `next`: `0.1.0-poc.23` | `0.16.15` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.29 pins core 0.16.16 and retains DSH 0.2.2-rc.3 |
+| Pi | `next`: `0.1.0-poc.24` | `0.16.16` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
 Existing installations, lockfiles and explicit pins are unchanged. The published

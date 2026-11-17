@@ -7,10 +7,12 @@ This is the canonical ClawHub setup: OpenClaw and a human share one live Codex o
 You need:
 
 - A Node.js version supported by OpenClaw; Node.js 24 LTS is recommended
-- OpenClaw `2026.6.5` or newer
+- OpenClaw `2026.5.12` or newer (install floor); plugin API and Gateway `2026.5.12`+ (unchanged API floor)
 - tmux
 - An installed and authenticated `codex` or `claude` CLI
 - OpenClaw, tmux, and the coding agent running as the same OS user
+
+The installation and API floors are separate requirements even though their current version numbers match. The [Linux headless validation](openclaw-operations.md#linux-headless-validation) used direct Codex control without tmux; it did not exercise the terminal approvals or terminal Watch path in this guide.
 
 AKK reuses a coding agent that you start in tmux. It never installs, authenticates, or launches Codex or Claude Code for you.
 

@@ -1,6 +1,6 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.15",
+  "version": "0.16.16",
   "description": "Delegate to existing Codex CLI, Codex Desktop, and Claude Code sessions from OpenClaw or compatible controller Hosts, with native direct control and supported terminal fallbacks.",
   "license": "MIT",
   "type": "module",
@@ -37,7 +37,7 @@
       "clawhubSpec": "clawhub:@scotthuang/agent-knock-knock",
       "npmSpec": "@scotthuang/agent-knock-knock",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.6.5"
+      "minHostVersion": ">=2026.5.12"
     },
     "compat": {
       "pluginApi": ">=2026.5.12",

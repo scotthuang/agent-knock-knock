@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.16 / Pi 0.1.0-poc.24 / DeepSeek Harness 0.1.0-rc.29 — 2026-11-17
+
+- Lower the OpenClaw **install floor** from `>=2026.6.5` to `>=2026.5.12`, removing an installer-only rejection of an API-compatible older Host. Keep plugin API / Gateway / peer floors at `2026.5.12`; `2026.5.10-beta.2` remains unsupported.
+- Base the change on supplied real Linux verification: OpenClaw `2026.5.28-t.50`, Node.js `24.13.0`, Codex CLI `0.169.0`, headless without tmux, using app-server daemon + `--remote`. Linked installation, config/runtime registration, loaded-thread discovery, verified Send, completed Status/final text and controller-accepted completion callback passed. This is reported evidence, not a fresh local run or an all-versions compatibility guarantee.
+- Terminal-route approvals and Watches were not exercised on that tmux-free machine; external chat delivery was not established. Document the older-Host build/link caveats without changing Codex profiles or runtime API requirements.
+- Publish coordinated Pi/DSH prereleases pinned to core **0.16.16**, with synchronized Skills and unchanged Host ranges. Both use `next`; DSH `latest` remains rc.24/core 0.16.12. Retain the Codex 0.169.0 and managed Claude fixes.
+
 ## 0.16.15 / Pi 0.1.0-poc.23 / DeepSeek Harness 0.1.0-rc.28 — 2026-11-17
 
 - Review Codex CLI/app-server **0.169.0** native contracts and terminal profiles for status, model/permission control, blocking/async questions and exact paginated observation. Preserve old profiles, exact identity, mixed-pair restrictions and person-only approval boundaries.

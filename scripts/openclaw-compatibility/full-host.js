@@ -65,9 +65,7 @@ export async function verifyFullHost({
     target,
     openclaw_version: version,
     result: "compatible",
-    install: pluginInstallArgs.includes("--accept-capabilities")
-      ? "npm-pack --force --accept-capabilities"
-      : "npm-pack --force",
+    install: ["npm-pack", ...pluginInstallArgs.filter((arg) => arg.startsWith("--"))].join(" "),
     runtime_status: inspect.plugin?.status,
     tools: normalizedToolNames(inspect).length,
     command: "akk",

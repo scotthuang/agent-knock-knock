@@ -25,15 +25,20 @@ export function openClawPluginInstallArgs(openclaw, source) {
   const help = openclaw(["plugins", "install", "--help"], {
     allowNonzero: true
   });
-  const supportsCapabilityConsent = help.status === 0 &&
-    `${help.stdout ?? ""}\n${help.stderr ?? ""}`.includes(
-      "--accept-capabilities"
-    );
+  const helpText = help.status === 0
+    ? `${help.stdout ?? ""}\n${help.stderr ?? ""}` : "";
+  const supportsCapabilityConsent = helpText.includes("--accept-capabilities");
+  // This isolated matrix installs our reviewed build, not an arbitrary plugin.
+  // Legacy Hosts require this separate acknowledgement for its subprocess relay.
+  // Modern consent and all other Host checks retain their normal path.
+  const legacyReviewedArtifactAck = !supportsCapabilityConsent &&
+    helpText.includes("--dangerously-force-unsafe-install");
   return [
     "plugins",
     "install",
     "--force",
     ...(supportsCapabilityConsent ? ["--accept-capabilities"] : []),
+    ...(legacyReviewedArtifactAck ? ["--dangerously-force-unsafe-install"] : []),
     source
   ];
 }
