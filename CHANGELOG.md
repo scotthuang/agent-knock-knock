@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.15 / Pi 0.1.0-poc.23 / DeepSeek Harness 0.1.0-rc.28 — 2026-11-17
+
+- Review Codex CLI/app-server **0.169.0** native contracts and terminal profiles for status, model/permission control, blocking/async questions and exact paginated observation. Preserve old profiles, exact identity, mixed-pair restrictions and person-only approval boundaries.
+- Exclude native attached threads from independent main-CLI discovery. Respect agent-message moderation/display metadata in CLI public progress, final results, completion callbacks and asynchronous questions; unknown presentation directives never expose raw text.
+- Retain bounded 800-code-point progress, shared 720-minute hard deadlines, managed-terminal 60-minute inactivity, List v5 budgets, immutable receipt/deadline and uncertain-input rules.
+- Publish coordinated Pi/DSH prereleases pinned to core **0.16.15**, retaining #508/#512/#518 and existing Host ranges. Both connectors use `next`; DSH `latest` remains rc.24. ClawHub submission acceptance is separate from scanning/public availability. No production installation or external-channel delivery is implied.
+
 ## 0.16.14 / Pi 0.1.0-poc.22 / DeepSeek Harness 0.1.0-rc.27 — 2026-11-14
 
 - Restore managed Claude Send after verified foreground completion while a background shell remains. Detailed identity/admission now use the same exact-PID observation as Send; new work, unresolved tools, failed reads and identity conflicts still block input.

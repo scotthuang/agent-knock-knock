@@ -35,6 +35,7 @@ test("long tool output and private phases cannot displace the latest public comm
   const rawItems = [commentary("old public update", { id: "old" }),
     { id: "old-tool", type: "webSearch", status: "completed" },
     commentary("正在构建并核对发布产物。", { startedAtMs: START }),
+    Object.assign(commentary("PRIVATE_MODERATED"), { moderation: { moderated: true, display: null } }),
     { id: "hidden", type: "reasoning", text: "PRIVATE_REASONING", completedAtMs: START + 9000 },
     { id: "analysis", type: "agentMessage", phase: "analysis", text: "PRIVATE_ANALYSIS" },
     { id: "unknown", type: "agentMessage", text: "UNKNOWN_PHASE" },

@@ -712,3 +712,24 @@ test("Native CLI preserves existing short deadlines through restart, replay and 
   await service.reconcile(sent.id);
   assert.equal(h.state.notifications.length, 1, "accepted timeout notification is neither revived nor redelivered");
 });
+
+test("native final Status and completion callbacks leave moderated or unknown display handling to Codex", async t => {
+  for (const moderation of [{ moderated: true, display: null },
+    { moderated: false, display: { action: "future-action" } }, { moderated: false }, true, [], "unknown"]) {
+    const h = harness(t), sent = await h.service.send({ ...input, callbackRoute: route });
+    const completed = turn("native-one", "completed", h.state.clientId);
+    completed.items.push({ id: "public-final", type: "agentMessage", phase: "final_answer", text: "PUBLIC_FINAL",
+      moderation: { moderated: false, display: null } },
+    { id: "native-display", type: "agentMessage", phase: "final_answer", text: "PRIVATE_MODERATED", moderation });
+    h.state.snapshot = snapshot([completed]);
+    const settled = await h.service.reconcile(sent.id);
+    assert.equal(settled.status, "completed");
+    assert.equal(settled.final_text, "PUBLIC_FINAL");
+    const projected = nativeTurnProjection(completed);
+    assert.ok(projected && "final_text" in projected);
+    assert.equal(projected.final_text, "PUBLIC_FINAL");
+    assert.equal(h.state.notifications.length, 1);
+    assert.doesNotMatch(JSON.stringify(h.state.notifications), /PRIVATE_MODERATED/u);
+    assert.equal(h.state.starts, 1);
+  }
+});

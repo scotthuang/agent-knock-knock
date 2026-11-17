@@ -17,7 +17,7 @@ test("native discovery accepts CLI user threads with vscode source but rejects c
   const base = { id: "one", sessionId: "one", cwd: "/tmp/work", cliVersion: "0.155.1", historyMode: "paginated",
     originator: "codex-tui", source: "vscode", threadSource: "user", status: { type: "idle" }, turns: [] };
   assert.equal(isMainCodexCliThread(parseNativeThread(base, "one")), true);
-  for (const change of [{ parentThreadId: "parent" }, { source: { subAgent: {} } }, { canAcceptDirectInput: false },
+  for (const change of [{ parentThreadId: "parent" }, { attachedToThreadId: "parent" }, { source: { subAgent: {} } }, { canAcceptDirectInput: false },
     { originator: "codex-desktop" }, { threadSource: "agent" }]) {
     assert.equal(isMainCodexCliThread(parseNativeThread({ ...base, ...change }, "one")), false);
   }
@@ -29,6 +29,7 @@ test("async interaction identity is tied to native question and only unresolved 
   const turn = parseNativeTurn(raw);
   const interactions = nativeAsyncInteractions("thread-one", turn);
   assert.equal(interactions.length, 1);
+  assert.deepEqual(nativeAsyncInteractions("thread-one", parseNativeTurn({ ...raw, items: raw.items.map(item => ({ ...item, moderation: { moderated: true, display: null } })) })), []);
   const interaction = interactions[0];
   assert.match(interaction.id, /^codex-native-interaction:[a-f0-9]{64}$/u);
   assert.equal(interaction.questions[0].id, JSON.stringify(["request_user_input_async", "item-one", 0]));
