@@ -23,6 +23,7 @@ export const TERMINAL_MODEL_CONTROL_PROFILE_IDS = Object.freeze({
   codex01650: "codex-model-control-0.165.0",
   codex01660: "codex-model-control-0.166.0",
   codex01670: "codex-model-control-0.167.0",
+  codex01690: "codex-model-control-0.169.0",
   claude: "claude-model-control-2.1.266",
   claude21285: "claude-model-control-2.1.285"
 } as const);
@@ -85,7 +86,8 @@ export const CODEX_MODEL_CONTROL_AGENT_VERSIONS = Object.freeze([
   "0.164.0",
   "0.165.0",
   "0.166.0",
-  "0.167.0"
+  "0.167.0",
+  "0.169.0"
 ] as const);
 export type CodexModelControlAgentVersion =
   typeof CODEX_MODEL_CONTROL_AGENT_VERSIONS[number];
@@ -195,7 +197,8 @@ const MODEL_CONTROL_PROFILES: readonly TerminalModelControlProfile[] =
       ["0.164.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01640],
       ["0.165.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01650],
       ["0.166.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01660],
-      ["0.167.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01670]
+      ["0.167.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01670],
+      ["0.169.0", TERMINAL_MODEL_CONTROL_PROFILE_IDS.codex01690]
     ] as const).map(([agentVersion, behaviorProfile]) => Object.freeze({
       agent: "codex" as const,
       agentVersion,

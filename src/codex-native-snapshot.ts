@@ -1,3 +1,4 @@
+import { isPublicAgentMessage } from "./backend-public-progress.js";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { CodexNativeError, type CodexNativeThread, type CodexNativeTurn,
@@ -35,7 +36,7 @@ export function parseNativeThread(value: unknown, expectedId: string): CodexNati
 
 /** Metadata describes the thread's origin, not the currently running frontend version. */
 export function isMainCodexCliThread(thread: CodexNativeThread): boolean {
-  if (thread.parentThreadId != null || thread.canAcceptDirectInput === false) return false;
+  if (thread.parentThreadId != null || thread.attachedToThreadId != null || thread.canAcceptDirectInput === false) return false;
   if (thread.source && typeof thread.source === "object") return false;
   if (thread.threadSource != null && thread.threadSource !== "user") return false;
   return thread.originator === "codex-tui" || (thread.source === "cli" && thread.originator !== "codex-desktop");
@@ -107,7 +108,7 @@ export function nativeAsyncInteractions(threadId: string, turn: CodexNativeTurn)
       }
     } catch { /* A normal user message is not an answer receipt. */ }
   }
-  return turn.items.flatMap(item => item.type === "agentMessage" && item.delivery === "async"
+  return turn.items.flatMap(item => isPublicAgentMessage(item) && item.delivery === "async"
     ? (item.questions ?? []).flatMap((q, index) => {
       const questionId = JSON.stringify(["request_user_input_async", item.id, index]);
       if (answered.has(questionId) || answered.has(item.id)) return [];

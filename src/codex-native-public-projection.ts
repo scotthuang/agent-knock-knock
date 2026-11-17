@@ -1,3 +1,4 @@
+import { isPublicAgentMessage } from "./backend-public-progress.js";
 import { nativeApprovalResponseSupported } from "./codex-native-client-interactions.js";
 import { backendObservationStopped, backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { parseCodexDeliveryDiagnostics, codexRecoveryActions } from "./codex-routing-diagnostics.js";
@@ -137,7 +138,7 @@ function nativeFreeTextAnswer(interaction: PersistedNativeInteraction, question:
 
 export function nativeTurnProjection(turn: CodexNativeTurn | undefined) {
   if (!turn) return null;
-  const messages = turn.items.filter(item => item.type === "agentMessage" && typeof item.text === "string");
+  const messages = turn.items.filter(item => isPublicAgentMessage(item) && typeof item.text === "string");
   const finals = messages.filter(item => item.phase === "final_answer");
   const text = (finals.length ? finals : messages.filter(item => item.phase == null)).map(item => item.text).join("\n\n");
   return { id: turn.id, status: turn.status, items_complete: turn.itemsComplete,

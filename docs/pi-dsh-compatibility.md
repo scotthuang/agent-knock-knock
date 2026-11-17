@@ -5,6 +5,16 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Codex 0.169.0 — core 0.16.15 / Pi poc.23 / DSH rc.28
+
+Both connectors pin core **0.16.15** and its synchronized Skill. This adds the
+[Codex CLI 0.169.0 review](codex-0.169.0-compatibility.md), excluding attached
+threads from main-CLI discovery and respecting native message presentation
+metadata. The release retains #508, #512 and #518; connector Host ranges and
+callback ownership/recovery contracts are unchanged. New connector prereleases
+use `next`; DSH `latest` remains rc.24/core 0.16.12. Real CLI tests use local
+callback receipts, not a live Pi/DSH model or external-channel delivery.
+
 ## Claude managed Send repair — core 0.16.14 / Pi poc.22 / DSH rc.27
 
 The coordinated release contains PR #518's exact-PID foreground admission and
@@ -57,12 +67,12 @@ Host/core/connector List/Status smoke are recorded with the release. That smoke
 uses the real native batch executor with synthetic discovery data and no model
 or external channel. The published rc.25 artifact does not contain this adaptation.
 
-## Current install channels — 2026-11-14
+## Current install channels — 2026-11-17
 
 | Connector | Recommended install | Exact core dependency | Channel boundary |
 | --- | --- | --- | --- |
-| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.27 pins core 0.16.14 and retains DSH 0.2.2-rc.3 |
-| Pi | `next`: `0.1.0-poc.22` | `0.16.14` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
+| DeepSeek Harness | Bare package / `latest`: `0.1.0-rc.24` | `0.16.12` | Still RC; separate `next` rc.28 pins core 0.16.15 and retains DSH 0.2.2-rc.3 |
+| Pi | `next`: `0.1.0-poc.23` | `0.16.15` | Unchanged; bare `latest` remains the old `0.1.0-poc.1` |
 
 The DSH promotion changes only the default registry selection for new installs.
 Existing installations, lockfiles and explicit pins are unchanged. The published

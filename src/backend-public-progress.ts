@@ -36,6 +36,16 @@ export interface BackendPublicProgress {
   reason?: BackendProgressReadError;
 }
 
+/** Native moderation/display directives are handled by the producing client, never raw public text. */
+export function isPublicAgentMessage(item: { type: string; moderation?: unknown }): boolean {
+  if (item.type !== "agentMessage") return false;
+  const moderation = item.moderation;
+  if (moderation == null) return true; // Legacy items have no presentation metadata.
+  if (typeof moderation !== "object" || Array.isArray(moderation)) return false;
+  const directive = moderation as Record<string, unknown>;
+  return directive.moderated === false && directive.display === null;
+}
+
 /** Status-only projection. Callers must also verify the snapshot's exact thread identity. */
 export function backendPublicProgress(options: {
   nativeTurnId: string | null;
@@ -52,7 +62,7 @@ export function backendPublicProgress(options: {
 
   // Only the latest explicitly public commentary is eligible. Final answers already
   // have response_text; unknown phases, reasoning, user input and tool output do not.
-  const commentary = [...turn.items].reverse().find(item => item.type === "agentMessage" && item.phase === "commentary"
+  const commentary = [...turn.items].reverse().find(item => isPublicAgentMessage(item) && item.phase === "commentary"
     && item.delivery !== "async" && typeof item.text === "string" && item.text.trim().length > 0);
   const actionItems = turn.items.filter(item => actionTitle(item) !== null).slice(-2);
   const actions = actionItems.map(item => actionTitle(item)!).join("\n");

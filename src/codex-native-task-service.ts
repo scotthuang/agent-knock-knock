@@ -1,3 +1,4 @@
+import { isPublicAgentMessage } from "./backend-public-progress.js";
 import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import { codexDeliveryDiagnostics } from "./codex-routing-diagnostics.js";
 import { backendObservationStopped, backendRenewalDeadline, isBackendCallbackRetryable,
@@ -78,7 +79,7 @@ function submission(snapshot: CodexNativeSnapshot, clientId: string, text: strin
   return itemText === text ? matches[0].turn : undefined;
 }
 function finalText(turn: CodexNativeTurn): string {
-  const messages = turn.items.filter(item => item.type === "agentMessage" && typeof item.text === "string");
+  const messages = turn.items.filter(item => isPublicAgentMessage(item) && typeof item.text === "string");
   const final = messages.filter(item => item.phase === "final_answer");
   return (final.length ? final : messages.filter(item => item.phase == null)).map(item => item.text).join("\n\n");
 }
@@ -174,7 +175,7 @@ class CodexNativeTaskRuntime implements CodexNativeTaskService {
     if (["completed", "failed", "interrupted"].includes(turn.status)) {
       if (!turn.itemsComplete) { task.observation_error = "codex_native_exact_items_incomplete"; return; }
       task.status = turn.status as "completed" | "failed" | "interrupted"; task.final_text = finalText(turn);
-      this.notify(task, "settled", `Codex CLI task ${task.id} ${task.status}.\n${task.final_text || turn.error || "No final text was recorded."}`);
+      this.notify(task, "settled", `Codex CLI task ${task.id} ${task.status}.\n${task.final_text || turn.error || "No public final text is available."}`);
     }
   }
   async reconcile(id: string): Promise<CodexNativeTaskRecord> {

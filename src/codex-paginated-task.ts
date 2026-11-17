@@ -1,3 +1,4 @@
+import { isPublicAgentMessage } from "./backend-public-progress.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
@@ -449,7 +450,7 @@ function taskQuestions(
   newerTurns: readonly CodexAppServerTurn[]
 ): { questions: CodexAsyncQuestionDurableEvidence[]; answerTurns: CodexAppServerTurn[] } {
   const items = turn.items.filter((item) =>
-    item.type === "agentMessage" && item.delivery === "async" &&
+    isPublicAgentMessage(item) && item.delivery === "async" &&
     Array.isArray(item.questions) && item.questions.length > 0);
   let totalQuestions = 0;
   const questionsById = new Map<string, { itemId: string; index: number }>();
@@ -555,7 +556,7 @@ function answeredQuestionId(value: unknown): string | undefined {
 
 function completionText(turn: CodexAppServerTurn): string {
   const messages = turn.items.filter((item) =>
-    (item.type === "agentMessage" || item.type === "plan") && item.delivery !== "async" &&
+    (isPublicAgentMessage(item) || item.type === "plan") && item.delivery !== "async" &&
     item.questions == null && typeof item.text === "string");
   // Native Plan-mode output is a plan item instead of an agentMessage.
   const final = [...messages].reverse().find((item) =>

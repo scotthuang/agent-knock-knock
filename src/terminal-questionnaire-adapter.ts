@@ -25,7 +25,8 @@ export const CODEX_NATIVE_QUESTIONNAIRE_PROFILES: Readonly<
   "0.164.0": "codex/0.164.0/request-user-input-v5",
   "0.165.0": "codex/0.165.0/request-user-input-v5",
   "0.166.0": "codex/0.166.0/request-user-input-v5",
-  "0.167.0": "codex/0.167.0/request-user-input-v5"
+  "0.167.0": "codex/0.167.0/request-user-input-v5",
+  "0.169.0": "codex/0.169.0/request-user-input-v5"
 });
 
 export const NATIVE_QUESTIONNAIRE_PROFILES = Object.freeze({
@@ -1086,7 +1087,8 @@ function codexFreeTextFooterTips(header: CodexHeader, profile: string): readonly
     CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.164.0"],
     CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.165.0"],
     CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.166.0"],
-    CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.167.0"]].includes(profile)
+    CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.167.0"],
+    CODEX_NATIVE_QUESTIONNAIRE_PROFILES["0.169.0"]].includes(profile)
     ? "⌃p / ⌃n change question" : CODEX_FREE_TEXT_NAVIGATION_TIP;
   return [
     codexSubmitTip(header),
@@ -1107,7 +1109,8 @@ function codexHasCanonicalOther(options: readonly ParsedOptionRow[], profile: st
       "codex/0.160.0/request-user-input-v4", "codex/0.162.1/request-user-input-v5",
       "codex/0.164.0/request-user-input-v5", "codex/0.165.0/request-user-input-v5",
       "codex/0.166.0/request-user-input-v5",
-      "codex/0.167.0/request-user-input-v5"].includes(profile)
+      "codex/0.167.0/request-user-input-v5",
+      "codex/0.169.0/request-user-input-v5"].includes(profile)
       ? "Optionally, add details in notes (tab)"
       : CODEX_OTHER_OPTION_DESCRIPTION);
 }
