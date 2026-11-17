@@ -10,8 +10,8 @@ backend, Desktop, and backend Recovery support described here.
 
 - Node.js supported by the installed OpenClaw release; Node.js 24 LTS is
   recommended.
-- OpenClaw `2026.6.5` or newer for normal packaged installation.
-- Plugin API and Gateway `2026.5.12` or newer. The adjacent tested boundary,
+- **Install floor**: OpenClaw `2026.5.12` or newer for package installer admission.
+- **API floor**: Plugin API and Gateway `2026.5.12` or newer, unchanged. The adjacent tested boundary,
   `2026.5.10-beta.2`, lacks the required session workflow API.
 - An existing supported coding-agent environment running under the same OS
   user as OpenClaw and AKK; choose its setup below.
@@ -26,6 +26,66 @@ OpenClaw and AKK inspect local processes, private backend endpoints, and any
 selected terminal provider. Workspace is not a routing boundary: exact current
 conversation identity and explicit user selection are. Terminal setup
 instructions apply only when using the terminal route.
+
+## Linux headless validation
+
+The install floor was lowered from `2026.6.5` to `2026.5.12` after a supplied
+real Linux verification with **OpenClaw `2026.5.28-t.50`, Node.js `24.13.0`
+and Codex CLI `0.169.0`**, without tmux. The installer-only `minHostVersion`
+hard gate had rejected this Host despite its required APIs being available.
+The supplied link test used a temporary `>=2026.5.0` install declaration.
+This change selects the more conservative `>=2026.5.12`; the reported Host is
+above both. That final declaration was not reinstalled on Linux during this
+local change. Changing the declaration removes the extra admission restriction;
+it does not lower `openclaw.compat.pluginApi`, `minGatewayVersion` or the OpenClaw peer
+requirement. The API and install floors now have the same number but remain
+independent contracts. `2026.5.10-beta.2` remains intentionally unsupported.
+
+The reported checks passed source-link installation, configuration validation
+and runtime import with no diagnostics: 27 tools, `akk`, the reconciliation
+service and callback Gateway method registered. Required registration/session
+workflow APIs and `chat.send` / `sessions.send` / `agent.wait` were available.
+An app-server daemon plus a `--remote` TUI exposed one loaded CLI thread;
+Send had verified submission and proven acceptance, Status returned completed
+with final text, and the controller accepted the completion callback. Controller
+acceptance does not establish delivery to an external chat channel.
+
+This is supplied Linux evidence, not a new local reproduction or a full
+compatibility matrix for every release from the declared floor onward. With
+no tmux on that machine, **terminal-route approvals and terminal Watches were
+not tested**. Direct-backend completion observation is a separate path.
+
+### Build and link on the verified older Host
+
+Node.js `24.13.0` is outside the pinned development dependency
+`openclaw@2026.9.1`'s accepted Node ranges: its 24.x branch requires
+`>=24.15.0`. For a reviewed source
+checkout, use `npm ci --ignore-scripts` (or `npm install --ignore-scripts`) to
+skip dependency lifecycle scripts before building. This does not make the
+pinned development Host runnable below its own Node requirement; use a suitable
+Node version when executing that Host or its compatibility checks.
+
+On the verified **2026.5.28-t.50** installer, `--force` cannot be combined with
+`--link`. Its child-process scanner required the legacy
+`--dangerously-force-unsafe-install` acknowledgement for this reviewed source:
+
+```bash
+npm ci --ignore-scripts
+npm run build
+openclaw plugins install . --link --dangerously-force-unsafe-install
+```
+
+That version-specific acknowledgement does not remove the install/API floors.
+Newer OpenClaw installers may deprecate or ignore it; inspect their help and
+follow their normal policy/consent requirements. Do not apply it to unreviewed
+sources or assume it bypasses other installation checks.
+
+The verified direct CLI setup used:
+
+```bash
+codex app-server daemon start
+codex --remote "unix://${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock"
+```
 
 ## Choose one installation path
 

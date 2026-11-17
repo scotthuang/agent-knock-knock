@@ -16,7 +16,7 @@ AKK never launches a hidden replacement agent. The controller Host, the human, a
 
 ## Install for OpenClaw
 
-You need OpenClaw `2026.6.5`+, Node.js `22.19.0`+, and a supported Codex Desktop app or authenticated `codex` or `claude` CLI running as the same OS user.
+You need OpenClaw `2026.5.12`+, Node.js `22.19.0`+, and a supported Codex Desktop app or authenticated `codex` or `claude` CLI running as the same OS user.
 
 Use ClawHub for the OpenClaw plugin, including the 0.14 backend and Desktop features:
 
@@ -218,10 +218,12 @@ can use a supported terminal route. Claude Code direct control is available unde
 | Codex CLI shared backend | Live-tested on macOS: CLI/backend `0.169.0` in the [0.16.15 review](docs/codex-0.169.0-compatibility.md), `0.167.0` in the [0.16.12 review](docs/codex-0.167.0-compatibility.md), `0.166.0` in the [0.16.11 review](docs/codex-0.166.0-compatibility.md), `0.165.0` in the [0.16.4 review](docs/codex-0.165.0-compatibility.md), `0.164.0` in the [0.14.17 review](docs/codex-0.164.0-compatibility.md), `0.162.1` + `0.162.1`, and previously `0.160.0` + `0.162.0`. Requires a loaded main CLI conversation and compatible live protocol. These are tested combinations, **not a numeric minimum**. |
 | Claude Code direct connection | macOS, compatible native peer protocol `1`, and Python 3 available to AKK. Live observations include `2.1.295` and `2.1.296`; these are not minimum versions. Standard `claude` and configured wrappers use the same adapter. See the [direct guide](docs/claude-cli-direct.md) for task and interaction boundaries. |
 | Terminal coding agents | Reviewed Codex profiles include `0.160.0`, `0.162.1`, `0.164.0`, `0.165.0`, `0.166.0`, `0.167.0` and `0.169.0`; Claude fixtures include `2.1.285`, with live observations on `2.1.295`/`2.1.296`. An otherwise eligible, complete `x.y.z` Claude version may attempt supported controls through runtime validation even without an exact regression profile. Actual identity, protocol and UI evidence determine availability; unknown dialogs are not guessed. |
-| OpenClaw | `2026.6.5`+; plugin API and Gateway `2026.5.12`+ |
-| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.21` (`next`), pinned AKK `0.16.13` |
-| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); recommended connector `0.1.0-rc.24` (`latest`, still RC), pinned AKK `0.16.12`; `next` rc.25 pins core `0.16.13`. See its guide for previous RC, alpha and legacy coverage. |
+| OpenClaw | Install floor `2026.5.12`+; API floor remains plugin API and Gateway `2026.5.12`+ |
+| Pi connector | Pi `1.2.0` and `0.84.4`; connector `0.1.0-poc.24` (`next`), pinned AKK `0.16.16` |
+| DeepSeek Harness connector | Web `0.2.1-rc.2` (RC); recommended connector `0.1.0-rc.24` (`latest`, still RC), pinned AKK `0.16.12`; `next` rc.29 pins core `0.16.16`. See its guide for previous RC, alpha and legacy coverage. |
 | Runtime | Node.js `22.19.0`+ on macOS or Linux |
+
+Linux without tmux has a reported end-to-end verification on OpenClaw `2026.5.28-t.50`, Node.js `24.13.0` and Codex CLI `0.169.0` using the app-server daemon and `--remote`. See the [validation scope and older-Host build notes](docs/openclaw-operations.md#linux-headless-validation). The install floor controls package admission; the API floor still controls required runtime interfaces.
 
 The adjacent OpenClaw boundary `2026.5.10-beta.2` is intentionally unsupported. Herdr versions are observations, not an allowlist: discovery verifies live identity and read capabilities, while input requires a matching CLI schema declaration or verified baseline behavior. An untested server without input evidence exposes only verified read capabilities. Desktop controls validate the live native contract. Desktop catalog presence alone does not prove the conversation is open or controllable. See each connector guide, the [Pi/DSH validation matrix](docs/pi-dsh-compatibility.md), and the Desktop guide for tested boundaries and limitations.
 
