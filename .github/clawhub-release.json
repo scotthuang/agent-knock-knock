@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.15",
+  "version": "0.16.16",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "3d37361ead44c40f837961fb8755e7509e42d1de",
-  "asset": "scotthuang-agent-knock-knock-0.16.15.tgz",
-  "sha256": "cdf4927b7fe9626b5db8bfd0c4034e97508f05ab0fc4cc6fb6da8e40c4211154",
-  "bytes": 4003328,
-  "changelog": "Support reviewed Codex CLI/app-server 0.169.0: attached-thread identity filtering, native presentation-metadata public projection, status/model/permission/question profiles. Preserve exact ownership, person-only approvals, no-replay guards and monitoring defaults. Pi poc.23 and DSH rc.28 pin core 0.16.15. Submission acceptance is separate from scanning/public availability."
+  "commit": "dde607c0d27bd5332018b4b117a94990fe236ee5",
+  "asset": "scotthuang-agent-knock-knock-0.16.16.tgz",
+  "sha256": "1bae494b793cf1bdb690b7963d09fb3f74c6aa2308e1d1a80c3f7da8ebb601c9",
+  "bytes": 4005525,
+  "changelog": "Lower the OpenClaw install floor to >=2026.5.12, retaining the existing Plugin API/Gateway/peer floors and unsupported 2026.5.10-beta.2 boundary. Full isolated Host checks pass on 2026.5.12 and 2026.9.1. Codex profiles/runtime safety unchanged. Pi poc.24 and DSH rc.29 pin core 0.16.16. Submission acceptance is separate from scanning/public availability."
 }

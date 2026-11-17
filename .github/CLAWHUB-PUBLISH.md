@@ -7,15 +7,18 @@ and workflow filename. No stored ClawHub token or manual override is required.
 The reviewed `.github/clawhub-release.json` identifies the already-tested GitHub
 Release TGZ, original source commit, version, size and SHA-256. The workflow never
 rebuilds it, publishes to npm, installs AKK locally, or changes the publisher binding.
-For 0.16.15, the manual macOS publication gate passed **3,981/3,981** core tests,
+For 0.16.16, the manual macOS publication gate passed **3,982/3,982** core tests,
 both connector offline gates, isolated OpenClaw 2026.9.1, runtime Inspector,
 type checking, architecture/evidence validation and package dry-run checks.
-[Gate run 44069867842](https://github.com/scotthuang/agent-knock-knock/actions/runs/44069867842)
-tested tree `c26e1c16f82da2d3bdd40a13646930143720e30f`; the release product commit
-`3d37361ead44c40f837961fb8755e7509e42d1de` has the same tree (PR #522).
+[Gate run 44090947770](https://github.com/scotthuang/agent-knock-knock/actions/runs/44090947770)
+tested head `7ae7995b677f8170d26e5922760525b406b0185d`; the release product commit
+`dde607c0d27bd5332018b4b117a94990fe236ee5` has the same tree (PR #525).
+The full local floor-change matrix also passed packaged Host checks on
+2026.5.12 and 2026.9.1, the 2026.5.12 API minimum, and expected rejection
+of the missing workflow API at 2026.5.10-beta.2. Product runtime code is unchanged.
 This publication update changes only the release manifest and this documentation.
-The coordinated Pi `0.1.0-poc.23` and DSH `0.1.0-rc.28` npm packages pin core
-`0.16.15`; this workflow uploads only the frozen core ClawHub archive.
+The coordinated Pi `0.1.0-poc.24` and DSH `0.1.0-rc.29` npm packages pin core
+`0.16.16`; this workflow uploads only the frozen core ClawHub archive.
 Both new connector prereleases use `next`; DSH `latest=rc.24` remains unchanged.
 
 The workflow also supports an explicit read-only `verify_release=true` gate on
