@@ -17,10 +17,10 @@ The reader and install-target behavior were verified with DSH **0.2.1-rc.2**. Th
 For the supported POSIX Web Host setup, `pnpm`, connector capabilities, permissions, and limitations, see the [DSH connector guide](../../connectors/deepseek-harness/README.md). The equivalent manual command is:
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.28
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.29
 ```
 
-The index selects rc.28/core 0.16.15, also published on npm `next`. The bare npm package still selects the separately reviewed rc.24/core 0.16.12 through `latest`; this index update does not promote a new default npm recommendation. An npm tag does not make the RC stable or expand its Host compatibility. For DSH 0.2.2-rc.3, select rc.28 explicitly: the bare npm recommendation rc.24 does not support that Host. The current index was validated with the official 0.2.2-rc.3 parser; this is not a rerun of the six older Host installations. The market is an installation path, not an automatic update service.
+The index selects rc.29/core 0.16.16, also published on npm `next`. The bare npm package still selects the separately reviewed rc.24/core 0.16.12 through `latest`; this index update does not promote a new default npm recommendation. An npm tag does not make the RC stable or expand its Host compatibility. For DSH 0.2.2-rc.3, select rc.29 explicitly: the bare npm recommendation rc.24 does not support that Host. The current index was validated with the official 0.2.2-rc.3 parser; this is not a rerun of the six older Host installations. The market is an installation path, not an automatic update service.
 
 ## Regenerate after a connector release
 
