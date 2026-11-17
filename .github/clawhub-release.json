@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.14",
+  "version": "0.16.15",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "f31724452a6f18396d8c9b93b673438ca1d88a76",
-  "asset": "scotthuang-agent-knock-knock-0.16.14.tgz",
-  "sha256": "c3f7ad3a5f581c65838260fbe946f30c27dcedbc62606e0dfa1cd2bf9942a404",
-  "bytes": 4000579,
-  "changelog": "Restore Claude managed Send after foreground completion: exact-PID admission and shared native Composer frame/footer proof. Keeps drafts, approvals, identity and no-replay guards. Pi poc.22 and DSH rc.27 pin core 0.16.14; DSH 0.2.2-rc.3 compatibility retained. Submission acceptance is separate from scanning and public availability."
+  "commit": "3d37361ead44c40f837961fb8755e7509e42d1de",
+  "asset": "scotthuang-agent-knock-knock-0.16.15.tgz",
+  "sha256": "cdf4927b7fe9626b5db8bfd0c4034e97508f05ab0fc4cc6fb6da8e40c4211154",
+  "bytes": 4003328,
+  "changelog": "Support reviewed Codex CLI/app-server 0.169.0: attached-thread identity filtering, native presentation-metadata public projection, status/model/permission/question profiles. Preserve exact ownership, person-only approvals, no-replay guards and monitoring defaults. Pi poc.23 and DSH rc.28 pin core 0.16.15. Submission acceptance is separate from scanning/public availability."
 }
