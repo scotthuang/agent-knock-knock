@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.17 / Pi 0.1.0-poc.25 / DeepSeek Harness 0.1.0-rc.30 — 2026-11-18
+
+- Restore Codex Desktop sidebar discovery from the exact active owner's atom bank and owner-scoped migration/root-hint metadata. Preserve legacy layouts, live-atom precedence, account isolation and disconnected-sidebar rows without claiming they are sendable.
+- Adapt macOS Desktop **26.1111.71025 / build 28661** snapshot stream **13**, retaining stream 11 and exact owner, task, revision, history and item validation. Unknown protocols still fail explicitly; historical full-write verification metadata is not broadened.
+- Verify the candidate's semantic-tool Send, exact native completion and one local completion callback in the dedicated test conversation with original settings preserved. The initial native account-routing timeout was caused by the proxy being off, as directly confirmed by the user; after the environment recovered, the unchanged adapter completed a new benign task. This is reported environment evidence, not a controlled proxy experiment or an AKK account-routing fix.
+- Build 28661 approvals, question answers, settings mutation, cancellation, creation and external-channel delivery were not newly live-tested. Preserve their existing regression coverage and older-build evidence separately.
+- Publish coordinated Pi/DSH prereleases with exact core **0.16.17** dependencies and synchronized Skills. Both remain on `next`; existing `latest` recommendations and Host ranges are unchanged. Publication does not install or restart the running local Host.
+
 ## 0.16.16 / Pi 0.1.0-poc.24 / DeepSeek Harness 0.1.0-rc.29 — 2026-11-17
 
 - Lower the OpenClaw **install floor** from `>=2026.6.5` to `>=2026.5.12`, removing an installer-only rejection of an API-compatible older Host. Keep plugin API / Gateway / peer floors at `2026.5.12`; `2026.5.10-beta.2` remains unsupported.

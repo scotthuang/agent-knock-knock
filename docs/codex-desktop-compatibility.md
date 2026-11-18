@@ -24,6 +24,7 @@ possibly submitted operation.
 | `26.1002.52244` / `13536` | Send, Status, Watch, approvals, answers, model/permission settings and exact cancellation | Not live-verified |
 | `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
+| `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.
@@ -63,6 +64,62 @@ a compatibility limitation. The original `13536` task/interaction evidence is
 dated 2026-10-09; the `20156` creation, approval, and question evidence is dated
 2026-10-13/14 below. The [backend Recovery work](backend-task-recovery.md#validation-boundary)
 has fast-regression coverage, not a separate live Desktop proof.
+
+## Build 28661 compatibility — AKK 0.16.17
+
+The 2026-11-18 audit identifies the installed application as `26.1111.71025`,
+build `28661`, bundle ID `com.openai.codex`. `Info.plist` and the bundled
+package version agree; the running main executable has the same path and inode
+as the installed application. The IPC handshake still does not attest each
+owner's build. This is an installed/running-instance observation, not a claim
+about every update channel's latest release.
+
+Two native contract changes caused the observed read failures:
+
+- Layout preferences now also live in `electron-owner-atoms:<owner>`, selected
+  by `electron-renderer-content-owner`. AKK reads only that exact bank, overlays
+  common/live atoms in the same order as Desktop, and reads migrated pins and
+  root hints from the matching `electron-owner-value:<key>:<owner>` fields.
+  It never selects an account by enumeration, merges other owners, or exports
+  owner markers, credentials or drafts. Legacy unscoped layouts remain supported.
+- The installed method table and a real owner broadcast use snapshot stream
+  version **13** rather than **11**. Both reviewed versions pass the same
+  identity, revision, history-tail, pending-request and item-shape checks;
+  unknown protocol versions still fail explicitly. The implemented Send,
+  approval, question, settings and interrupt request versions remain unchanged
+  in this bundle. That source review alone does not prove their native effects.
+
+The local candidate recovered four persisted sidebar members from 392 saved
+candidates. Unconnected members remained visible without Send; membership did
+not turn history into a live owner. Read-only Status/model/permission inspection
+also passed on the explicitly opened dedicated test conversation.
+
+The first real semantic-tool Send used that original conversation and a private
+test Store. Read-only reconciliation of the same Watch established its exact
+native turn without another Send. The native task failed with `workspace routing
+discovery timed out`; AKK observed that failed task and delivered one notification
+to an isolated local receiver. It retained `systemError` as unsendable.
+
+Subsequent diagnosis found Desktop's own `account/read` and authenticated usage
+queries failing before that Send. In the installed application, this workspace
+routing identifies the authenticated account's backend route, not the local
+project directory. The user directly confirmed that the proxy had been off and
+that enabling it restored operation. This is a user-confirmed environment fact,
+not an AKK code defect or a single-variable proxy experiment by the maintainer.
+
+A new benign task then used the unchanged candidate adapter, the same dedicated
+conversation, and the original directory, model and permissions. One Send was
+followed through uncertain acceptance to an exact native turn and successful
+fixed reply; its local completion callback was accepted once. The old failed
+task was not replayed. Final read-only inspection confirmed idle/sendable state
+and unchanged settings. No production controller or external chat delivery was
+tested. See the [sanitized release evidence](evidence/desktop-28661.md).
+
+Command/file approval effects, question answers, settings mutation, cancellation
+and creation are **not newly live-verified on this build**. Existing regressions
+and reviewed request contracts remain separate evidence. No new full-write
+verification profile is inferred from this limited run. Publishing this release
+does not install it into a running Host or establish external-channel delivery.
 
 ## Build 20398 validation — AKK 0.14.9
 

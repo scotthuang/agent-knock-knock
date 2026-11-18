@@ -20,6 +20,7 @@ class Fixture implements DesktopIpcTransport {
   closed = false;
   state: Wire = baseline();
   revision = 7;
+  snapshotVersion = 11;
   acceptedTurnId = "accepted-turn";
   startHandler?: (request: Wire) => void;
   steerHandler?: (request: Wire) => void;
@@ -53,7 +54,7 @@ class Fixture implements DesktopIpcTransport {
   }
   emitSnapshot(overrides: Wire = {}): void {
     this.emit({ type: "broadcast", sourceClientId: target.ownerClientId, targetClientIds: ["client-one"],
-      method: "thread-stream-state-changed", version: 11, params: { hostId: "local", conversationId: target.threadId,
+      method: "thread-stream-state-changed", version: this.snapshotVersion, params: { hostId: "local", conversationId: target.threadId,
         change: { type: "snapshot", revision: this.revision, conversationState: this.state } }, ...overrides });
   }
   emit(message: unknown): void { for (const listener of this.messages) listener(message); }
@@ -188,30 +189,33 @@ test("Desktop async response attempts unknown builds while preserving exact owne
 });
 
 test("Desktop submits one exact text to the confirmed owner with inherited settings and no retries", async () => {
-  const fixture = new Fixture(), client = await connect(fixture);
-  try {
-    const owner = await client.discoverOwner(target.threadId);
-    assert.equal(owner.ownerClientId, target.ownerClientId);
-    const discovery = fixture.sent.find((message) => message.method === "thread-owner-discovery")!;
-    assert.equal(discovery.timeoutMs, 10_000);
-    const snapshot = await client.observeThread(target);
-    let barrierCalled = 0;
-    const result = await client.sendTurnOnce({ ...options(), expectedRevision: snapshot.revision,
-      beforeDispatch: async (fresh) => { barrierCalled++; assert.equal(fresh.canSend, true); } });
-    assert.equal(result.turnId, "accepted-turn");
-    assert.equal(result.atomicIdlePrecondition, false);
-    assert.equal(barrierCalled, 1);
-    const request = starts(fixture)[0];
-    assert.equal(request.targetClientId, target.ownerClientId);
-    assert.equal(request.version, 2);
-    assert.deepEqual(request.params, { conversationId: target.threadId, turnStart: { request: {
-      threadId: target.threadId, clientUserMessageId: "message-one", input: [{ type: "text", text: "do this task", text_elements: [] }]
-    }, context: { inheritThreadSettings: true } } });
-    await assert.rejects(client.sendTurnOnce(options()), (error: unknown) => error instanceof DesktopIpcError && error.code === "duplicate_submission");
-    assert.equal(starts(fixture).length, 1);
-  } finally { client.close(); }
-  assert.equal(fixture.closed, true);
-  assert.equal(fixture.sent.at(-1)?.params.following, false);
+  for (const version of [11, 13]) {
+    const fixture = new Fixture(), client = await connect(fixture);
+    fixture.snapshotVersion = version;
+    try {
+      const owner = await client.discoverOwner(target.threadId);
+      assert.equal(owner.ownerClientId, target.ownerClientId);
+      const discovery = fixture.sent.find((message) => message.method === "thread-owner-discovery")!;
+      assert.equal(discovery.timeoutMs, 10_000);
+      const snapshot = await client.observeThread(target);
+      let barrierCalled = 0;
+      const result = await client.sendTurnOnce({ ...options(), expectedRevision: snapshot.revision,
+        beforeDispatch: async (fresh) => { barrierCalled++; assert.equal(fresh.canSend, true); } });
+      assert.equal(result.turnId, "accepted-turn");
+      assert.equal(result.atomicIdlePrecondition, false);
+      assert.equal(barrierCalled, 1);
+      const request = starts(fixture)[0];
+      assert.equal(request.targetClientId, target.ownerClientId);
+      assert.equal(request.version, 2);
+      assert.deepEqual(request.params, { conversationId: target.threadId, turnStart: { request: {
+        threadId: target.threadId, clientUserMessageId: "message-one", input: [{ type: "text", text: "do this task", text_elements: [] }]
+      }, context: { inheritThreadSettings: true } } });
+      await assert.rejects(client.sendTurnOnce(options()), (error: unknown) => error instanceof DesktopIpcError && error.code === "duplicate_submission");
+      assert.equal(starts(fixture).length, 1);
+    } finally { client.close(); }
+    assert.equal(fixture.closed, true);
+    assert.equal(fixture.sent.at(-1)?.params.following, false);
+  }
 });
 
 test("Desktop send preflight at the observed revision keeps request options out of snapshot identity", async () => {
@@ -244,34 +248,46 @@ test("Desktop snapshot projection failure rejects its registered waiter instead 
 });
 
 test("Desktop refuses busy, changed history, and a changed state during the durable barrier", async () => {
-  for (const mode of ["busy", "history", "patch"] as const) {
-    const fixture = new Fixture(), client = await connect(fixture);
-    if (mode === "busy") fixture.state.threadRuntimeStatus = { type: "active", activeFlags: [] };
-    if (mode === "history") fixture.state.turns[0].turnId = "human-turn";
-    try {
-      await assert.rejects(client.sendTurnOnce({ ...options(), beforeDispatch: async () => {
-        if (mode === "patch") fixture.emit({ type: "broadcast", sourceClientId: target.ownerClientId,
-          method: "thread-stream-state-changed", version: 11, targetClientIds: ["client-one"],
-          params: { hostId: "local", conversationId: target.threadId,
-            change: { type: "patch", revision: 8, baseRevision: 7, patches: [] } } });
-      } }), (error: unknown) => error instanceof DesktopIpcError && error.dispatchState === "not_sent");
-      assert.equal(starts(fixture).length, 0);
-    } finally { client.close(); }
+  for (const version of [11, 13]) {
+    for (const mode of ["busy", "history", "patch", "identity", "requests"] as const) {
+      const fixture = new Fixture(), client = await connect(fixture);
+      fixture.snapshotVersion = version;
+      if (mode === "busy") fixture.state.threadRuntimeStatus = { type: "active", activeFlags: [] };
+      if (mode === "history") fixture.state.turns[0].turnId = "human-turn";
+      if (mode === "identity") fixture.state.id = "different-thread";
+      if (mode === "requests") fixture.state.requests = {};
+      try {
+        await assert.rejects(client.sendTurnOnce({ ...options(), beforeDispatch: async () => {
+          if (mode === "patch") fixture.emit({ type: "broadcast", sourceClientId: target.ownerClientId,
+            method: "thread-stream-state-changed", version, targetClientIds: ["client-one"],
+            params: { hostId: "local", conversationId: target.threadId,
+              change: { type: "patch", revision: 8, baseRevision: 7, patches: [] } } });
+        } }), (error: unknown) => error instanceof DesktopIpcError && error.dispatchState === "not_sent"
+          && error.code === (mode === "busy" ? "thread_not_idle" : ["identity", "requests"].includes(mode)
+            ? "invalid_response" : "snapshot_changed"));
+        assert.equal(starts(fixture).length, 0);
+      } finally { client.close(); }
+    }
   }
 });
 
 test("Desktop rejects spoofed targets and unsupported snapshot versions before any write", async () => {
-  const fixture = new Fixture(), client = await connect(fixture);
-  fixture.followHandler = () => {
-    fixture.emitSnapshot({ sourceClientId: "other-owner" });
-    fixture.emitSnapshot({ targetClientIds: ["other-client"] });
-    fixture.emitSnapshot({ params: { hostId: "local", conversationId: "different-thread",
-      change: { type: "snapshot", revision: 7, conversationState: fixture.state } } });
-    fixture.emitSnapshot({ version: 999 });
-  };
-  await assert.rejects(client.observeThread(target), (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop");
-  assert.equal(fixture.closed, true);
-  assert.equal(starts(fixture).length, 0);
+  for (const version of [11, 13]) {
+    for (const unsupported of [12, 999]) {
+      const fixture = new Fixture(), client = await connect(fixture);
+      fixture.snapshotVersion = version;
+      fixture.followHandler = () => {
+        fixture.emitSnapshot({ sourceClientId: "other-owner" });
+        fixture.emitSnapshot({ targetClientIds: ["other-client"] });
+        fixture.emitSnapshot({ params: { hostId: "local", conversationId: "different-thread",
+          change: { type: "snapshot", revision: 7, conversationState: fixture.state } } });
+        fixture.emitSnapshot({ version: unsupported });
+      };
+      await assert.rejects(client.observeThread(target), (error: unknown) => error instanceof DesktopIpcError && error.code === "incompatible_desktop");
+      assert.equal(fixture.closed, true);
+      assert.equal(starts(fixture).length, 0);
+    }
+  }
 });
 
 test("Desktop unknown build can read and send through the same exact-owner contract", async () => {

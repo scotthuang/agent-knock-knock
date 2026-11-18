@@ -41,13 +41,26 @@ function rows() {
 
 test("Desktop persisted sidebar reconstructs six members while retaining disconnected and CLI-created rows", () => {
   const all = mergeDesktopMetadata([batch(rows())]);
-  const layout = parseDesktopSidebarMetadata(globalState(), home);
-  const result = selectDesktopSidebar(all.sessions, new Map([[home, layout]]), all.archivedIds);
-  assert.equal(result.sidebar.status, "supported");
-  assert.deepEqual(result.sessions.map(row => row.threadId), ["pinned", "test-one", "test-two", "game-one", "avatar-one", "avatar-two"]);
-  assert.equal(result.sessions[0].sidebar?.section, "pinned");
-  assert.equal(result.sessions[1].sidebar?.projectName, "Test");
-  assert.equal(result.sessions[1].projectId, null, "unmigrated legacy assignment is valid despite empty SQL project ID");
+  const legacy = globalState();
+  const scoped: Record<string, unknown> = { ...legacy,
+    "electron-renderer-content-owner": "a".repeat(64),
+    ["electron-owner-atoms:" + "a".repeat(64)]: legacy["electron-persisted-atom-state"],
+    ["electron-owner-atoms:" + "b".repeat(64)]: { "flat-project-sidebar-preferences-v1": { mode: "recent" } },
+    "electron-persisted-atom-state": { drafts: "PRIVATE" },
+    "pinned-thread-ids": [...legacy["pinned-thread-ids"], "other-cli"],
+    "app-server-migrated-pinned-thread-ids-by-host": {},
+    ["electron-owner-value:app-server-migrated-pinned-thread-ids-by-host:" + "a".repeat(64)]: {
+      [`local:${home}`]: ["pinned", "other-cli"] }
+  };
+  for (const raw of [legacy, scoped]) {
+    const layout = parseDesktopSidebarMetadata(raw, home);
+    const result = selectDesktopSidebar(all.sessions, new Map([[home, layout]]), all.archivedIds);
+    assert.equal(result.sidebar.status, "supported");
+    assert.deepEqual(result.sessions.map(row => row.threadId), ["pinned", "test-one", "test-two", "game-one", "avatar-one", "avatar-two"]);
+    assert.equal(result.sessions[0].sidebar?.section, "pinned");
+    assert.equal(result.sessions[1].sidebar?.projectName, "Test");
+    assert.equal(result.sessions[1].projectId, null, "unmigrated legacy assignment is valid despite empty SQL project ID");
+  }
 });
 
 test("archived catalog overlap and migrated unpinned legacy records never reappear", () => {

@@ -41,7 +41,9 @@ function unavailableSidebar(failureReason: NonNullable<DesktopSidebarMetadata["f
 }
 
 export function parseDesktopSidebarMetadata(value: unknown, home: string): DesktopSidebarMetadata {
-  const state = record(value), atoms = record(state["electron-persisted-atom-state"]);
+  const state = record(value), storage = sidebarStorage(state);
+  if (!storage) return unavailableSidebar("invalid");
+  const { atoms } = storage;
   const preferences = record(atoms["flat-project-sidebar-preferences-v1"]);
   const identity = `local:${home}`;
   const projects = Object.fromEntries(Object.entries(record(state["local-projects"]))
@@ -65,12 +67,28 @@ export function parseDesktopSidebarMetadata(value: unknown, home: string): Deskt
       .map(([key, item]) => [key.slice("sidebar-project-expanded-v1-codex:".length), item as boolean])),
     projects, assignments: sidebarAssignments(state, limitations),
     projectOrder: strings(state["project-order"]), pinnedIds: strings(state["pinned-thread-ids"]),
-    migratedPinnedIds: strings(record(state["app-server-migrated-pinned-thread-ids-by-host"])[identity]),
+    migratedPinnedIds: strings(record(storage.scopedValue("app-server-migrated-pinned-thread-ids-by-host"))[identity]),
     nativePinnedOrder: strings(atoms["app-server-pinned-thread-order-v1"]),
     projectIdMappings: stringRecord(record(state["app-server-project-id-by-legacy-project-id-by-host"])[identity]),
-    projectlessIds: strings(state["projectless-thread-ids"]), rootHints: stringRecord(state["thread-workspace-root-hints"]),
+    projectlessIds: strings(state["projectless-thread-ids"]), rootHints: stringRecord(storage.scopedValue("thread-workspace-root-hints")),
     customSectionThreadIds: sections.flatMap(section => strings(record(section).itemKeys))
       .filter(key => key.startsWith("codex:thread:local:")).map(key => key.slice("codex:thread:local:".length)), limitations };
+}
+
+/** Mirror Desktop's active-owner view; never infer an owner from the available banks. */
+function sidebarStorage(state: Record<string, unknown>) {
+  const owner = state["electron-renderer-content-owner"];
+  if (owner === undefined) return { atoms: record(state["electron-persisted-atom-state"]),
+    scopedValue: (key: string) => state[key] };
+  if (typeof owner !== "string" || !/^(?:[a-f0-9]{64}|signed-out)$/u.test(owner)) return undefined;
+  const saved = state[`electron-owner-atoms:${owner}`];
+  if (saved !== undefined && (saved === null || typeof saved !== "object" || Array.isArray(saved))) return undefined;
+  return {
+    // The application overlays its current common/live atoms on the saved owner bank.
+    atoms: { ...record(saved), ...record(state["electron-persisted-atom-state"]) },
+    // These migrated fields are owner-local; stale unscoped values must not leak across accounts.
+    scopedValue: (key: string) => state[`electron-owner-value:${key}:${owner}`]
+  };
 }
 
 function projectRoots(project: Record<string, unknown>): string[] {
