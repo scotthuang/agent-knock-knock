@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Adapt Codex Desktop sidebar discovery to the exact active owner's atom bank and owner-scoped migration/root-hint metadata, retaining legacy layouts and excluding other accounts, drafts and credentials.
+- Review Desktop `26.1111.71025` / build `28661` snapshot stream **13**, preserving stream 11 and the same exact owner/task/revision/schema guards. Do not broaden the historical write-verification profile or accept arbitrary future protocols.
+- Restore local candidate List/Status and verify one native Send acceptance plus failed-task/local-callback observation. The dedicated test task failed natively with `workspace routing discovery timed out`; successful model/interaction effects remain unverified. No production installation or external-channel test.
+
 ## 0.16.16 / Pi 0.1.0-poc.24 / DeepSeek Harness 0.1.0-rc.29 — 2026-11-17
 
 - Lower the OpenClaw **install floor** from `>=2026.6.5` to `>=2026.5.12`, removing an installer-only rejection of an API-compatible older Host. Keep plugin API / Gateway / peer floors at `2026.5.12`; `2026.5.10-beta.2` remains unsupported.

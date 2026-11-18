@@ -276,7 +276,11 @@ export class DesktopIpcClient {
     // All incoming RPC requests (including approval/questions) are deliberately left unanswered.
     const target = this.target;
     if (!target || !isExactStreamMessage(message, target, this.clientId)) return;
-    if (message.version !== 11) throw new DesktopIpcError("incompatible_desktop", "Unsupported Desktop snapshot protocol version");
+    // Reviewed stream envelopes: legacy 11 and build 28661's 13. Both still pass
+    // the same exact identity, revision, history, request and item shape checks.
+    if (message.version !== 11 && message.version !== 13) {
+      throw new DesktopIpcError("incompatible_desktop", "Unsupported Desktop snapshot protocol version");
+    }
     this.receiveStreamChange(message.params.change, target);
   }
 

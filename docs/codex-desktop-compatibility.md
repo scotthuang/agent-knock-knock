@@ -24,6 +24,7 @@ possibly submitted operation.
 | `26.1002.52244` / `13536` | Send, Status, Watch, approvals, answers, model/permission settings and exact cancellation | Not live-verified |
 | `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
+| `26.1111.71025` / `28661` (unreleased compatibility change) | Local List/Status, exact native Send acceptance, failed-task observation and one local callback; protocol regressions. Successful model completion and interaction effects not live-verified; see below. | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.
@@ -63,6 +64,54 @@ a compatibility limitation. The original `13536` task/interaction evidence is
 dated 2026-10-09; the `20156` creation, approval, and question evidence is dated
 2026-10-13/14 below. The [backend Recovery work](backend-task-recovery.md#validation-boundary)
 has fast-regression coverage, not a separate live Desktop proof.
+
+## Build 28661 local compatibility review — unreleased
+
+The 2026-11-18 audit identifies the installed application as `26.1111.71025`,
+build `28661`, bundle ID `com.openai.codex`. `Info.plist` and the bundled
+package version agree; the running main executable has the same path and inode
+as the installed application. The IPC handshake still does not attest each
+owner's build. This is an installed/running-instance observation, not a claim
+about every update channel's latest release.
+
+Two native contract changes caused the observed read failures:
+
+- Layout preferences now also live in `electron-owner-atoms:<owner>`, selected
+  by `electron-renderer-content-owner`. AKK reads only that exact bank, overlays
+  common/live atoms in the same order as Desktop, and reads migrated pins and
+  root hints from the matching `electron-owner-value:<key>:<owner>` fields.
+  It never selects an account by enumeration, merges other owners, or exports
+  owner markers, credentials or drafts. Legacy unscoped layouts remain supported.
+- The installed method table and a real owner broadcast use snapshot stream
+  version **13** rather than **11**. Both reviewed versions pass the same
+  identity, revision, history-tail, pending-request and item-shape checks;
+  unknown protocol versions still fail explicitly. The implemented Send,
+  approval, question, settings and interrupt request versions remain unchanged
+  in this bundle. That source review alone does not prove their native effects.
+
+The local candidate recovered four persisted sidebar members from 392 saved
+candidates. Unconnected members remained visible without Send; membership did
+not turn history into a live owner. Read-only Status/model/permission inspection
+also passed on the explicitly opened dedicated test conversation.
+
+One real semantic-tool Send used that original conversation and a private test
+Store. Its initial acceptance was uncertain; read-only reconciliation of the
+same Watch established the exact native turn, without another Send. Codex then
+reported `workspace routing discovery timed out` and ended the task as failed.
+AKK observed that exact failed task and delivered one settled notification to
+an isolated command-JSON subprocess receiver. Repeated Status reads produced no
+duplicate callback. The native runtime remained `systemError`, so AKK disabled
+further Send rather than treating task settlement as an idle conversation.
+Model/permission settings were not changed. There was no production controller
+or external chat delivery test.
+
+Consequently, successful model output/public commentary, command/file approval
+effects, question answers, settings mutation, cancellation and creation are
+**not newly live-verified on this build**. Their existing fast regressions and
+the reviewed request contracts remain separate evidence. Native routing must
+recover before completing those real-task checks in the same dedicated target.
+No new full-write verification profile is inferred from this limited run.
+The local change has not been installed into the running Host or published.
 
 ## Build 20398 validation — AKK 0.14.9
 

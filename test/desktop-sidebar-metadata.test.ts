@@ -52,3 +52,40 @@ test("sidebar parsing retains explicit root aliases and flags unimplemented clou
   assert.equal(result.limitations.length, 3);
   assert.equal(JSON.stringify(result).includes("account"), false);
 });
+
+test("sidebar owner storage selects only the active account and preserves native live-atom precedence", () => {
+  const owner = "a".repeat(64), other = "b".repeat(64);
+  const raw = {
+    "electron-renderer-content-owner": owner,
+    ["electron-owner-atoms:" + owner]: {
+      "flat-project-sidebar-preferences-v1": { mode: "project" },
+      "sidebar-collapsed-sections-v1": { chats: true }, credentials: "PRIVATE_OWNER"
+    },
+    ["electron-owner-atoms:" + other]: { "flat-project-sidebar-preferences-v1": { mode: "recent" } },
+    "electron-persisted-atom-state": { "sidebar-collapsed-sections-v1": { chats: false }, drafts: "PRIVATE_DRAFT" },
+    "thread-workspace-root-hints": { stale: "/stale" },
+    ["electron-owner-value:thread-workspace-root-hints:" + owner]: { selected: "/selected" },
+    ["electron-owner-value:thread-workspace-root-hints:" + other]: { other: "/other" }
+  };
+  const layout = parseDesktopSidebarMetadata(raw, "/fixture");
+  assert.equal(layout.mode, "project");
+  assert.equal(layout.collapsed.chats, false, "native live atoms overlay the saved owner bank");
+  assert.deepEqual(layout.rootHints, { selected: "/selected" });
+  assert.doesNotMatch(JSON.stringify(layout), /PRIVATE|stale|other|electron-owner|aaaa/u);
+  for (const [marker, mode, hints] of [[other, "recent", { other: "/other" }],
+    [undefined, undefined, { stale: "/stale" }], ["c".repeat(64), undefined, {}]] as const) {
+    const selected = parseDesktopSidebarMetadata({ ...raw, "electron-renderer-content-owner": marker }, "/fixture");
+    assert.equal(selected.mode, mode);
+    assert.deepEqual(selected.rootHints, hints);
+  }
+  for (const marker of [null, {}, "unrecognized-owner"]) {
+    const invalid = parseDesktopSidebarMetadata({ ...raw, "electron-renderer-content-owner": marker }, "/fixture");
+    assert.equal(invalid.available, false);
+    assert.deepEqual(invalid.projects, {});
+  }
+  for (const saved of [null, [], 1]) {
+    const invalid = parseDesktopSidebarMetadata({ ...raw, ["electron-owner-atoms:" + owner]: saved }, "/fixture");
+    assert.equal(invalid.available, false);
+    assert.deepEqual(invalid.rootHints, {});
+  }
+});
