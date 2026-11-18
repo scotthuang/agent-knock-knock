@@ -24,7 +24,7 @@ possibly submitted operation.
 | `26.1002.52244` / `13536` | Send, Status, Watch, approvals, answers, model/permission settings and exact cancellation | Not live-verified |
 | `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
-| `26.1111.71025` / `28661` (unreleased compatibility change) | Local List/Status, exact native Send acceptance, failed-task observation and one local callback; protocol regressions. Successful model completion and interaction effects not live-verified; see below. | Not retested |
+| `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.
@@ -65,7 +65,7 @@ dated 2026-10-09; the `20156` creation, approval, and question evidence is dated
 2026-10-13/14 below. The [backend Recovery work](backend-task-recovery.md#validation-boundary)
 has fast-regression coverage, not a separate live Desktop proof.
 
-## Build 28661 local compatibility review — unreleased
+## Build 28661 compatibility — AKK 0.16.17
 
 The 2026-11-18 audit identifies the installed application as `26.1111.71025`,
 build `28661`, bundle ID `com.openai.codex`. `Info.plist` and the bundled
@@ -94,24 +94,32 @@ candidates. Unconnected members remained visible without Send; membership did
 not turn history into a live owner. Read-only Status/model/permission inspection
 also passed on the explicitly opened dedicated test conversation.
 
-One real semantic-tool Send used that original conversation and a private test
-Store. Its initial acceptance was uncertain; read-only reconciliation of the
-same Watch established the exact native turn, without another Send. Codex then
-reported `workspace routing discovery timed out` and ended the task as failed.
-AKK observed that exact failed task and delivered one settled notification to
-an isolated command-JSON subprocess receiver. Repeated Status reads produced no
-duplicate callback. The native runtime remained `systemError`, so AKK disabled
-further Send rather than treating task settlement as an idle conversation.
-Model/permission settings were not changed. There was no production controller
-or external chat delivery test.
+The first real semantic-tool Send used that original conversation and a private
+test Store. Read-only reconciliation of the same Watch established its exact
+native turn without another Send. The native task failed with `workspace routing
+discovery timed out`; AKK observed that failed task and delivered one notification
+to an isolated local receiver. It retained `systemError` as unsendable.
 
-Consequently, successful model output/public commentary, command/file approval
-effects, question answers, settings mutation, cancellation and creation are
-**not newly live-verified on this build**. Their existing fast regressions and
-the reviewed request contracts remain separate evidence. Native routing must
-recover before completing those real-task checks in the same dedicated target.
-No new full-write verification profile is inferred from this limited run.
-The local change has not been installed into the running Host or published.
+Subsequent diagnosis found Desktop's own `account/read` and authenticated usage
+queries failing before that Send. In the installed application, this workspace
+routing identifies the authenticated account's backend route, not the local
+project directory. The user directly confirmed that the proxy had been off and
+that enabling it restored operation. This is a user-confirmed environment fact,
+not an AKK code defect or a single-variable proxy experiment by the maintainer.
+
+A new benign task then used the unchanged candidate adapter, the same dedicated
+conversation, and the original directory, model and permissions. One Send was
+followed through uncertain acceptance to an exact native turn and successful
+fixed reply; its local completion callback was accepted once. The old failed
+task was not replayed. Final read-only inspection confirmed idle/sendable state
+and unchanged settings. No production controller or external chat delivery was
+tested. See the [sanitized release evidence](evidence/desktop-28661.md).
+
+Command/file approval effects, question answers, settings mutation, cancellation
+and creation are **not newly live-verified on this build**. Existing regressions
+and reviewed request contracts remain separate evidence. No new full-write
+verification profile is inferred from this limited run. Publishing this release
+does not install it into a running Host or establish external-channel delivery.
 
 ## Build 20398 validation — AKK 0.14.9
 

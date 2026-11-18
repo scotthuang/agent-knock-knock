@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.16.17 / Pi 0.1.0-poc.25 / DeepSeek Harness 0.1.0-rc.30 — 2026-11-18
 
-- Adapt Codex Desktop sidebar discovery to the exact active owner's atom bank and owner-scoped migration/root-hint metadata, retaining legacy layouts and excluding other accounts, drafts and credentials.
-- Review Desktop `26.1111.71025` / build `28661` snapshot stream **13**, preserving stream 11 and the same exact owner/task/revision/schema guards. Do not broaden the historical write-verification profile or accept arbitrary future protocols.
-- Restore local candidate List/Status and verify one native Send acceptance plus failed-task/local-callback observation. The dedicated test task failed natively with `workspace routing discovery timed out`; successful model/interaction effects remain unverified. No production installation or external-channel test.
+- Restore Codex Desktop sidebar discovery from the exact active owner's atom bank and owner-scoped migration/root-hint metadata. Preserve legacy layouts, live-atom precedence, account isolation and disconnected-sidebar rows without claiming they are sendable.
+- Adapt macOS Desktop **26.1111.71025 / build 28661** snapshot stream **13**, retaining stream 11 and exact owner, task, revision, history and item validation. Unknown protocols still fail explicitly; historical full-write verification metadata is not broadened.
+- Verify the candidate's semantic-tool Send, exact native completion and one local completion callback in the dedicated test conversation with original settings preserved. The initial native account-routing timeout was caused by the proxy being off, as directly confirmed by the user; after the environment recovered, the unchanged adapter completed a new benign task. This is reported environment evidence, not a controlled proxy experiment or an AKK account-routing fix.
+- Build 28661 approvals, question answers, settings mutation, cancellation, creation and external-channel delivery were not newly live-tested. Preserve their existing regression coverage and older-build evidence separately.
+- Publish coordinated Pi/DSH prereleases with exact core **0.16.17** dependencies and synchronized Skills. Both remain on `next`; existing `latest` recommendations and Host ranges are unchanged. Publication does not install or restart the running local Host.
 
 ## 0.16.16 / Pi 0.1.0-poc.24 / DeepSeek Harness 0.1.0-rc.29 — 2026-11-17
 
