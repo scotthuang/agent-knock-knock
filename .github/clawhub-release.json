@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.17",
+  "version": "0.16.18",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "8a9f3261e4d353714c5e8f780a5555c118ccb43d",
-  "asset": "scotthuang-agent-knock-knock-0.16.17.tgz",
-  "sha256": "c9b5417e61efc98c0dbff0cd74a5c2c2919aea46a94fd943ee46b90d691c489a",
-  "bytes": 4009523,
-  "changelog": "Restore Codex Desktop 26.1111.71025/build 28661 exact-owner sidebar discovery and reviewed snapshot stream 13, retaining stream 11, precise identity, schema and uncertain-dispatch safeguards. Dedicated-thread Send, exact completion and one local callback passed. Approvals/questions and external chat delivery were not newly live-tested. Coordinated Pi poc.25 and DSH rc.30 pin core 0.16.17. Submission acceptance is separate from scan/public availability."
+  "commit": "eab3610dfb9b838b7f27ed460e822f6331383639",
+  "asset": "scotthuang-agent-knock-knock-0.16.18.tgz",
+  "sha256": "89217eddb2458dfe905f2c72e1ef165a5c939040ec4148df976988a0bace0834",
+  "bytes": 4012108,
+  "changelog": "Review Codex CLI/app-server 0.170.0 and fix an ordinary contextual Composer false refusal using actual closed-frame evidence rather than an exact release list. Preserve identity, draft, modal, approval and uncertain-send checks. Isolated backend, tmux and Herdr tasks, local callback deduplication, model/permission and ordinary approval/question checks passed. Coordinated Pi poc.26 and DSH rc.31 pin core 0.16.18. Existing Host ranges and recommendations remain unchanged. Submission acceptance is separate from scan/public availability."
 }
