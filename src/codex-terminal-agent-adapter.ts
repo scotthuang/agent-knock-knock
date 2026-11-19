@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { codexFolderTrustPromptVisible } from "./codex-folder-trust-surface.js";
-import { captureCodexFullscreenComposerFrame } from
+import { captureCodexFullscreenComposerFrame, CODEX_FULLSCREEN_MODEL_FOOTER } from
   "./codex-fullscreen-composer-proof.js";
 import {
   classifyCodexProcess,
@@ -95,8 +95,6 @@ function codexFullscreenActivityCandidate(version: string | undefined): boolean 
   return version === "0.157.0" || version === "0.157.1" ||
     isCodexPaginatedReadCandidate(version);
 }
-const CODEX_FULLSCREEN_MODEL_FOOTER =
-  /^ {2}(?:GPT-[\w.-]+|gpt-[\w.-]+) (?:low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
 const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
   /^ {2}← for agents · \? for shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;
 // Verified Codex releases can animate the otherwise empty Astra Composer by replacing

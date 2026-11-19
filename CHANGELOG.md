@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.19 / Pi 0.1.0-poc.27 / DeepSeek Harness 0.1.0-rc.32 — 2026-11-19
+
+- Fix terminal Send and native status preflight for a Codex Composer displaying a custom model name. AKK recognizes the footer layout with names such as `hy4`, `deepseek-v4` and `vendor/model:latest`. The name may include spaces and Unicode letters, up to 128 code points. Task input still requires the existing identity, input ownership and draft checks.
+- Pi poc.27 and DSH rc.32 pin core 0.16.19 on their respective `next` channels. Model selection and Host compatibility ranges are unchanged.
+
 ## 0.16.18 / Pi 0.1.0-poc.26 / DeepSeek Harness 0.1.0-rc.31 — 2026-11-19
 
 - Review Codex CLI/app-server **0.170.0** contracts and native status/model/permission/question profiles; retain earlier reviewed profiles and exact frontend/backend pairing for protocol-specific terminal interactions.
