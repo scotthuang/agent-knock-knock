@@ -1,0 +1,63 @@
+{
+  "schema": "akk-codex-compatibility-evidence/v1",
+  "versions": {
+    "core": "0.16.18",
+    "pi": "0.1.0-poc.26",
+    "dsh": "0.1.0-rc.31",
+    "cli_frontend": "0.170.0",
+    "app_server": "0.170.0",
+    "tmux": "3.8",
+    "herdr": "0.9.5",
+    "node": "24.18.0"
+  },
+  "platform": "macOS arm64",
+  "schema_comparison": {
+    "before": 951,
+    "after": 957,
+    "changed": 4,
+    "added": 6,
+    "removed": 0
+  },
+  "fast": {
+    "tests": 3486,
+    "passed": 3486,
+    "failed": 0
+  },
+  "real_isolated_checks": {
+    "backend": {
+      "result": "passed",
+      "evidence_sha256": "a4db76aae137a4022719fa406caf824cddf7548f8c0c7cea4ca21558b2e4d74b"
+    },
+    "model": {
+      "result": "passed",
+      "evidence_sha256": "2fca23c4c66d4ccee6c68d3ad87973c4de213a27e8d87444840d37cd28a49046"
+    },
+    "permissions": {
+      "result": "passed",
+      "evidence_sha256": "44e5eeb43f7904249b3687f189efd17382dcf263d5b0d10c0e2229f94c57f5ee"
+    },
+    "approval": {
+      "result": "passed",
+      "evidence_sha256": "dc6b9a1c45a6976e08f1f0bc5a012295d2e69f19805d71d716c56ecc4d31dbfe"
+    },
+    "question": {
+      "result": "passed",
+      "evidence_sha256": "97c99c39e0b6fe45389d7cc1cf583c8794b73dc6735143288e1d25e1ced6c1ba"
+    },
+    "tmux": {
+      "result": "passed",
+      "evidence_sha256": "e4df19a3e19e4c9936d3ca8550fc839cbbaf424cedf082c117b834874dceb476"
+    },
+    "herdr": {
+      "result": "passed",
+      "evidence_sha256": "1934f2210f7bd2a745bff6fc9fb509b152aefbad73870a38169fd17eb8d686a8"
+    }
+  },
+  "boundaries": [
+    "Fallback tests inject an empty backend discovery result only; actual identity, terminal transport and native execution are unchanged.",
+    "Callbacks use an isolated local receiver with in-process reconciliation, not an independently running monitor or external chat.",
+    "Blocking-question task setup uses native Plan mode; subsequent Watch/Status/Respond use the public dispatcher.",
+    "No live async-question, old-version live matrix, full rejection/file-approval matrix, production install or external channel delivery claim.",
+    "The remote error text alone does not prove its unavailable screen matched the reproduced contextual-footer false veto."
+  ]
+}

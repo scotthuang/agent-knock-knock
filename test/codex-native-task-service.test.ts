@@ -715,7 +715,10 @@ test("Native CLI preserves existing short deadlines through restart, replay and 
 
 test("native final Status and completion callbacks leave moderated or unknown display handling to Codex", async t => {
   for (const moderation of [{ moderated: true, display: null },
-    { moderated: false, display: { action: "future-action" } }, { moderated: false }, true, [], "unknown"]) {
+    { moderated: false, display: { action: "future-action" } },
+    ...["show", "hide", "block"].map(mode => ({ moderated: false, display: { mode, version: 1 } })),
+    { moderated: false, display: { mode: "show", version: 999 } },
+    { moderated: false }, true, [], "unknown"]) {
     const h = harness(t), sent = await h.service.send({ ...input, callbackRoute: route });
     const completed = turn("native-one", "completed", h.state.clientId);
     completed.items.push({ id: "public-final", type: "agentMessage", phase: "final_answer", text: "PUBLIC_FINAL",
