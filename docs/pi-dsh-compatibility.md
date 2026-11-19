@@ -5,6 +5,16 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Codex 0.170.0 — core 0.16.18 / Pi poc.26 / DSH rc.31
+
+Both connectors pin core **0.16.18** and its synchronized Skill. The
+[Codex 0.170.0 review](codex-0.170.0-compatibility.md) adds reviewed terminal
+profiles and fixes a version-dependent rejection of an otherwise valid
+contextual Composer footer. Ordinary input readiness follows actual closed
+frame evidence rather than a release allowlist. Identity, draft, approval and
+uncertain-input checks remain mandatory. Host ranges and existing `latest`
+recommendations are unchanged; both new prereleases use `next`.
+
 ## OpenClaw install-floor alignment — core 0.16.16 / Pi poc.24 / DSH rc.29
 
 Both connectors pin **0.16.16** and its matching Skill. The core package's

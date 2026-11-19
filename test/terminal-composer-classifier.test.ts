@@ -577,7 +577,7 @@ test("Claude input proof distinguishes occupied stashes from known footer syntax
 });
 
 
-for (const version of ["0.164.0", "0.165.0", "0.166.0", "0.167.0", "0.169.0"]) test(`${version} contextual footer closes the default-effort Composer without inventing idle or effort authority`, () => {
+for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0", "0.167.0", "0.169.0", "0.170.0", "0.170.1", "1.0.0"]) test(`${version} contextual footer closes the default-effort Composer without inventing idle or effort authority`, () => {
   // Layout from the owned 0.164 CLI: no separate shortcut row; warning shares
   // the model/path row. Only synthetic path and transcript are retained.
   const ready = "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n" +
@@ -599,8 +599,8 @@ for (const version of ["0.164.0", "0.165.0", "0.166.0", "0.167.0", "0.169.0"]) t
     assert.notEqual(currentCodexComposerCapture(changed, "task", false, false,
       undefined, false, version)?.state, "exact_empty");
   }
-  assert.equal(captureCodexFullscreenComposerFrame(ready, "0.162.1")?.hasContextFooter, false,
-    "new passive footer does not silently authorize older versions");
+  assert.equal(captureCodexFullscreenComposerFrame(ready, "0.162.1")?.hasContextFooter, true,
+    "a recognized input surface is not rejected merely because its release was not recorded for that layout");
   const rows = ["› /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line"];
   const popup = "\x1b[1;7m" + rows[0] + "\x1b[0m\n" + rows[1] + "\n\n" +

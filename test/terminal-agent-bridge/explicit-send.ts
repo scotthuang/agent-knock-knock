@@ -58,7 +58,9 @@ test("explicit Send uses paginated tmux paste after audited or freshly recognize
     { version: "0.159.3", providerKind: "tmux", bracketedPaste: true },
     { version: "0.160.0", providerKind: "tmux", bracketedPaste: true },
     { version: "1.0.0", providerKind: "tmux", bracketedPaste: true },
-    { version: "0.158.0", providerKind: "herdr", bracketedPaste: undefined }
+    { version: "0.158.0", providerKind: "herdr", bracketedPaste: undefined },
+    { version: "0.170.1", providerKind: "tmux", bracketedPaste: true, contextualFooter: true },
+    { version: "0.170.1", providerKind: "herdr", bracketedPaste: undefined, contextualFooter: true }
   ] as const;
   const request = "Submit the complete single-line request once. ".repeat(12).trimEnd();
   for (const testCase of cases) {
@@ -92,8 +94,10 @@ test("explicit Send uses paginated tmux paste after audited or freshly recognize
         toControlRef: () => control,
         resolve: async () => endpoint,
         containsProcess: () => true,
-        capture: async () => ["0.158.1", "0.159.3", "0.160.0", "1.0.0"].includes(testCase.version ?? "")
-          ? FORWARD_CODEX_COMPOSER : "Assistant output with the main Composer off-screen",
+        capture: async () => "contextualFooter" in testCase
+          ? FORWARD_CODEX_COMPOSER.replace("\n  ← for agents · ? for shortcuts", "")
+          : ["0.158.1", "0.159.3", "0.160.0", "1.0.0"].includes(testCase.version ?? "")
+            ? FORWARD_CODEX_COMPOSER : "Assistant output with the main Composer off-screen",
         sendText: async (_terminal, text, options) => {
           textDeliveries.push({ text, options });
         },

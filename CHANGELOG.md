@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.18 / Pi 0.1.0-poc.26 / DeepSeek Harness 0.1.0-rc.31 — 2026-11-19
+
+- Review Codex CLI/app-server **0.170.0** contracts and native status/model/permission/question profiles; retain earlier reviewed profiles and exact frontend/backend pairing for protocol-specific terminal interactions.
+- Fix ordinary paginated Composer readiness when the complete styled model/path footer appears without a separate shortcut row. Validate the actual closed frame rather than an exact release list, including unlisted future-version fixtures for both tmux and Herdr. Keep draft, modal, busy, viewport, process/UUID, ownership and uncertain-send checks.
+- Preserve privacy for the new versioned agent-message display directives: raw display-directed or moderated text is not exposed as progress, final results or callback content. Keep 800-code-point progress, 720-minute monitoring and managed-terminal 60-minute inactivity unchanged.
+- Publish coordinated Pi/DSH prereleases with exact core **0.16.18** dependencies and synchronized Skills. Host ranges, existing `latest` recommendations and Desktop behavior are unchanged. Local callback receipts do not certify external chat delivery; this release does not install or restart production components.
+
 ## 0.16.17 / Pi 0.1.0-poc.25 / DeepSeek Harness 0.1.0-rc.30 — 2026-11-18
 
 - Restore Codex Desktop sidebar discovery from the exact active owner's atom bank and owner-scoped migration/root-hint metadata. Preserve legacy layouts, live-atom precedence, account isolation and disconnected-sidebar rows without claiming they are sendable.
