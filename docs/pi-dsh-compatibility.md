@@ -5,6 +5,13 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Custom Codex model labels — core 0.16.19 / Pi poc.27 / DSH rc.32
+
+Both connectors pin core 0.16.19. Its terminal adapter recognizes custom model
+labels in the Codex fullscreen input footer. Bridge fixtures cover tmux and
+Herdr Send and native status preflight. The reporter’s third-party model
+gateway was unavailable for a live retest. Both connectors use `next`.
+
 ## Codex 0.170.0 — core 0.16.18 / Pi poc.26 / DSH rc.31
 
 Both connectors pin core **0.16.18** and its synchronized Skill. The

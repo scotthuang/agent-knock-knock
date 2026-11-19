@@ -587,10 +587,20 @@ for (const version of ["0.162.1", "0.164.0", "0.165.0", "0.166.0", "0.167.0", "0
   assert.equal(frame?.hasShortcutFooter, false);
   assert.equal(currentCodexComposerCapture(ready, "task", false, false,
     undefined, false, version)?.state, "exact_empty");
-  for (const label of ["GPT-6.1-Sol xhigh fast", "GPT-6-Astra ultra fast", "GPT-6-Astra max fast", "GPT-6.1 Terra low"]) {
+  for (const label of ["GPT-6.1-Sol xhigh fast", "GPT-6-Astra ultra fast", "GPT-6-Astra max fast", "GPT-6.1 Terra low",
+    "hy4 default", "deepseek-v4 high", "vendor/deepseek-v4:latest medium fast", "DeepSeek V4 default",
+    "自定义模型 high", "cafe\u0301 low", "m low", `${"m".repeat(128)} high`]) {
     const rendered = ready.replace("GPT-6.1-Sol default", label);
     assert.equal(currentCodexComposerCapture(rendered, "task", false, false,
-      undefined, false, version)?.state, "exact_empty");
+      undefined, false, version)?.state, "exact_empty", label);
+    const withShortcuts = rendered + "\n  ← for agents · ? for shortcuts";
+    assert.equal(captureCodexFullscreenComposerFrame(withShortcuts, version)?.hasShortcutFooter, true, label);
+    assert.equal(currentCodexComposerCapture(withShortcuts, "task", false, false,
+      undefined, false, version)?.state, "exact_empty", label);
+  }
+  for (const malformed of ["", " m", "m ", "m\tname", "m\u0007name", "m\u202ename", "m·name", "m".repeat(129)]) {
+    assert.equal(captureCodexFullscreenComposerFrame(ready.replace("GPT-6.1-Sol", malformed), version), undefined,
+      "malformed or overlong model labels never establish a complete footer");
   }
   for (const changed of [ready.replace("default", "unknown"),
     ready + "\n  unknown input owner",

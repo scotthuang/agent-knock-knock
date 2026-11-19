@@ -196,9 +196,16 @@ for (const version of ["0.158.0", "0.159.0", "0.159.2", "0.159.3", "0.160.0", "1
 test("unverified Codex status candidates keep initial UI, exact runtime, and selected-popup gates", async () => {
   const contextual = CODEX_FULLSCREEN_IDLE.replace("• Working (2s • esc to interrupt)\n\n", "")
     .replace(/\n {2}(?:← for agents · )?\? for shortcuts[^\n]*$/u, "");
-  for (const candidate of ["0.170.0", "0.170.1"]) {
-    const idlePopup = CODEX_FULLSCREEN_STATUS_POPUP.replace("• Working (2s • esc to interrupt)\n\n", "");
-    const exact = await codexFullscreenFixture(idlePopup, idlePopup, contextual);
+  for (const { candidate, modelFooter } of [
+    { candidate: "0.170.0", modelFooter: "GPT-6-Astra high" },
+    { candidate: "0.170.1", modelFooter: "GPT-6-Astra high" },
+    { candidate: "0.170.0", modelFooter: "hy4 default" },
+    { candidate: "0.170.1", modelFooter: "DeepSeek V4 high" }
+  ]) {
+    const idlePopup = CODEX_FULLSCREEN_STATUS_POPUP.replace("• Working (2s • esc to interrupt)\n\n", "")
+      .replace("GPT-6-Astra high", modelFooter);
+    const exact = await codexFullscreenFixture(idlePopup, idlePopup,
+      contextual.replace("GPT-6-Astra high", modelFooter));
     await exact.service.submitCodexStatusProbe(exact.control, candidate, {
       runtime: { pid: 901, agentVersion: candidate }
     });

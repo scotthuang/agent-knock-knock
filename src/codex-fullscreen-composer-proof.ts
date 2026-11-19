@@ -3,10 +3,18 @@ import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.j
 
 /** Default retained for existing callers; every frame still requires the closed UI grammar. */
 export const CODEX_FULLSCREEN_COMPOSER_VERSION = "0.158.0";
+// Model labels are display data, not a provider allowlist or model-control
+// authority. Accept bounded identifiers/names (including namespaces, spaces
+// and Unicode), but never control/format characters or the footer separator.
+const CODEX_MODEL_DISPLAY_LABEL =
+  String.raw`[\p{L}\p{N}](?:[\p{L}\p{M}\p{N}._:/+\- ]{0,126}[\p{L}\p{M}\p{N}._:/+\-])?`;
 // The native footer uses "default" when effort is unset. This closes the
 // Composer; it does not prove an effective effort for model-control readback.
-export const CODEX_FULLSCREEN_MODEL_FOOTER =
-  /^ {2}(?:GPT-6\.1 Terra|GPT-[\w.-]+|gpt-[\w.-]+) (?:default|low|medium|high|xhigh|max|ultra)(?: fast)? · (?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$/u;
+export const CODEX_FULLSCREEN_MODEL_FOOTER = new RegExp(
+  String.raw`^ {2}${CODEX_MODEL_DISPLAY_LABEL} ` +
+  String.raw`(?:default|low|medium|high|xhigh|max|ultra)(?: fast)? · ` +
+  String.raw`(?:~\/|\/)[^·\r\n]+(?: · [^·\r\n]+)*$`, "u"
+);
 export const CODEX_FULLSCREEN_SHORTCUT_FOOTER =
   /^ {2}(?:← for agents · )?\? for shortcuts(?: {2,}⚠ [1-9]\d? warnings? · f2 to view)?$/u;
 const CODEX_FULLSCREEN_WARNING_FOOTER =
