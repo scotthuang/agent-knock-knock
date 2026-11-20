@@ -642,6 +642,12 @@ test("Claude resume verifies finished foreground with surviving shells and rejec
     bindingTokens: ["binding"], capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
     beforeIdentity }, terminal, ports);
   assert.equal((await prepare()).beforeIdentity.sessionId, BEFORE_THREAD);
+  await assert.rejects(prepareNativeThreadVerification({
+    operation: { kind: "new_thread" }, expectedBindingToken: "binding", bindingTokens: ["binding"],
+    capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
+    beforeIdentity
+  }, terminal, { ...ports, plan: () => NEW_THREAD_PLAN }), /cannot prove its foreground/u,
+  "resume's background-shell exception does not authorize /clear");
   const beforeFile = path.join(project, `${BEFORE_THREAD}.jsonl`);
   const completeTranscript = fs.readFileSync(beforeFile);
   const pendingTool = records(BEFORE_THREAD).filter(record => record.uuid !== id(3))

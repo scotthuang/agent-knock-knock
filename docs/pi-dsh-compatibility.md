@@ -5,6 +5,13 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Claude historical resume — core 0.16.21 / Pi poc.29 / DSH rc.34
+
+Both connectors pin core 0.16.21 and its synchronized Skill. Claude terminal
+resume allows live background shells when the exact foreground has completed.
+See the [2.1.303 and tmux verification](evidence/claude-resume-540.md) and the
+separate original DSH test in [PR #540](https://github.com/scotthuang/agent-knock-knock/pull/540).
+
 ## Codex 0.171.0 — core 0.16.20 / Pi poc.28 / DSH rc.33
 
 Both connectors pin core 0.16.20 and its synchronized Skill. The

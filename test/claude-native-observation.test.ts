@@ -256,6 +256,8 @@ test("interleaved fragments of one assistant tool message settle by tool ID", as
   for (const [name, bad] of [
     ["missing result", records.filter(r => r.uuid !== uuid(6))],
     ["wrong result ID", records.map(r => r.uuid === uuid(6) ? result(6, 3, "unknown") : r)],
+    ["conflicting source assistant", records.map(r => r.uuid === uuid(6)
+      ? { ...r, sourceToolAssistantUUID: uuid(2) } : r)],
     ["different message branch", records.map(r => r.uuid === uuid(3) ? call(3, 2, "b", "other-message") : r)],
     ["second final answer", [...records, assistant(10, 6, "Other answer"), duration(11, 10)]],
     ["duplicate tool ownership", records.map(r => r.uuid === uuid(3) ? call(3, 2, "a") : r)]

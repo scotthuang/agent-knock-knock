@@ -12,6 +12,7 @@ export type ClaudeControlReadiness = Readonly<
 export interface ClaudeTerminalAdmission {
   readonly managedSend: ClaudeControlReadiness;
   readonly lifecycle: ClaudeControlReadiness;
+  readonly newThread: ClaudeControlReadiness;
 }
 
 /** Shared before-transition policy; the native observer owns exact process evidence. */
@@ -19,12 +20,14 @@ export function claudeLifecycleReadiness(input: {
   cwd?: string;
   expectedNativeThreadId?: string;
   observation?: TerminalThreadLifecycleObservation;
+  allowCompletedForeground: boolean;
 }): ClaudeControlReadiness {
   const observed = input.observation;
   const identityKnown = input.cwd && path.isAbsolute(input.cwd) && observed?.status === "observed" &&
     isExactNativeThreadId(input.expectedNativeThreadId) &&
     observed.nativeThreadId === input.expectedNativeThreadId.toLowerCase();
-  if (identityKnown && (observed.idle === true || observed.foregroundComplete === true)) return { ready: true };
+  if (identityKnown && (observed.idle === true ||
+    input.allowCompletedForeground && observed.foregroundComplete === true)) return { ready: true };
   return {
     ready: false,
     reason: identityKnown ? "claude_lifecycle_foreground_unproven" : "claude_lifecycle_identity_unavailable",
@@ -69,8 +72,10 @@ export function observeClaudeTerminalAdmission(
     operation: { kind: "new_thread" }, phase: "before", pid: input.pid,
     processStartedAt: input.processStartedAt, cwd: input.cwd, agentRows: input.agentRows, claudeHome: input.claudeHome
   });
+  const facts = { cwd: input.cwd, expectedNativeThreadId: input.sessionId, observation };
   return {
-    lifecycle: claudeLifecycleReadiness({ cwd: input.cwd, expectedNativeThreadId: input.sessionId, observation }),
+    lifecycle: claudeLifecycleReadiness({ ...facts, allowCompletedForeground: true }),
+    newThread: claudeLifecycleReadiness({ ...facts, allowCompletedForeground: false }),
     managedSend: captureClaudeManagedSendAdmission(input).readiness
   };
 }

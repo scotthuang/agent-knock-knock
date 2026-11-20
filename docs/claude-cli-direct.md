@@ -33,6 +33,16 @@ The terminal and direct paths must agree on the native UUID, PID and process sta
 
 Claude terminal model control has regression profiles for `2.1.266` and `2.1.285`; other complete `x.y.z` versions may attempt the same runtime contract through a profile bound to their actual version. List's `model_control.reason` identifies that unverified profile. Catalog discovery must recognize the live picker, choices and session-scope footer before selection becomes available. Model changes still require an empty idle Composer, exact session/process identity, a fresh catalog and a verified postcondition, and affect only the current session. Missing or malformed versions and unsupported picker layouts remain unavailable. A supported new-thread transition also supports Clear; Resume requires an eligible exact UUID from a fresh resumable-thread catalog. Cancellation support follows the exact terminal adapter and transport, while each currently offered action remains subject to runtime state checks.
 
+A Claude terminal can resume a historical session with background Bash shells
+still alive. AKK checks the exact process and a complete foreground transcript,
+then checks the current main Composer before sending the resume command.
+A visible draft or stash blocks input. On a fresh empty prompt AKK can press
+Ctrl+S once to restore a hidden draft. Restored text stays in the Composer for
+the user to save, and AKK stops the resume. A currently active foreground task,
+an unresolved tool, or an interaction that owns input still blocks the switch.
+[Verification](evidence/claude-resume-540.md).
+
+
 ## Use it
 
 Keep the authenticated Claude Code CLI open and ask your controller to refresh `agent_knock_knock_list`. Select its exact conversation ID from the returned actions. A task request can be as simple as:

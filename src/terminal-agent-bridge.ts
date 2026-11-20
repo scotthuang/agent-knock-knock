@@ -117,7 +117,7 @@ import type * as UserExplicitSendContract from "./terminal-user-explicit-send-co
 import { codexAsyncQuestionMainComposerVisible } from
   "./codex-async-question-adapter.js";
 import {
-  dispatchTerminalUserExplicitComposerClear,
+  dispatchTerminalUserExplicitComposerClear, probeClaudeResumeDraft,
   TerminalUserExplicitClearNotStartedError,
   TerminalUserExplicitClearUncertainError
 } from "./terminal-user-explicit-send-clear.js";
@@ -1161,6 +1161,14 @@ export class TerminalAgentBridge {
       text,
       options
     );
+  }
+
+  probeClaudeResumeDraft(control: TerminalControlRef, runtime: TerminalRuntimeIdentity): Promise<void> {
+    return probeClaudeResumeDraft(control, {
+      provider: this.terminalProvider, sleep: this.sleep,
+      verifyIdentity: () => this.verifyTerminalIdentity("claude", control, runtime),
+      status: () => this.status("claude", control, { runtime, scrollbackLines: 0 })
+    });
   }
 
   /** Observe only the current, live Codex composer without exposing its text. */

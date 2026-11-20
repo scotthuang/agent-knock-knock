@@ -285,7 +285,13 @@ function settleToolResults(record: RecordValue, tools: Map<string, ObservedTool>
   for (const block of content(record)) {
     if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
     const tool = tools.get(block.tool_use_id);
-    if (!tool || tool.observation.status !== "pending" || (record.parentUuid !== tool.owner && (!parentMessage || tool.messageId !== parentMessage))) { unsafe = true; continue; }
+    if (!tool || record.type !== "user" || !isRecord(record.message) || record.message.role !== "user" ||
+        tool.observation.status !== "pending" ||
+        (record.sourceToolAssistantUUID !== undefined && record.sourceToolAssistantUUID !== tool.owner) ||
+        (record.parentUuid !== tool.owner && (!parentMessage || tool.messageId !== parentMessage))) {
+      unsafe = true;
+      continue;
+    }
     if (parentMessage) messages.set(String(record.uuid), parentMessage);
     tool.observation.status = block.is_error === true ? "failed" : "completed";
     tool.item.status = tool.observation.status;

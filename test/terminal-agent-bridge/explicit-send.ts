@@ -426,7 +426,8 @@ test("explicit Claude Send refuses occupied stashes and probes an empty Composer
     const bridge = new TerminalAgentBridge({ registry: createTerminalAgentAdapterRegistry([adapter]),
       terminalProvider: provider, nowMs: () => nowMs, async sleep(ms) { nowMs += ms; } });
     const reservations: Array<{ target: string; text: string }> = [];
-    return { provider, reservations, run: (afterReservation = () => {}) => bridge.sendUserExplicit("claude", terminalControl(adapter), request,
+    return { provider, reservations, probeResume: () => bridge.probeClaudeResumeDraft(terminalControl(adapter), {}),
+      run: (afterReservation = () => {}) => bridge.sendUserExplicit("claude", terminalControl(adapter), request,
       { beforeMutationReservation({ terminalControl, text }) {
         reservations.push({ target: terminalControl.target, text }); afterReservation();
       } }) };
@@ -545,18 +546,20 @@ test("explicit Claude Send refuses occupied stashes and probes an empty Composer
   });
   await t.test("hidden stash is restored without erasing user text or submitting a task", async () => {
     const original = "  hidden user text\n下一行  ";
-    const { provider, run } = fixture({ draft: "", stash: original, hideStashLabel: true });
-    await assert.rejects(run(), (error: unknown) => {
-      assert.ok(error instanceof TerminalUserExplicitClearUncertainError);
-      assert.match(error.message, /(?:draft|restor)/iu);
-      return true;
-    });
-    assert.equal(provider.composer, original);
-    assert.equal(provider.stash, undefined, "the user's payload is visible, not deleted");
-    assert.equal(provider.taskInjected, false);
-    assert.deepEqual(provider.submitted, []);
-    assert.deepEqual(provider.operations.filter(operation => operation.kind !== "capture")
-      .map(operation => operation.kind === "keys" ? operation.keys : []), [["C-s"]]);
+    for (const path of ["send", "resume"] as const) {
+      const { provider, run, probeResume } = fixture({ draft: "", stash: original, hideStashLabel: true });
+      await assert.rejects(path === "send" ? run() : probeResume(), (error: unknown) => {
+        assert.ok(error instanceof TerminalUserExplicitClearUncertainError);
+        assert.match(error.message, /(?:draft|restor)/iu);
+        return true;
+      });
+      assert.equal(provider.composer, original);
+      assert.equal(provider.stash, undefined, "the user's payload is visible, not deleted");
+      assert.equal(provider.taskInjected, false);
+      assert.deepEqual(provider.submitted, []);
+      assert.deepEqual(provider.operations.filter(operation => operation.kind !== "capture")
+        .map(operation => operation.kind === "keys" ? operation.keys : []), [["C-s"]]);
+    }
   });
   await t.test("legacy AKK stash failure explains manual recovery without claiming ownership of hidden text", async () => {
     const { provider, run } = fixture({ draft: "", stash: legacyMarker });
