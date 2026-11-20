@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.19",
+  "version": "0.16.20",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "818ff88f2e0cb7ed086b77499ea7e630d45f1bcf",
-  "asset": "scotthuang-agent-knock-knock-0.16.19.tgz",
-  "sha256": "2db53c6dd248c6a19aa943f6a192c5b818ccb5afa7503f52efa2d63093fab606",
-  "bytes": 4012512,
-  "changelog": "Recognize custom model display names in closed Codex terminal input footers. Includes regression coverage for tmux and Herdr Send and native status preflight."
+  "commit": "6037e472c05cf8d6aba53e3b770886ebba8d86e5",
+  "asset": "scotthuang-agent-knock-knock-0.16.20.tgz",
+  "sha256": "e611e33ba202c8d5bff356a8363b3fbcbf89ca27ec4b6eff47c433b2766d1d98",
+  "bytes": 4013744,
+  "changelog": "Review Codex CLI and app-server 0.171.0. Validate exact native terminal and backend operations and new GPT-6.2 catalog behavior."
 }
