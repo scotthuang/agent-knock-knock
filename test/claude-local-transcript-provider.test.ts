@@ -2599,6 +2599,43 @@ for (const background of [false, true]) {
   });
 }
 
+test("Claude lifecycle admits only closed, exactly owned interleaved tool batches in a shell state", async t => {
+  const fixture = createFixture(t);
+  fixture.agentRows[0].status = "shell";
+  const records = pendingBashRecords({ request: "Launch two fixture shells", command: "sleep 120", ids: 8900 });
+  const owner = records[2];
+  const tool = pendingToolBlock(records);
+  const newId = "toolu_interleaved_second";
+  const second = { ...owner, uuid: uuid(8903), parentUuid: owner.uuid,
+    message: { ...(owner.message as Record<string, unknown>), content: [{ ...tool, id: newId }] } };
+  const result = (id: number, ownerUuid: string, resultParent: string, toolId: unknown) => ({
+    ...baseRecord(uuid(id), resultParent, PROMPT_AT, SESSION_ID, VERSION),
+    type: "user", sourceToolAssistantUUID: ownerUuid, toolUseResult: { backgroundTaskId: `job-${id}` },
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "Launch returned" }] }
+  });
+  const firstResult = result(8904, uuid(8902), uuid(8903), tool.id);
+  const secondResult = result(8905, uuid(8903), uuid(8904), newId);
+  const done = assistantRecord({ uuid: uuid(8906), parentUuid: uuid(8905), messageId: uuid(9906), text: "Foreground finished" });
+  const duration = durationRecord({ uuid: uuid(8907), parentUuid: uuid(8906), timestamp: COMPLETED_AT });
+  const scan = async (tail: readonly Record<string, unknown>[]) => {
+    fixture.write([...records, second, ...tail]);
+    const observed = await observeClaudeListIdentitySnapshots({
+      sessions: [{ agent: "claude", pid: PID, cwd: fixture.workspace } as ActiveTerminalProcess],
+      claudeHome: fixture.claudeHome, loadRows: () => fixture.agentRows,
+      loadTargetRows: () => fixture.agentRows,
+      observe: async () => ({ status: "resolved", identity: {
+        sessionId: fixture.sessionId, processStartedAt: AGENT_STARTED_AT_MS, evidence: "claude_agents_exact_pid"
+      } })
+    });
+    return observed.get(PID)?.admission?.lifecycle.ready;
+  };
+  assert.equal(await scan([firstResult, secondResult, done, duration]), true);
+  assert.equal(await scan([{ ...firstResult, sourceToolAssistantUUID: second.uuid }, secondResult, done, duration]), false);
+  assert.equal(await scan([firstResult, { ...done, parentUuid: uuid(8904) }, duration]), false);
+  const branch = assistantRecord({ uuid: uuid(8908), parentUuid: uuid(8903), messageId: uuid(9908), text: "Unrelated answer" });
+  assert.equal(await scan([firstResult, secondResult, branch, done, duration]), false);
+});
+
 test("requires exact process identity and distinguishes returned shells from pending tools and background agents", (t) => {
   const fixture = createFixture(t);
   const anchor = fixture.capture();

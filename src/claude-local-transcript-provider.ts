@@ -1,4 +1,5 @@
 import { hasBlockingCompletionWork, hasUnresolvedBackgroundWork } from "./claude-transcript-background-policy.js";
+import { hasClosedClaudeToolBatches } from "./claude-native-transcript-chain.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -786,7 +787,7 @@ function latestForegroundCompleted(
     sessionId, cwd, expectedRequestHash: hash, expectedPromptUuid: promptUuid,
     records: orderClaudePrewrittenAttachments(entries.map(entry => entry.record)),
     transcriptFileId: transcriptFileId(sessionId, `${opened.stat.dev}:${opened.stat.ino}`)
-  }) !== undefined;
+  }, { allowClosedToolBatches: true }) !== undefined;
 }
 
 /** Capture the latest exact, unfinished root prompt in a live Claude process. */
@@ -2326,7 +2327,7 @@ function matchingManagedPrompt(
 
 function completionFromRecords(
   snapshot: Pick<ClaudeTranscriptTurnSnapshot, "records" | "sessionId" | "cwd" | "expectedRequestHash" | "expectedPromptText" | "expectedPromptUuid" | "transcriptFileId">,
-  options: { requireVerifiableCompletionSignal?: boolean } = {}
+  options: { requireVerifiableCompletionSignal?: boolean; allowClosedToolBatches?: boolean } = {}
 ): TerminalCompletionEvidence | undefined {
   const {
     records,
@@ -2422,7 +2423,8 @@ function completionFromRecords(
   )) {
     return absentOrUnverifiable();
   }
-  if (hasUnresolvedToolUse(descendants)) {
+  if (hasUnresolvedToolUse(descendants) && (!options.allowClosedToolBatches ||
+    !hasClosedClaudeToolBatches(prompt, descendants, sessionId, isClaudeRootHumanPrompt))) {
     return absentOrUnverifiable();
   }
   if (descendants.some(hasBlockingStopSummary)) {

@@ -33,7 +33,10 @@ fences and private paths are omitted.
 
 Regression fixtures cover visible and hidden drafts, stale process identity,
 wrong targets, unreturned or mismatched tools and interleaved results. The
-hidden-stash fixture verifies a single restore key and no command input.
+same-message fixture exercises the actual transcript admission used for
+resume with running shells. A missing result, mismatched explicit source or
+independent answer branch blocks admission.
+The hidden-stash fixture verifies a single restore key and no command input.
 The successful live test exercised an empty stash. Other Claude versions,
 Herdr, dual-Host lifecycle and rollback across versions were outside the
 successful live check. See the PR for the final review and test commands.
