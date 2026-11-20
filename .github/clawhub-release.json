@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.20",
+  "version": "0.16.21",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "6037e472c05cf8d6aba53e3b770886ebba8d86e5",
-  "asset": "scotthuang-agent-knock-knock-0.16.20.tgz",
-  "sha256": "e611e33ba202c8d5bff356a8363b3fbcbf89ca27ec4b6eff47c433b2766d1d98",
-  "bytes": 4013744,
-  "changelog": "Review Codex CLI and app-server 0.171.0. Validate exact native terminal and backend operations and new GPT-6.2 catalog behavior."
+  "commit": "f73434a28547e7decd9441fe10ba10f59020fe45",
+  "asset": "scotthuang-agent-knock-knock-0.16.21.tgz",
+  "sha256": "c30cf6b17c3b45127c743cfc27b392e137f4bc5b9bfc57c43aca7ab3a26ac8e5",
+  "bytes": 4019284,
+  "changelog": "Allow exact Claude historical resume after the foreground settles even when background shells remain. Keep draft and input ownership checks and match interleaved tool results to the exact assistant message."
 }
