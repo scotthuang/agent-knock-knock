@@ -1,3 +1,4 @@
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import path from "node:path";
 import type {
   TerminalNativeIdentityFence,
@@ -323,6 +324,10 @@ export async function prepareNativeThreadVerification(
   );
   ports.assertReady(terminalStatus);
   assertVerifiedClaudeBeforeObservation(request, terminal, ports);
+  if (terminal.agent === "claude") {
+    const composer = claudeUserExplicitReadiness(terminalStatus.screen.excerpt);
+    if (!composer.ready) throw new Error(`Claude thread change blocked: ${composer.reason}. ${composer.message}`);
+  }
   if (terminal.agent === "codex") {
     const statusIdentity = await probeCodexCurrentThread({
       terminal,
@@ -573,7 +578,7 @@ export async function verifyNativeThreadTransition(
         if (
           parsed?.status === "verified" &&
           parsed.nativeThreadId &&
-          parsed.idle === true &&
+          (parsed.idle === true || parsed.foregroundComplete === true) &&
           request.beforeIdentity?.processStartedAt !== undefined
         ) {
           const observed: TerminalNativeIdentity = {
@@ -589,7 +594,8 @@ export async function verifyNativeThreadTransition(
             terminal.terminalControl,
             { runtime: ports.runtimeForIdentity(observed) }
           );
-          if (status.reachable && status.activity_state === "idle") {
+          if (status.reachable && status.activity_state === "idle" &&
+              claudeUserExplicitReadiness(status.screen.excerpt).ready) {
             verifiedIdentity = observed;
           }
         }

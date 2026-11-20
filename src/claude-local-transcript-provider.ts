@@ -9,10 +9,8 @@ import { defaultClaudeHome, claudeTranscriptAnchorFingerprint,
   "./claude-transcript-config.js";
 export { defaultClaudeHome, claudeTranscriptAnchorFingerprint } from "./claude-transcript-config.js";
 export type { ClaudeTranscriptAnchor } from "./claude-transcript-config.js";
-import {
-  isClaudeAgentIdleState,
-  type ClaudeAgentRow
-} from "./claude-terminal-agent-adapter.js";
+import { isClaudeAgentIdleState } from "./claude-agent-state.js";
+import type { ClaudeAgentRow } from "./claude-agent-state.js";
 import {
   claudeLifecycleSourceVersionSupported,
   claudeRuntimeLifecycleCompatibilityProfile,

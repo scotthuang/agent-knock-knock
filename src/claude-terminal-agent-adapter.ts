@@ -1,3 +1,8 @@
+import type { ClaudeAgentRow } from "./claude-agent-state.js";
+export type { ClaudeAgentRow } from "./claude-agent-state.js";
+import { observeClaudeThreadLifecycle } from "./claude-thread-lifecycle-observation.js";
+export { observeClaudeThreadLifecycle } from "./claude-thread-lifecycle-observation.js";
+export { isClaudeAgentIdleState } from "./claude-agent-state.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
@@ -25,7 +30,6 @@ import type {
   TerminalScreenInspection,
   TerminalScreenInspectionOptions,
   TerminalThreadLifecycleCapabilities,
-  TerminalThreadLifecycleObservation,
   TerminalThreadLifecycleObservationRequest,
   TerminalThreadLifecycleObserver,
   TerminalThreadLifecycleOperation,
@@ -43,21 +47,6 @@ import {
 } from "./terminal-model-control-surface.js";
 
 export type ClaudeProcessKind = "claude_cli";
-
-/** A row returned by `claude agents --json --all`. Unknown fields are intentionally ignored. */
-export interface ClaudeAgentRow {
-  pid?: number;
-  cwd?: string;
-  kind?: string;
-  sessionId?: string;
-  startedAt?: number;
-  status?: string;
-  waitingFor?: string;
-  /** Registry metadata bound to this exact PID/session/process incarnation by the reader. */
-  configDir?: string;
-  version?: string;
-  processStart?: string;
-}
 
 export interface CreateClaudeTerminalAgentAdapterOptions {
   /**
@@ -585,144 +574,6 @@ export function planClaudeThreadLifecycle(
       nativeThreadId: operation.nativeThreadId
     }
   };
-}
-
-export function observeClaudeThreadLifecycle(
-  request: TerminalThreadLifecycleObservationRequest,
-  legacyOperation?: undefined,
-  fallbackAgentRows?: readonly ClaudeAgentRow[]
-): TerminalThreadLifecycleObservation;
-/** @deprecated Claude lifecycle identity requires a typed agents-row request. */
-export function observeClaudeThreadLifecycle(
-  screen: string,
-  operation: TerminalThreadLifecycleOperation,
-  fallbackAgentRows?: readonly ClaudeAgentRow[]
-): TerminalThreadLifecycleObservation;
-export function observeClaudeThreadLifecycle(
-  requestOrScreen: TerminalThreadLifecycleObservationRequest | string,
-  legacyOperation?: TerminalThreadLifecycleOperation,
-  fallbackAgentRows: readonly ClaudeAgentRow[] = []
-): TerminalThreadLifecycleObservation {
-  if (typeof requestOrScreen === "string") {
-    return {
-      status: "missing",
-      reason:
-        "Claude lifecycle identity is not available from screen text; exact agents JSON is required"
-    };
-  }
-  const request = requestOrScreen;
-  const pid = Number(request.pid);
-  const startedAt = Number(request.processStartedAt);
-  if (
-    !Number.isSafeInteger(pid) ||
-    pid <= 1 ||
-    !Number.isSafeInteger(startedAt) ||
-    startedAt <= 0
-  ) {
-    return {
-      status: "missing",
-      reason: "Claude lifecycle observation requires exact PID and startedAt identity"
-    };
-  }
-  const rows = request.agentRows ?? fallbackAgentRows;
-  const matches = rows.filter((row) => Number(row.pid) === pid);
-  if (matches.length === 0) {
-    return {
-      status: "missing",
-      reason: `Claude agents JSON has no row for PID ${pid}`
-    };
-  }
-  if (matches.length !== 1) {
-    return {
-      status: "ambiguous",
-      reason: `Claude agents JSON has ${matches.length} rows for PID ${pid}`
-    };
-  }
-  const row = matches[0];
-  const nativeThreadId = nonEmptyString(row.sessionId)?.toLowerCase();
-  if (
-    row.kind !== "interactive" ||
-    !isExactNativeThreadId(nativeThreadId) ||
-    Number(row.startedAt) !== startedAt ||
-    (
-      request.cwd !== undefined &&
-      (
-        !path.isAbsolute(request.cwd) ||
-        typeof row.cwd !== "string" ||
-        !path.isAbsolute(row.cwd) ||
-        normalizeLifecyclePath(row.cwd) !== normalizeLifecyclePath(request.cwd)
-      )
-    )
-  ) {
-    return {
-      status: "mismatch",
-      nativeThreadId,
-      evidence: "claude_agents_exact_pid",
-      reason: "Claude agents JSON does not match the expected interactive process incarnation"
-    };
-  }
-  const observed: TerminalThreadLifecycleObservation = {
-    status: "observed",
-    nativeThreadId,
-    evidence: "claude_agents_exact_pid",
-    idle: isClaudeAgentIdleState(row)
-  };
-  if (request.phase === "before") {
-    return observed;
-  }
-  if (!isClaudeAgentIdleState(row)) {
-    return {
-      ...observed,
-      status: "mismatch",
-      reason: `Claude agents JSON reports ${row.status ?? "unknown"}, not idle`
-    };
-  }
-  if (request.operation.kind === "new_thread") {
-    if (!isExactNativeThreadId(request.beforeNativeThreadId)) {
-      return {
-        ...observed,
-        status: "mismatch",
-        reason: "a verified before-session UUID is required for Claude /clear"
-      };
-    }
-    return nativeThreadId === request.beforeNativeThreadId.toLowerCase()
-      ? {
-          ...observed,
-          status: "mismatch",
-          reason: "Claude /clear did not change the sessionId"
-        }
-      : { ...observed, status: "verified" };
-  }
-  const expected = (
-    request.expectedNativeThreadId ?? request.operation.nativeThreadId
-  ).toLowerCase();
-  if (!isExactNativeThreadId(expected)) {
-    return {
-      ...observed,
-      status: "mismatch",
-      reason: "Claude resume postcondition requires an exact target UUID"
-    };
-  }
-  return nativeThreadId === expected
-    ? { ...observed, status: "verified" }
-    : {
-        ...observed,
-        status: "mismatch",
-        reason: `Claude resumed ${nativeThreadId}, not the requested native thread ${expected}`
-      };
-}
-
-/**
- * Claude Code 2.1.251 through 2.1.267 can report an input-ready interactive composer as
- * `waiting` without a `waitingFor` reason. A non-empty wait reason remains a
- * real blocked state and must never be promoted to idle.
- */
-export function isClaudeAgentIdleState(row: ClaudeAgentRow): boolean {
-  const waitingFor = typeof row.waitingFor === "string"
-    ? row.waitingFor.trim()
-    : "";
-  return row.status === "idle" ||
-    (row.status === "waiting" && waitingFor.length === 0);
 }
 
 type ParsedClaudeStatusPanel =

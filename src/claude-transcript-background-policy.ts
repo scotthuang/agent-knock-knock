@@ -52,7 +52,8 @@ export function hasUnresolvedBackgroundWork(record: Record<string, unknown>): bo
         toolName?.startsWith("cron") ||
         toolName === "agent" ||
         toolName === "sendmessage" ||
-        structuredBoolean(block.input, ["run_in_background", "runInBackground"]) === true
+        structuredBoolean(block.input, ["run_in_background", "runInBackground",
+          "is_background", "isBackground", "backgroundedByUser", "assistantAutoBackgrounded"]) === true
       ) {
         return true;
       }
@@ -82,10 +83,6 @@ function structuredBoolean(value: unknown, keys: readonly string[]): boolean | u
   if (!isRecord(value)) {
     return undefined;
   }
-  for (const key of keys) {
-    if (typeof value[key] === "boolean") {
-      return value[key] as boolean;
-    }
-  }
-  return undefined;
+  // A false alias cannot hide another positive background-work signal.
+  return keys.some(key => value[key] === true);
 }

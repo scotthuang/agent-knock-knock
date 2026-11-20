@@ -429,6 +429,8 @@ export interface TerminalThreadLifecycleAgentRow {
 }
 
 export interface TerminalThreadLifecycleObservationRequest {
+  /** Optional reader root; exact row configDir remains authoritative. */
+  claudeHome?: string;
   operation: TerminalThreadLifecycleOperation;
   phase: "before" | "after";
   screen?: string;
@@ -445,6 +447,8 @@ export interface TerminalThreadLifecycleObservation {
   nativeThreadId?: string;
   evidence?: string;
   idle?: boolean;
+  /** Exact transcript proves a completed foreground despite a shell registry row. */
+  foregroundComplete?: boolean;
   reason?: string;
 }
 

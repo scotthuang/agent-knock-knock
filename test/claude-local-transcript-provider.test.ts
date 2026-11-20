@@ -2579,7 +2579,9 @@ for (const background of [false, true]) {
         sessionId: rows[0].sessionId!, processStartedAt: AGENT_STARTED_AT_MS, evidence: "claude_agents_exact_pid"
       } })
     });
-    assert.equal((await scan()).get(PID)?.admission?.managedSend.ready, true);
+    const admitted = (await scan()).get(PID)?.admission;
+    assert.equal(admitted?.managedSend.ready, true);
+    assert.equal(admitted?.lifecycle.ready, true, "finished foreground permits lifecycle with returned background shell");
     assert.equal(exactReads, 1);
     assert.equal((await scan(false, "busy")).get(PID)?.admission?.managedSend.ready, false,
       "actual busy state must not be overridden by old completion");
@@ -2590,7 +2592,10 @@ for (const background of [false, true]) {
     assert.equal(failed?.admission, undefined, "failed exact reads never fall back to discovery authority");
     fixture.append([userRecord({ uuid: uuid(8820), parentUuid: uuid(8812), request: "New work", timestamp: COMPLETED_AT })]);
     assert.equal(admission().readiness.ready, false, "an older completion cannot admit over a newer active prompt");
-    assert.equal((await scan()).get(PID)?.admission?.managedSend.ready, false);
+    const blocked = (await scan()).get(PID)?.admission;
+    assert.equal(blocked?.managedSend.ready, false);
+    assert.equal(blocked?.lifecycle.ready, false);
+    assert.equal(blocked?.lifecycle.ready === false && blocked.lifecycle.reason, "claude_lifecycle_foreground_unproven");
   });
 }
 

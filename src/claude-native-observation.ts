@@ -1,3 +1,5 @@
+import { hasBlockingCompletionWork } from "./claude-transcript-background-policy.js";
+import { claudeNativeCausalChain } from "./claude-native-transcript-chain.js";
 import fs, { type FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { constants } from "node:fs";
@@ -79,7 +81,7 @@ export async function readClaudeNativeSnapshot(entry: ClaudeNativeCatalogEntry,
   const chosen = roots.slice(-MAX_INPUTS);
   if (selected && !chosen.includes(selected)) chosen.unshift(selected);
   for (const root of chosen) {
-    const chain = causalChain(root, byParent, conflicts, entry.sessionId);
+    const chain = claudeNativeCausalChain(root, byParent, conflicts, entry.sessionId, isInput);
     const projected = observeInput(root, chain, entry, options.processAlive !== false, readAt, inputId(root) === base.latestInputUuid);
     base.inputs.push(projected.observation);
     if (root === selected) { base.selectedInput = projected.observation; base.progress = projected.progress; }
@@ -149,34 +151,9 @@ function isInput(record: RecordValue): boolean {
   const message = isRecord(record.message) ? record.message : undefined;
   return message?.role === "user" && (typeof message.content === "string" || content(record).some(block => block.type === "text"));
 }
-function causalChain(root: RecordValue, byParent: Map<string, RecordValue[]>, conflicts: Set<string>, sessionId: string): RecordValue[] | undefined {
-  if (conflicts.has(String(root.uuid))) return undefined;
-  const chain = [root]; const seen = new Set([String(root.uuid)]);
-  while (true) {
-    const children = (byParent.get(String(chain.at(-1)!.uuid)) ?? [])
-      .filter(record => !(isInput(record) && record.type === "user"))
-      .filter(record => !(record.type === "system" && record.subtype === "informational" && !byParent.has(String(record.uuid))));
-    if (!children.length) return chain;
-    if (children.length !== 1 || !isClaudeNativeUuid(children[0].uuid) || seen.has(children[0].uuid)) return undefined;
-    const next = children[0];
-    if (conflicts.has(String(next.uuid)) || (next.sessionId ?? next.session_id) !== sessionId || next.isSidechain === true) return undefined;
-    seen.add(String(next.uuid)); chain.push(next);
-    // A durable end marker belongs to this task even when later inputs are descendants.
-    if (next.type === "system" && next.subtype === "turn_duration") return chain;
-  }
-}
 function nativeTime(record: RecordValue): string | null {
   if (typeof record.timestamp !== "string") return null;
   const ms = Date.parse(record.timestamp); return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-}
-function hasBackgroundWork(record: RecordValue): boolean {
-  if ([record.pendingBackgroundAgentCount, record.pendingWorkflowCount].some(value => value !== undefined && value !== 0)) return true;
-  const result = isRecord(record.toolUseResult) ? record.toolUseResult : {};
-  if (typeof result.backgroundTaskId === "string" || result.isAsync === true
-    || ["async_launched", "remote_launched", "teammate_spawned"].includes(String(result.status))) return true;
-  const background = (value: RecordValue) => ["run_in_background", "runInBackground", "is_background", "isBackground",
-    "backgroundedByUser", "assistantAutoBackgrounded"].some(key => value[key] === true);
-  return background(result) || content(record).some(block => block.type === "tool_use" && isRecord(block.input) && background(block.input));
 }
 function toolType(name: string): string {
   if (name === "Bash") return "commandExecution";
@@ -217,23 +194,24 @@ function observeInput(root: RecordValue, chain: RecordValue[] | undefined, entry
 }
 function analyzeChain(chain: RecordValue[]) {
   const items: BackendProgressItem[] = [], tools = new Map<string, ObservedTool>();
+  const toolMessages = new Map<string, string>();
   let lastMessageId: string | undefined, lastPublicMessageId: string | undefined, finalMessageId: string | undefined;
   let stopRecord: RecordValue | undefined, errorRecord: RecordValue | undefined, duration: RecordValue | undefined;
   let unsafe = false, unknownStopReason = false;
   for (const record of chain.slice(1)) {
     const blockingStopHook = record.subtype === "stop_hook_summary" && (record.preventedContinuation === true
       || Array.isArray(record.hookErrors) && record.hookErrors.length > 0);
-    if (blockingStopHook || record.type === "progress" || hasBackgroundWork(record)) unsafe = true;
+    if (blockingStopHook || record.type === "progress" || hasBlockingCompletionWork(record, chain)) unsafe = true;
     if (interrupted(record)) stopRecord = record;
     if (record.type === "system" && record.subtype === "turn_duration") duration = record;
-    const assistant = addAssistantItems(record, tools, items);
+    const assistant = addAssistantItems(record, tools, items, toolMessages);
     lastMessageId = assistant.messageId ?? lastMessageId;
     lastPublicMessageId = assistant.publicMessageId ?? lastPublicMessageId;
     finalMessageId = assistant.finalMessageId ?? finalMessageId;
     if (assistant.error) errorRecord = record;
     unsafe ||= assistant.unsafe;
     unknownStopReason ||= assistant.unknownStopReason;
-    unsafe = settleToolResults(record, tools) || unsafe;
+    unsafe = settleToolResults(record, tools, toolMessages) || unsafe;
   }
   if (unknownStopReason && !stopRecord && !errorRecord) unsafe = true;
   return { items, tools, lastMessageId, lastPublicMessageId, finalMessageId, stopRecord, errorRecord, duration, unsafe };
@@ -270,8 +248,9 @@ function observationOutput(result: ClaudeNativeInputObservation, analysis: Chain
   const progressItems = hasFinal ? items.filter(item => item.type !== "agentMessage" || item.delivery !== lastPublicMessageId) : items;
   return { observation: result, progress: progressFor(result.inputUuid, progressItems, readAt, !unsafe) };
 }
-interface ObservedTool { observation: ClaudeNativeToolObservation; item: BackendProgressItem; owner: string }
-function addAssistantItems(record: RecordValue, tools: Map<string, ObservedTool>, items: BackendProgressItem[]) {
+interface ObservedTool { observation: ClaudeNativeToolObservation; item: BackendProgressItem; owner: string; messageId?: string }
+function addAssistantItems(record: RecordValue, tools: Map<string, ObservedTool>, items: BackendProgressItem[],
+  messages: Map<string, string>) {
   const result = { unsafe: false, unknownStopReason: false, error: false,
     messageId: undefined as string | undefined, publicMessageId: undefined as string | undefined,
     finalMessageId: undefined as string | undefined };
@@ -279,6 +258,7 @@ function addAssistantItems(record: RecordValue, tools: Map<string, ObservedTool>
   const message = isRecord(record.message) ? record.message : undefined;
   result.unsafe = message?.role !== "assistant";
   result.messageId = typeof message?.id === "string" ? message.id : undefined;
+  if (result.messageId) messages.set(String(record.uuid), result.messageId);
   result.error = record.isApiErrorMessage === true;
   if (message?.stop_reason === "end_turn") result.finalMessageId = result.messageId;
   else result.unknownStopReason = !result.error && message?.stop_reason != null && message.stop_reason !== "tool_use";
@@ -293,18 +273,20 @@ function addAssistantItems(record: RecordValue, tools: Map<string, ObservedTool>
       if (tools.has(block.id)) { result.unsafe = true; continue; }
       const name = toolName(block.name);
       const item: BackendProgressItem = { id: block.id, type: toolType(name), actionKind: toolActionKind(name), status: "inProgress", startedAtMs };
-      tools.set(block.id, { observation: { toolUseId: block.id, name, status: "pending" }, item, owner: String(record.uuid) });
+      tools.set(block.id, { observation: { toolUseId: block.id, name, status: "pending" }, item, owner: String(record.uuid), messageId: result.messageId });
       items.push(item);
     }
   }
   return result;
 }
-function settleToolResults(record: RecordValue, tools: Map<string, ObservedTool>): boolean {
+function settleToolResults(record: RecordValue, tools: Map<string, ObservedTool>, messages: Map<string, string>): boolean {
+  const parentMessage = messages.get(String(record.parentUuid));
   let unsafe = false;
   for (const block of content(record)) {
     if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
     const tool = tools.get(block.tool_use_id);
-    if (!tool || tool.observation.status !== "pending" || record.parentUuid !== tool.owner) { unsafe = true; continue; }
+    if (!tool || tool.observation.status !== "pending" || (record.parentUuid !== tool.owner && (!parentMessage || tool.messageId !== parentMessage))) { unsafe = true; continue; }
+    if (parentMessage) messages.set(String(record.uuid), parentMessage);
     tool.observation.status = block.is_error === true ? "failed" : "completed";
     tool.item.status = tool.observation.status;
     tool.item.completedAtMs = nativeTime(record) ? Date.parse(nativeTime(record)!) : null;

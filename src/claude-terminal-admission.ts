@@ -21,16 +21,19 @@ export function claudeLifecycleReadiness(input: {
   observation?: TerminalThreadLifecycleObservation;
 }): ClaudeControlReadiness {
   const observed = input.observation;
-  if (input.cwd && path.isAbsolute(input.cwd) && observed?.status === "observed" &&
-      isExactNativeThreadId(input.expectedNativeThreadId) &&
-      observed.nativeThreadId === input.expectedNativeThreadId.toLowerCase() && observed.idle === true) {
-    return { ready: true };
-  }
+  const identityKnown = input.cwd && path.isAbsolute(input.cwd) && observed?.status === "observed" &&
+    isExactNativeThreadId(input.expectedNativeThreadId) &&
+    observed.nativeThreadId === input.expectedNativeThreadId.toLowerCase();
+  if (identityKnown && (observed.idle === true || observed.foregroundComplete === true)) return { ready: true };
   return {
     ready: false,
-    reason: "claude_lifecycle_identity_unavailable",
-    message: "AKK cannot verify one current idle Claude session in this window for a thread change. " +
-      "Wait for Claude to finish, check Status and the Claude reader, then refresh List and retry. " +
+    reason: identityKnown ? "claude_lifecycle_foreground_unproven" : "claude_lifecycle_identity_unavailable",
+    message: (identityKnown
+      ? "AKK verified the Claude session identity, but cannot prove its foreground task has finished for a thread change. " +
+        "A background shell alone is not proof; wait for foreground completion or restore transcript observation. "
+      : "AKK cannot verify one current Claude session identity in this window for a thread change. " +
+        "Check Status, the exact process identity and the Claude reader. ") +
+      "Refresh List and retry. " +
       (observed?.reason ? `Reader detail: ${observed.reason}. ` : "") + "No terminal input was sent."
   };
 }
@@ -64,7 +67,7 @@ export function observeClaudeTerminalAdmission(
 ): ClaudeTerminalAdmission {
   const observation = observeClaudeThreadLifecycle({
     operation: { kind: "new_thread" }, phase: "before", pid: input.pid,
-    processStartedAt: input.processStartedAt, cwd: input.cwd, agentRows: input.agentRows
+    processStartedAt: input.processStartedAt, cwd: input.cwd, agentRows: input.agentRows, claudeHome: input.claudeHome
   });
   return {
     lifecycle: claudeLifecycleReadiness({ cwd: input.cwd, expectedNativeThreadId: input.sessionId, observation }),

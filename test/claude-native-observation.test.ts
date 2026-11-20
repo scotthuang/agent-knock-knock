@@ -231,3 +231,74 @@ test("Claude public actions use fixed readable titles within the shared progress
     assert.doesNotMatch(snapshot.progress.text, /PRIVATE_|CustomNativeTool/u);
   }
 });
+
+// Sanitized topology of the 2.1.303 incident's lines 48–53: one assistant
+// message, three Bash calls, with results interleaved on different parents.
+test("interleaved fragments of one assistant tool message settle by tool ID", async t => {
+  const call = (id: number, parent: number, toolId: string, messageId = "parallel-message") =>
+    record("assistant", id, parent, { message: { role: "assistant", id: messageId, stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: toolId, name: "Bash", input: {} }] } });
+  const result = (id: number, parent: number, toolId: string) => record("user", id, parent,
+    { message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "PRIVATE_OUTPUT" }] } });
+  const records = [user(1), call(2, 1, "a"), call(3, 2, "b"), result(4, 2, "a"),
+    call(5, 4, "c"), result(6, 3, "b"), result(7, 5, "c"), assistant(8, 7, "Done"), duration(9, 8)];
+  const f = await fixture(t, records);
+  for (const ordered of [records, [records[0], ...records.slice(1).reverse()]]) {
+    await f.write(ordered);
+    const snapshot = await readClaudeNativeSnapshot(f.entry);
+    assert.equal(snapshot.selectedInput?.state, "completed");
+    assert.equal(snapshot.selectedInput?.responseText, "Done");
+    assert.deepEqual(snapshot.selectedInput?.toolResults.map(tool => tool.toolUseId).sort(), ["a", "b", "c"]);
+    assert.equal(snapshot.selectedInput?.pendingTools.length, 0);
+    assert.notEqual(snapshot.progress.state, "read_error");
+    assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_OUTPUT/u);
+  }
+  for (const [name, bad] of [
+    ["missing result", records.filter(r => r.uuid !== uuid(6))],
+    ["wrong result ID", records.map(r => r.uuid === uuid(6) ? result(6, 3, "unknown") : r)],
+    ["different message branch", records.map(r => r.uuid === uuid(3) ? call(3, 2, "b", "other-message") : r)],
+    ["second final answer", [...records, assistant(10, 6, "Other answer"), duration(11, 10)]],
+    ["duplicate tool ownership", records.map(r => r.uuid === uuid(3) ? call(3, 2, "a") : r)]
+  ] as const) {
+    await f.write([...bad]);
+    assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "unknown", name);
+  }
+});
+
+for (const background of [false, true]) {
+  test(`native foreground completion ignores only returned Bash background work (explicit=${background})`, async t => {
+    const tool = record("assistant", 2, 1, { message: { role: "assistant", id: "launch", stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: "shell", name: "Bash", input: background ? { run_in_background: true } : {} }] } });
+    const returned = record("user", 3, 2, { toolUseResult: { backgroundTaskId: "old-server",
+      ...(background ? {} : { timedOutAfterMs: 600000 }) }, message: { role: "user",
+      content: [{ type: "tool_result", tool_use_id: "shell", content: "Background launch returned" }] } });
+    const final = [assistant(4, 3, "Foreground complete"), duration(5, 4)];
+    const f = await fixture(t, [user(1), tool, returned, ...final]);
+    assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "completed");
+    for (const [name, records] of [
+      ["unreturned Bash", [user(1), tool, assistant(4, 2, "Claimed done"), duration(5, 4)]],
+      ["unsupported background flag", [user(1), { ...tool, message: { role: "assistant", id: "launch", stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "shell", name: "Bash", input: { is_background: true } }] } }, returned, ...final]],
+      ["pending background agent", [user(1), tool, { ...returned, pendingBackgroundAgentCount: 1 }, ...final]],
+      ["pending workflow", [user(1), tool, { ...returned, pendingWorkflowCount: 1 }, ...final]],
+      ["background Agent", [user(1), { ...tool, message: { role: "assistant", id: "launch", stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "shell", name: "Agent", input: { run_in_background: true } }] } }, returned, ...final]]
+    ] as const) {
+      await f.write([...records]);
+      assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "unknown", name);
+    }
+  });
+}
+
+test("multiple calls in one assistant message match interleaved results without requiring direct-parent ownership", async t => {
+  const call = record("assistant", 2, 1, { message: { role: "assistant", id: "batch", stop_reason: "tool_use",
+    content: ["a", "b"].map(id => ({ type: "tool_use", id, name: "Bash", input: {} })) } });
+  const result = (id: number, parent: number, toolId: string) => record("user", id, parent,
+    { message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolId, content: "Returned" }] } });
+  const f = await fixture(t, [user(1), call, result(3, 2, "b"), result(4, 3, "a"), assistant(5, 4, "Done"), duration(6, 5)]);
+  assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "completed");
+  await f.write([user(1), call, result(3, 2, "b"), assistant(7, 3, "Different message", { stop_reason: null }),
+    result(4, 7, "a"), assistant(5, 4, "Done"), duration(6, 5)]);
+  assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "unknown",
+    "a tool result cannot inherit ownership from another assistant message");
+});
