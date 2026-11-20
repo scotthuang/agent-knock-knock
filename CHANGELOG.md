@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.21 / Pi 0.1.0-poc.29 / DeepSeek Harness 0.1.0-rc.34 — 2026-11-20
+
+- Allow Claude to resume an exact historical session after its foreground turn has completed and returned Bash shells are still running. Revalidate the process, completion and empty main prompt before input. Probe once for a hidden stash and preserve any restored draft before stopping.
+- Resolve interleaved Claude tool calls and results from the same assistant message while rejecting conflicting ownership and unfinished work. See the [verification](docs/evidence/claude-resume-540.md).
+- Pi poc.29 and DeepSeek Harness rc.34 both pin core 0.16.21 on `next`.
+
 ## 0.16.20 / Pi 0.1.0-poc.28 / DeepSeek Harness 0.1.0-rc.33 — 2026-11-20
 
 - Review Codex CLI and app-server 0.171.0. Cover the new GPT-6.2 catalog and the existing terminal contracts for exact paginated Watch, native status, model and permission selection, and typed questions. See the [0.171.0 review](docs/codex-0.171.0-compatibility.md) for live and fixture coverage.

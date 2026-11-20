@@ -710,7 +710,9 @@ if (args[offset] === "list-panes") {
   process.exit(0);
 }
 if (args[offset] === "capture-pane") {
-  process.stdout.write("Ready\\n❯ ");
+  process.stdout.write(${JSON.stringify(
+    "Ready\n────────────────────────\n❯\n────────────────────────\n  ⏸ manual mode on\n"
+  )});
   process.exit(0);
 }
 process.exit(0);

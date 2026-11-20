@@ -162,7 +162,7 @@ function newThreadAllowed(input: {
   const { subject, facts } = input;
   const lifecycle = facts.runtime.lifecycleCapability;
   return lifecycle.status === "supported" && lifecycle.newThread === true &&
-    (subject.agent !== "claude" || facts.native.claudeAdmission?.lifecycle.ready === true) &&
+    (subject.agent !== "claude" || facts.native.claudeAdmission?.newThread.ready === true) &&
     input.codexLifecycleIncarnationAvailable && !facts.store.terminalHasBlockingTurn &&
     idleAndNotBlocked && facts.composer.automatedInputComposerReady;
 }

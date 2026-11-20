@@ -46,6 +46,7 @@ import {
 import { nativeThreadTransitionResourceBoundOperation } from
   "./native-thread-transition-resource-adapter.js";
 import {
+  assertVerifiedClaudeBeforeObservation,
   assertResumedNativeThreadMatchesCandidate as assertResumedCodexRolloutMatchesCandidate,
   nativeThreadCandidateFileIdentity as codexCandidateFileIdentity,
   prepareNativeThreadVerification,
@@ -1934,6 +1935,14 @@ async function runNativeThreadTransition(
           transitionStep.command,
           {
             runtime: beforeRuntime,
+            ...(terminal.agent === "claude" && operation.kind === "resume_thread" ? {
+              requireExactEmptyComposerBeforeText: true,
+              beforeText: async () => {
+                assertVerifiedClaudeBeforeObservation({ operation, beforeIdentity }, terminal, verificationPorts);
+                if (!beforeRuntime) throw new Error("Claude resume requires the original runtime identity.");
+                await bridge.probeClaudeResumeDraft(terminal.terminalControl, beforeRuntime);
+              }
+            } : {}),
             onTransportStage(event) {
               if (event.stage === "text_injected") {
                 inputStarted = true;

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createClaudeTerminalAgentAdapter } from "../src/claude-terminal-agent-adapter.js";
@@ -33,6 +36,7 @@ import {
   type NativeThreadVerificationAdapterPorts
 } from "../src/native-thread-transition-verification-adapter.js";
 
+const CLAUDE_SCREEN = "✻ Cogitated for 2m · done 19:43 · 2 shells still running\n────────────────────────\n❯\n────────────────────────\n  ⏵⏵ auto mode on · 2 shells · ↓ to manage";
 const BEFORE_THREAD = "11111111-1111-4111-8111-111111111111";
 const AFTER_THREAD = "22222222-2222-4222-8222-222222222222";
 const COMPANION_THREAD = "33333333-3333-4333-8333-333333333333";
@@ -449,7 +453,7 @@ test("Claude verification reads exact rows before each status observation", asyn
         options.runtime?.nativeSessionId,
         AFTER_THREAD
       );
-      return idleStatus("claude-idle");
+      return idleStatus("claude-idle", CLAUDE_SCREEN);
     }
   } as unknown as TerminalAgentBridge;
   const terminal = {
@@ -567,7 +571,7 @@ test("preparation without revalidation invokes its plan and status synchronously
   });
   assert.deepEqual(events, ["plan", "bridge:create", "status:invoke"]);
   assert.ok(resolveStatus);
-  resolveStatus(idleStatus("prepared"));
+  resolveStatus(idleStatus("prepared", CLAUDE_SCREEN));
   await prepared;
   assert.deepEqual(events, [
     "plan",
@@ -585,7 +589,7 @@ test("Claude lifecycle admission retains exact process-start fencing before thre
     const terminal = { conversationId: "terminal:v2:claude-fence", agent: "claude", pid: 777,
       legacy: false, terminalControl: { ...TERMINAL_CONTROL, capabilities: [...TERMINAL_CONTROL.capabilities], currentCommand: "claude" },
       adapter: createClaudeTerminalAgentAdapter() } as ResolvedTerminalConversation;
-    const bridge = { status: async () => { events.push("status"); return idleStatus("idle"); } } as unknown as TerminalAgentBridge;
+    const bridge = { status: async () => { events.push("status"); return idleStatus("idle", CLAUDE_SCREEN); } } as unknown as TerminalAgentBridge;
     const pending = prepareNativeThreadVerification({
       operation: { kind: "new_thread" }, expectedBindingToken: "binding", bindingTokens: ["binding"],
       capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
@@ -593,7 +597,87 @@ test("Claude lifecycle admission retains exact process-start fencing before thre
     }, terminal, { ...basePorts(bridge, events), loadClaudeAgentRows: () => rows,
       plan: () => NEW_THREAD_PLAN, assertReady: () => {}, finalizeIdentity: identity => identity });
     if (startedAt === 1234) assert.equal((await pending).beforeIdentity.sessionId, BEFORE_THREAD);
-    else await assert.rejects(pending, /current idle Claude session.*refresh List and retry/u);
+    else await assert.rejects(pending, /current Claude session identity.*Refresh List and retry/u);
     assert.deepEqual(events, ["bridge:create", "status"], "preparation observes but never sends transition input");
   }
+});
+
+// Exercises both lifecycle entry/settlement with the real adapter and transcript
+// proof. Only the terminal transport is fake; no live session receives input.
+test("Claude resume verifies finished foreground with surviving shells and rejects unsafe transitions", async t => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-resume-foreground-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const project = path.join(home, "projects", "fixture"); fs.mkdirSync(project, { recursive: true });
+  const cwd = TERMINAL_CONTROL.currentPath;
+  const id = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const records = (sessionId: string) => [
+    { type: "user", message: { role: "user", content: "Start a server and finish the foreground" } },
+    { type: "assistant", message: { role: "assistant", id: "launch", stop_reason: "tool_use",
+      content: [{ type: "tool_use", id: "server", name: "Bash", input: { run_in_background: true } }] } },
+    { type: "user", sourceToolAssistantUUID: id(2), toolUseResult: { backgroundTaskId: "server-still-running" }, message: { role: "user",
+      content: [{ type: "tool_result", tool_use_id: "server", content: "Launched" }] } },
+    { type: "assistant", message: { role: "assistant", id: id(100), stop_reason: "end_turn",
+      content: [{ type: "text", text: "Foreground finished; server remains running" }] } },
+    { type: "system", subtype: "turn_duration", durationMs: 200 }
+  ].map((record, index) => ({ ...record, uuid: id(index + 1), parentUuid: index ? id(index) : null,
+    sessionId, cwd, version: "2.1.303", entrypoint: "cli", isSidechain: false, timestamp: "2026-11-19T00:00:00.000Z" }));
+  for (const session of [BEFORE_THREAD, AFTER_THREAD]) fs.writeFileSync(path.join(project, `${session}.jsonl`),
+    records(session).map(r => JSON.stringify(r)).join("\n") + "\n", { mode: 0o600 });
+  let row = { pid: 777, startedAt: 1234, kind: "interactive", cwd, sessionId: BEFORE_THREAD,
+    status: "shell", configDir: home, version: "2.1.303" };
+  let screen = CLAUDE_SCREEN;
+  const bridge = { status: async () => idleStatus("fixture", screen) } as unknown as TerminalAgentBridge;
+  const adapter = createClaudeTerminalAgentAdapter();
+  const terminal = { conversationId: "terminal:v2:claude-resume-fixture", agent: "claude", pid: 777,
+    legacy: false, terminalControl: { ...TERMINAL_CONTROL, capabilities: [...TERMINAL_CONTROL.capabilities] }, adapter } as ResolvedTerminalConversation;
+  const operation = { kind: "resume_thread" as const, nativeThreadId: AFTER_THREAD };
+  const plan = adapter.planThreadLifecycle!(operation, adapter.probeThreadLifecycle!("2.1.303"));
+  assert.ok(plan);
+  assert.deepEqual(plan.steps.map(step => step.command), [`/resume ${AFTER_THREAD}`],
+    "no shell stop, cancel, clear, or restart is added to native resume");
+  const beforeIdentity = { sessionId: BEFORE_THREAD, processStartedAt: 1234, evidence: "fixture" };
+  const ports = { ...basePorts(bridge), loadClaudeAgentRows: () => [row], plan: () => plan,
+    assertReady: () => {}, finalizeIdentity: (identity: TerminalNativeIdentity) => identity };
+  const prepare = () => prepareNativeThreadVerification({ operation, expectedBindingToken: "binding",
+    bindingTokens: ["binding"], capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
+    beforeIdentity }, terminal, ports);
+  assert.equal((await prepare()).beforeIdentity.sessionId, BEFORE_THREAD);
+  await assert.rejects(prepareNativeThreadVerification({
+    operation: { kind: "new_thread" }, expectedBindingToken: "binding", bindingTokens: ["binding"],
+    capabilities: { status: "supported", newThread: true, resumeExact: true, reason: "supported" },
+    beforeIdentity
+  }, terminal, { ...ports, plan: () => NEW_THREAD_PLAN }), /cannot prove its foreground/u,
+  "resume's background-shell exception does not authorize /clear");
+  const beforeFile = path.join(project, `${BEFORE_THREAD}.jsonl`);
+  const completeTranscript = fs.readFileSync(beforeFile);
+  const pendingTool = records(BEFORE_THREAD).filter(record => record.uuid !== id(3))
+    .map(record => record.uuid === id(4) ? { ...record, parentUuid: id(2) } : record);
+  fs.writeFileSync(beforeFile, pendingTool.map(r => JSON.stringify(r)).join("\n") + "\n");
+  await assert.rejects(prepare(), /identity, but cannot prove its foreground/u,
+    "an unreturned foreground tool blocks resume despite an end_turn claim");
+  fs.writeFileSync(beforeFile, completeTranscript);
+  fs.chmodSync(beforeFile, 0o644);
+  await assert.rejects(prepare(), /identity, but cannot prove its foreground/u,
+    "untrusted transcript permissions do not become identity errors or resume authority");
+  fs.chmodSync(beforeFile, 0o600);
+  for (const unsafe of [CLAUDE_SCREEN.replace("❯", "❯ unsent draft"), CLAUDE_SCREEN + "\nunknown dialog",
+    CLAUDE_SCREEN.replace("2 shells · ↓ to manage", "2 shells · ↓ to manage · › stashed")]) {
+    screen = unsafe;
+    await assert.rejects(prepare(), /thread change blocked/u);
+  }
+  screen = CLAUDE_SCREEN;
+  row.status = "busy";
+  await assert.rejects(prepare(), /identity, but cannot prove its foreground/u);
+  row.status = "shell";
+  row.startedAt = 4321;
+  await assert.rejects(prepare(), /session identity/u);
+  row.startedAt = 1234;
+  row.sessionId = AFTER_THREAD;
+  const verify = () => verifyNativeThreadTransition({ operation, plan, beforeIdentity }, terminal, ports);
+  assert.equal((await verify()).sessionId, AFTER_THREAD);
+  screen = CLAUDE_SCREEN.replace("❯", "❯ draft after switch");
+  await assert.rejects(verify(), /did not verify native thread/u);
+  screen = CLAUDE_SCREEN;
+  row.sessionId = BEFORE_THREAD;
+  await assert.rejects(verify(), /did not verify native thread/u);
 });

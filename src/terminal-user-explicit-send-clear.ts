@@ -1,4 +1,6 @@
 import type { ExecutorKind } from "./executors.js";
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
+import { terminalUserExplicitTerminalInputOwnerBlocked } from "./terminal-composer-classifier.js";
 import { sameTerminalControlIncarnation, type TerminalControlRef } from "./terminal-control-ref.js";
 import { TerminalControlInputNotSentError, type TerminalControlProvider } from "./terminal-control-provider.js";
 
@@ -22,6 +24,36 @@ interface ClearInput {
   readonly terminalInputOwnerBlocked: (terminalControl: TerminalControlRef) => boolean;
   readonly verifyClaudeComposerCleared: (requireEmptyStash?: boolean) => Promise<TerminalControlRef>;
   readonly sleep: (milliseconds: number) => Promise<void>;
+}
+
+/** Run the same empty-prompt stash probe for a historical thread transition. */
+export async function probeClaudeResumeDraft(
+  terminalControl: TerminalControlRef,
+  ports: Pick<ClearInput, "provider" | "sleep" | "verifyIdentity"> & {
+    status: () => Promise<{
+      reachable: boolean;
+      activity_state: string;
+      approval_state: { scanned: boolean; blocked: boolean };
+      interaction_state?: unknown;
+      screen: { excerpt?: string };
+    }>;
+  }
+): Promise<void> {
+  await dispatchTerminalUserExplicitComposerClear({
+    ...ports, agent: "claude", terminalControl,
+    terminalInputOwnerBlocked: terminalUserExplicitTerminalInputOwnerBlocked,
+    verifyClaudeComposerCleared: async () => {
+      const status = await ports.status();
+      if (!status.reachable || status.activity_state !== "idle" ||
+          !status.approval_state.scanned || status.approval_state.blocked ||
+          status.interaction_state !== undefined) {
+        throw new Error("Claude resume draft preflight requires the idle, unblocked main prompt.");
+      }
+      const readiness = claudeUserExplicitReadiness(status.screen.excerpt);
+      if (!readiness.ready) throw new Error(readiness.message);
+      return terminalControl;
+    }
+  });
 }
 
 /** Codex replaces its draft. Claude only probes an already empty input; it never writes or erases a marker. */

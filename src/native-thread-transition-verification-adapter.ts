@@ -1,3 +1,4 @@
+import { claudeUserExplicitReadiness } from "./claude-user-explicit-input-proof.js";
 import path from "node:path";
 import type {
   TerminalNativeIdentityFence,
@@ -5,6 +6,7 @@ import type {
   TerminalThreadLifecycleAgentRow,
   TerminalThreadLifecycleCapabilities,
   TerminalThreadLifecycleCandidateToken,
+  TerminalThreadLifecycleObservation,
   TerminalThreadLifecycleOperation,
   TerminalThreadLifecyclePlan
 } from "./terminal-agent-adapter.js";
@@ -177,8 +179,8 @@ function codexBeforeRuntime(
   });
 }
 
-function assertVerifiedClaudeBeforeObservation(
-  request: NativeThreadVerificationPreparationRequest,
+export function assertVerifiedClaudeBeforeObservation(
+  request: Pick<NativeThreadVerificationPreparationRequest, "operation" | "beforeIdentity">,
   terminal: ResolvedTerminalConversation,
   ports: NativeThreadVerificationAdapterPorts
 ): void {
@@ -192,8 +194,27 @@ function assertVerifiedClaudeBeforeObservation(
     agentRows: ports.loadClaudeAgentRows()
   });
   const readiness = claudeLifecycleReadiness({ cwd: terminal.terminalControl.currentPath,
-    expectedNativeThreadId: request.beforeIdentity?.sessionId, observation: observed });
+    expectedNativeThreadId: request.beforeIdentity?.sessionId, observation: observed,
+    allowCompletedForeground: request.operation.kind === "resume_thread" });
   if (!readiness.ready) throw new Error(readiness.message);
+}
+
+function assertClaudeLifecycleComposerReady(status: TerminalBridgeStatus): void {
+  if (!status.reachable || status.activity_state !== "idle" ||
+      !status.approval_state.scanned || status.approval_state.blocked ||
+      status.interaction_state !== undefined) {
+    throw new Error("Claude thread change requires a fresh idle, unblocked main prompt.");
+  }
+  const composer = claudeUserExplicitReadiness(status.screen.excerpt);
+  if (!composer.ready) throw new Error(`Claude thread change blocked: ${composer.reason}. ${composer.message}`);
+}
+
+function claudeLifecycleSettled(
+  observation: TerminalThreadLifecycleObservation,
+  operation: TerminalThreadLifecycleOperation
+): boolean {
+  return observation.idle === true ||
+    operation.kind === "resume_thread" && observation.foregroundComplete === true;
 }
 
 export async function probeCodexCurrentThread(
@@ -323,6 +344,9 @@ export async function prepareNativeThreadVerification(
   );
   ports.assertReady(terminalStatus);
   assertVerifiedClaudeBeforeObservation(request, terminal, ports);
+  if (terminal.agent === "claude" && request.operation.kind === "resume_thread") {
+    assertClaudeLifecycleComposerReady(terminalStatus);
+  }
   if (terminal.agent === "codex") {
     const statusIdentity = await probeCodexCurrentThread({
       terminal,
@@ -573,7 +597,7 @@ export async function verifyNativeThreadTransition(
         if (
           parsed?.status === "verified" &&
           parsed.nativeThreadId &&
-          parsed.idle === true &&
+          claudeLifecycleSettled(parsed, request.operation) &&
           request.beforeIdentity?.processStartedAt !== undefined
         ) {
           const observed: TerminalNativeIdentity = {
@@ -590,6 +614,7 @@ export async function verifyNativeThreadTransition(
             { runtime: ports.runtimeForIdentity(observed) }
           );
           if (status.reachable && status.activity_state === "idle") {
+            if (request.operation.kind === "resume_thread") assertClaudeLifecycleComposerReady(status);
             verifiedIdentity = observed;
           }
         }

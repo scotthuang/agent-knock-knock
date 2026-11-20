@@ -599,6 +599,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-agent-state.ts",
+      "owner": "terminal-agent-core"
+    },
+    {
       "path": "src/claude-conversation-routing-cli-adapter.ts",
       "owner": "agent-session-core"
     },
@@ -679,6 +683,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-native-transcript-chain.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-reader-configuration.ts",
       "owner": "agent-session-core"
     },
@@ -697,6 +705,10 @@
     {
       "path": "src/claude-terminal-registry-observation.ts",
       "owner": "agent-session-core"
+    },
+    {
+      "path": "src/claude-thread-lifecycle-observation.ts",
+      "owner": "terminal-agent-core"
     },
     {
       "path": "src/claude-transcript-background-policy.ts",

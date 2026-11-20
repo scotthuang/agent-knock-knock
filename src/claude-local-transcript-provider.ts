@@ -1,4 +1,5 @@
 import { hasBlockingCompletionWork, hasUnresolvedBackgroundWork } from "./claude-transcript-background-policy.js";
+import { hasClosedClaudeToolBatches } from "./claude-native-transcript-chain.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,10 +10,8 @@ import { defaultClaudeHome, claudeTranscriptAnchorFingerprint,
   "./claude-transcript-config.js";
 export { defaultClaudeHome, claudeTranscriptAnchorFingerprint } from "./claude-transcript-config.js";
 export type { ClaudeTranscriptAnchor } from "./claude-transcript-config.js";
-import {
-  isClaudeAgentIdleState,
-  type ClaudeAgentRow
-} from "./claude-terminal-agent-adapter.js";
+import { isClaudeAgentIdleState } from "./claude-agent-state.js";
+import type { ClaudeAgentRow } from "./claude-agent-state.js";
 import {
   claudeLifecycleSourceVersionSupported,
   claudeRuntimeLifecycleCompatibilityProfile,
@@ -788,7 +787,7 @@ function latestForegroundCompleted(
     sessionId, cwd, expectedRequestHash: hash, expectedPromptUuid: promptUuid,
     records: orderClaudePrewrittenAttachments(entries.map(entry => entry.record)),
     transcriptFileId: transcriptFileId(sessionId, `${opened.stat.dev}:${opened.stat.ino}`)
-  }) !== undefined;
+  }, { allowClosedToolBatches: true }) !== undefined;
 }
 
 /** Capture the latest exact, unfinished root prompt in a live Claude process. */
@@ -2328,7 +2327,7 @@ function matchingManagedPrompt(
 
 function completionFromRecords(
   snapshot: Pick<ClaudeTranscriptTurnSnapshot, "records" | "sessionId" | "cwd" | "expectedRequestHash" | "expectedPromptText" | "expectedPromptUuid" | "transcriptFileId">,
-  options: { requireVerifiableCompletionSignal?: boolean } = {}
+  options: { requireVerifiableCompletionSignal?: boolean; allowClosedToolBatches?: boolean } = {}
 ): TerminalCompletionEvidence | undefined {
   const {
     records,
@@ -2424,7 +2423,8 @@ function completionFromRecords(
   )) {
     return absentOrUnverifiable();
   }
-  if (hasUnresolvedToolUse(descendants)) {
+  if (hasUnresolvedToolUse(descendants) && (!options.allowClosedToolBatches ||
+    !hasClosedClaudeToolBatches(prompt, descendants, sessionId, isClaudeRootHumanPrompt))) {
     return absentOrUnverifiable();
   }
   if (descendants.some(hasBlockingStopSummary)) {
