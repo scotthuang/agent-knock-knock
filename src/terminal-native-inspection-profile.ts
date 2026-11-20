@@ -64,6 +64,7 @@ export const CODEX_NATIVE_STATUS_POPUP_BY_PROFILE: Readonly<
   "codex-tui-0.167.0": CODEX_FULLSCREEN_STATUS_POPUP_ROWS,
   "codex-tui-0.169.0": CODEX_FULLSCREEN_STATUS_POPUP_ROWS,
   "codex-tui-0.170.0": CODEX_FULLSCREEN_STATUS_POPUP_ROWS,
+  "codex-tui-0.171.0": CODEX_FULLSCREEN_STATUS_POPUP_ROWS,
   "codex-tui-generic-v1": CODEX_CLASSIC_STATUS_POPUP_ROWS
 };
 
@@ -98,6 +99,7 @@ export const CODEX_NATIVE_STATUS_MIN_VIEWPORT_BY_PROFILE: Readonly<
   "codex-tui-0.167.0": 80,
   "codex-tui-0.169.0": 80,
   "codex-tui-0.170.0": 80,
+  "codex-tui-0.171.0": 80,
   "codex-tui-generic-v1": 80
 };
 
