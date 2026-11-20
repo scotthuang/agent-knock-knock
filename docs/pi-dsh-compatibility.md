@@ -5,6 +5,13 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Codex 0.171.0 — core 0.16.20 / Pi poc.28 / DSH rc.33
+
+Both connectors pin core 0.16.20 and its synchronized Skill. The
+[Codex 0.171.0 review](codex-0.171.0-compatibility.md) records the app-server
+contract comparison and tested terminal operations. Both prereleases use
+`next` with the existing Host ranges.
+
 ## Custom Codex model labels — core 0.16.19 / Pi poc.27 / DSH rc.32
 
 Both connectors pin core 0.16.19. Its terminal adapter recognizes custom model

@@ -1,0 +1,62 @@
+{
+  "schema": "akk-codex-compatibility-evidence/v1",
+  "versions": {
+    "core": "0.16.20",
+    "pi": "0.1.0-poc.28",
+    "dsh": "0.1.0-rc.33",
+    "cli_frontend": "0.171.0",
+    "app_server": "0.171.0",
+    "tmux": "3.8",
+    "herdr": "0.9.5",
+    "node": "24.18.0"
+  },
+  "platform": "macOS arm64",
+  "schema_comparison": {
+    "before": 957,
+    "after": 968,
+    "changed": 22,
+    "added": 13,
+    "removed": 2
+  },
+  "fast": {
+    "tests": 3501,
+    "passed": 3501,
+    "failed": 0
+  },
+  "real_isolated_checks": {
+    "backend": {
+      "result": "passed",
+      "evidence_sha256": "d34f53e0c634764aec447a8a6fe11c256c895cb0ce32e7986dfb796065316697"
+    },
+    "model": {
+      "result": "passed",
+      "evidence_sha256": "5eecafd3f729ec22b6c233615c5b61d1b965d91f9097b64b1b719824550c1ed3"
+    },
+    "permissions": {
+      "result": "passed",
+      "evidence_sha256": "7dd6fba51d6a8879f283b8732bb7262f09c917e6ad0d391fa56fbf00d7336326"
+    },
+    "approval": {
+      "result": "passed",
+      "evidence_sha256": "38bb1a3a074c177d2bbb367fa29f164437dc2a50abe95b440ee0f726b85a0cf5"
+    },
+    "question": {
+      "result": "passed",
+      "evidence_sha256": "d9e73c809fd1e58f0798b19e3e51e01fbb9daad7840c3fe06ef10f6a8baf3fab"
+    },
+    "tmux": {
+      "result": "passed",
+      "evidence_sha256": "6c1aab938853bb2efed7c18fc8f94f00076e5573c65c508d3ef56b35fee7b935"
+    },
+    "herdr": {
+      "result": "passed",
+      "evidence_sha256": "04a2f77d2206224ceaad77991fbc207b6d2d88ec141241aa75d502b92fb3359d"
+    }
+  },
+  "boundaries": [
+    "Same-version terminal compatibility uses reviewed profiles and a validated runtime surface. Mixed versions do not acquire exact native interaction authority.",
+    "An empty backend-discovery result was injected solely to exercise fallback. The terminal inputs and original app-server turn execution were real.",
+    "Completion uses a local receiver and in-process reconciliation. The blocking-question setup uses a native Plan-mode turn, followed by the public AKK endpoints.",
+    "Workspace preview focus, live async questions, Desktop, production installation and external delivery were outside the live checks."
+  ]
+}

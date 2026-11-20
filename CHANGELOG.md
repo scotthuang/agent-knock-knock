@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.20 / Pi 0.1.0-poc.28 / DeepSeek Harness 0.1.0-rc.33 — 2026-11-20
+
+- Review Codex CLI and app-server 0.171.0. Cover the new GPT-6.2 catalog and the existing terminal contracts for exact paginated Watch, native status, model and permission selection, and typed questions. See the [0.171.0 review](docs/codex-0.171.0-compatibility.md) for live and fixture coverage.
+- Pi poc.28 and DSH rc.33 pin exact core 0.16.20 on their existing `next` channels.
+
 ## 0.16.19 / Pi 0.1.0-poc.27 / DeepSeek Harness 0.1.0-rc.32 — 2026-11-19
 
 - Fix terminal Send and native status preflight for a Codex Composer displaying a custom model name. AKK recognizes the footer layout with names such as `hy4`, `deepseek-v4` and `vendor/model:latest`. The name may include spaces and Unicode letters, up to 128 code points. Task input still requires the existing identity, input ownership and draft checks.

@@ -223,7 +223,7 @@ test("permission discovery requires exact physical and UI authority on Herdr and
     })).available, true);
   }
   const unsafe: Partial<TerminalPermissionControlSafetyFacts>[] = [
-    { agent: "claude" }, { agentVersion: "0.171.0" }, { processBirth: undefined },
+    { agent: "claude" }, { agentVersion: "0.172.0" }, { processBirth: undefined },
     { approvalScanned: false }, { approvalBlocked: true }, { terminalHasInteraction: true },
     { terminalHasBlockingTurn: true }, { hasOrphanedDispatch: true },
     { inputOwnerBlocked: true }, { exactEmptyComposer: false },

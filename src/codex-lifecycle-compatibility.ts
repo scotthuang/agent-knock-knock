@@ -21,16 +21,17 @@ const CODEX_LIFECYCLE_PROFILES: Readonly<Record<string, string>> = Object.freeze
   "0.166.0": "codex-tui-0.166.0",
   "0.167.0": "codex-tui-0.167.0",
   "0.169.0": "codex-tui-0.169.0",
-  "0.170.0": "codex-tui-0.170.0"
+  "0.170.0": "codex-tui-0.170.0",
+  "0.171.0": "codex-tui-0.171.0"
 });
 
-export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2" | "0.159.3" | "0.160.0" | "0.162.1" | "0.164.0" | "0.165.0" | "0.166.0" | "0.167.0" | "0.169.0" | "0.170.0";
+export type CodexPaginatedVersion = "0.158.0" | "0.159.0" | "0.159.2" | "0.159.3" | "0.160.0" | "0.162.1" | "0.164.0" | "0.165.0" | "0.166.0" | "0.167.0" | "0.169.0" | "0.170.0" | "0.171.0";
 export type CodexPaginatedBackendVersion = CodexPaginatedVersion;
 
 /** Versions whose paginated history and physical TUI binding are verified together. */
 export function isCodexPaginatedVersion(value: unknown): value is CodexPaginatedVersion {
   return value === "0.158.0" || value === "0.159.0" || value === "0.159.2" ||
-    value === "0.159.3" || value === "0.160.0" || value === "0.162.1" || value === "0.164.0" || value === "0.165.0" || value === "0.166.0" || value === "0.167.0" || value === "0.169.0" || value === "0.170.0";
+    value === "0.159.3" || value === "0.160.0" || value === "0.162.1" || value === "0.164.0" || value === "0.165.0" || value === "0.166.0" || value === "0.167.0" || value === "0.169.0" || value === "0.170.0" || value === "0.171.0";
 }
 
 /**
