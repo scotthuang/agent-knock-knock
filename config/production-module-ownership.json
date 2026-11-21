@@ -1147,7 +1147,23 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-native-queue.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-public-projection.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-queue-inspection.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-queue-owner.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-queue-submit.ts",
       "owner": "codex-desktop"
     },
     {
@@ -1220,6 +1236,10 @@
     },
     {
       "path": "src/desktop-task-interactions.ts",
+      "owner": "codex-desktop"
+    },
+    {
+      "path": "src/desktop-task-queue.ts",
       "owner": "codex-desktop"
     },
     {

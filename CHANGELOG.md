@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.22 / Pi 0.1.0-poc.30 / DeepSeek Harness 0.1.0-rc.35 — 2026-11-21
+
+- Restore task delegation on macOS Codex Desktop build 29513 when its legacy IPC socket is unavailable. AKK verifies the original Desktop writer before queuing. The queue follows the exact thread if the user manually switches clients. Send reports queue acceptance first, then binds its existing Watch to the executing turn using the original client message ID.
+- Separate persisted Desktop history from live editor and interaction state in Status. Queue-only connections retain draft and identity checks, avoid duplicate submissions and expose no approval, model, permission or cancellation controls. See the [Desktop acceptance evidence](docs/evidence/desktop-29513.md).
+- Coordinate Pi and DeepSeek Harness prereleases with the exact new core. Their supported Host versions and default npm channels are unchanged.
+
 ## 0.16.21 / Pi 0.1.0-poc.29 / DeepSeek Harness 0.1.0-rc.34 — 2026-11-20
 
 - Allow Claude to resume an exact historical session after its foreground turn has completed and returned Bash shells are still running. Revalidate the process, completion and empty main prompt before input. Probe once for a hidden stash and preserve any restored draft before stopping.

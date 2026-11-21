@@ -8,6 +8,8 @@ import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, 
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn } from "../src/desktop-types.js";
+import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
+import { createDesktopQueueObserver, type DesktopQueueObservation } from "../src/desktop-task-queue.js";
 import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
@@ -49,6 +51,127 @@ function harness(t: TestContext) {
   };
   return { dir, repository, state, deps, service: createDesktopTaskService(deps) };
 }
+
+function queueHarness(t: TestContext) {
+  const h = harness(t);
+  const admission = { ownerId: "desktop-writer", endpointId: "shared-socket", cwd: "/project", baselineTurnId: "preexisting-turn" };
+  const queue = { writes: 0, reads: 0, ackLost: false, client: "",
+    observation: { state: "pending", reason: "desktop_queue_turn_not_observed" } as DesktopQueueObservation };
+  h.deps.observe = async () => { throw new DesktopEndpointUnavailable("ECONNREFUSED"); };
+  h.deps.queue = {
+    prepare: async () => admission,
+    submit: async (identity, original, { watchId, clientUserMessageId, prompt }) => {
+      assert.deepEqual(identity, target); assert.deepEqual(original, admission); assert.equal(prompt, input.text);
+      h.repository.withLock(watchId, () => {
+        const task = h.repository.load(watchId)!;
+        assert.equal(task.send_intent!.state, "reserved"); assert.equal(task.send_intent!.client_user_message_id, clientUserMessageId);
+        task.send_intent!.state = "uncertain"; h.repository.save(task, task.revision);
+      });
+      queue.writes++; queue.client = clientUserMessageId;
+      if (queue.ackLost) throw new DesktopIpcError("timeout", "Queue add ACK lost", "unknown");
+      return { queueId: "queue-entry", clientUserMessageId };
+    },
+    observe: async (identity, witness) => {
+      queue.reads++;
+      assert.deepEqual(identity, target);
+      assert.deepEqual(witness, { clientUserMessageId: queue.client, prompt: input.text, baselineTurnId: "preexisting-turn",
+        expectedCwd: "/project", expectedEndpointId: admission.endpointId });
+      return structuredClone(queue.observation);
+    }
+  };
+  return { ...h, queue };
+}
+
+test("native Desktop queue persists distinct queue and turn identities and settles exactly once across recovery", async t => {
+  const h = queueHarness(t);
+  const dispatched = { ...input, callbackRoute: route };
+  const [one, two] = await Promise.all([h.service.send(dispatched), createDesktopTaskService(h.deps).send(dispatched)]);
+  assert.equal(one.id, two.id); assert.equal(h.queue.writes, 1);
+  const pending = h.service.status(one.id);
+  assert.equal(pending.send_intent?.queue_id, "queue-entry");
+  assert.equal(pending.send_intent?.delivery_path, "native_thread_queue");
+  assert.equal(pending.native_turn_id, undefined); assert.equal(pending.status, "awaiting_acceptance");
+  const restarted = createDesktopTaskService(h.deps);
+  await assert.rejects(restarted.watch(dispatched), { code: "no_active_task" });
+  assert.equal(h.repository.list().length, 1);
+  const owner = { controllerSession: input.controllerSession };
+  const deadline = pending.deadline_at;
+  assert.equal((await restarted.recover(pending.id, owner)).deadline_at, deadline);
+  await assert.rejects(restarted.renew(pending.id, owner), { code: "desktop_exact_task_not_active" });
+  h.queue.observation = { state: "matched", turn: turn("execution-turn") };
+  const active = await restarted.reconcile(one.id);
+  assert.equal(active.native_turn_id, "execution-turn");
+  assert.equal(active.send_intent!.queue_id, "queue-entry");
+  assert.equal(active.send_intent!.state, "accepted");
+  assert.equal((await restarted.watch(dispatched)).id, one.id);
+  await assert.rejects(restarted.watch({ ...input, controllerSession: "another-controller" }), { code: "no_active_task" });
+  h.state.now += 60000;
+  assert.ok(Date.parse((await restarted.renew(one.id, owner)).deadline_at) > Date.parse(deadline));
+  h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"),
+    items: [{ id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE" }] } };
+  await Promise.all([restarted.reconcile(one.id), h.service.reconcile(one.id)]);
+  const done = await restarted.reconcile(one.id);
+  assert.equal(done.status, "completed"); assert.equal(done.final_text, "DONE");
+  assert.equal(done.notifications.length, 1); assert.equal(done.notifications[0].status, "accepted");
+  assert.equal(h.state.notifications.length, 1);
+  assert.equal(h.state.notifications[0].envelope.event.metadata?.turn_id, "execution-turn");
+  assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
+  h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
+  assert.equal((await restarted.recover(one.id, owner)).status, "completed");
+  assert.equal((await restarted.reconcile(one.id)).status, "completed");
+});
+
+test("Desktop queue Watch rejects a replaced or unverifiable shared daemon on either side of its read", async t => {
+  const h = queueHarness(t), port = h.deps.queue!, read = port.observe;
+  const task = await h.service.send({ ...input, callbackRoute: route });
+  h.queue.observation = { state: "matched", turn: turn("would-appear-completed", "completed") };
+  for (const [checks, expectedReads, reason] of [
+    [["changed"], 0, "desktop_queue_endpoint_changed"], [["shared-socket", "changed"], 1, "desktop_queue_endpoint_changed"],
+    [["shared-socket", "unavailable"], 1, "desktop_queue_endpoint_unverified"]
+  ] as const) {
+    let count = 0;
+    port.observe = createDesktopQueueObserver(async () => {
+      const value = checks[count++];
+      if (value === "unavailable") throw new Error("daemon disappeared");
+      return value!;
+    }, read);
+    const before = h.queue.reads, pending = await createDesktopTaskService(h.deps).reconcile(task.id);
+    assert.equal(h.queue.reads - before, expectedReads); assert.equal(pending.observation_error, reason);
+    assert.equal(pending.native_turn_id, undefined); assert.equal(pending.notifications.length, 0); assert.equal(h.queue.writes, 1);
+  }
+});
+
+test("lost native queue add ACK does not replay, bind conflicting history or consume a different turn", async t => {
+  const h = queueHarness(t);
+  h.queue.ackLost = true;
+  let result = await h.service.send({ ...input, callbackRoute: route });
+  assert.equal(result.send_intent?.queue_id, undefined);
+  assert.equal(result.send_intent?.state, "uncertain"); assert.equal(result.status, "awaiting_acceptance");
+  const restarted = createDesktopTaskService(h.deps);
+  h.queue.observation = { state: "uncertain", reason: "desktop_queue_submission_conflict" };
+  result = await restarted.reconcile(result.id);
+  assert.equal(result.observation_error, "desktop_queue_submission_conflict"); assert.equal(result.native_turn_id, undefined);
+  assert.equal((await restarted.send({ ...input, callbackRoute: route })).id, result.id);
+  h.queue.observation = { state: "matched", turn: turn("actual", "unknown") };
+  result = await restarted.reconcile(result.id);
+  assert.equal(result.native_turn_id, "actual"); assert.equal(result.status, "watching");
+  assert.equal(result.observation_error, "desktop_queue_turn_status_unconfirmed");
+  await assert.rejects(restarted.watch({ ...input, callbackRoute: route }), { code: "no_active_task" });
+  h.queue.observation = { state: "matched", turn: turn("replacement", "completed") };
+  result = await restarted.reconcile(result.id);
+  assert.equal(result.observation_error, "desktop_submission_turn_conflict"); assert.equal(result.native_turn_id, "actual");
+  assert.equal(result.notifications.length, 0); assert.equal(h.queue.writes, 1);
+});
+
+test("an uncertain legacy request or unsafe legacy connection never opens the native Desktop queue", async t => {
+  const h = queueHarness(t);
+  h.deps.queue!.prepare = async () => assert.fail("unsafe route switch");
+  for (const error of [new DesktopIpcError("timeout", "Unknown", "unknown"), new DesktopIpcError("unsafe_socket", "Unsafe")]) {
+    h.deps.observe = async () => { throw error; };
+    await assert.rejects(h.service.send(input), err => err === error);
+  }
+  assert.deepEqual(h.repository.list(), []); assert.equal(h.queue.writes, 0);
+});
 
 test("Desktop callback reconciliation preserves unclaimed foreign routes for an authorized Host", async t => {
   const h = harness(t);

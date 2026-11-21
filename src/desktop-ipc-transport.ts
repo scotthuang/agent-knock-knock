@@ -5,6 +5,13 @@ import { DesktopIpcError, type DesktopIpcTransport } from "./desktop-types.js";
 
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
+/** The legacy socket was absent or refused the initial connect. No client handshake occurred. */
+export class DesktopEndpointUnavailable extends Error {
+  constructor(public readonly code: "ENOENT" | "ECONNREFUSED") {
+    super("Desktop IPC endpoint is unavailable before connection");
+  }
+}
+
 /** A private parent prevents another OS user replacing a trusted socket path. */
 export function readDesktopSocketIdentity(socketPath: string): string {
   if (!path.isAbsolute(socketPath) || !process.getuid) {
@@ -12,9 +19,11 @@ export function readDesktopSocketIdentity(socketPath: string): string {
   }
   const uid = BigInt(process.getuid());
   const parent = fs.lstatSync(path.dirname(socketPath), { bigint: true });
+  if (parent.isSymbolicLink() || !parent.isDirectory() || parent.uid !== uid || (parent.mode & 0o077n) !== 0n) {
+    throw new DesktopIpcError("unsafe_socket", "Desktop IPC parent must be a private directory owned by the current user");
+  }
   const socket = fs.lstatSync(socketPath, { bigint: true });
-  if (parent.isSymbolicLink() || !parent.isDirectory() || parent.uid !== uid || (parent.mode & 0o077n) !== 0n
-    || socket.isSymbolicLink() || !socket.isSocket() || socket.uid !== uid || (socket.mode & 0o077n) !== 0n) {
+  if (socket.isSymbolicLink() || !socket.isSocket() || socket.uid !== uid || (socket.mode & 0o077n) !== 0n) {
     throw new DesktopIpcError("unsafe_socket", "Desktop IPC socket and parent must be private to the current user and must not be symlinks");
   }
   return [parent.dev, parent.ino, socket.dev, socket.ino, socket.ctimeNs].join(":");
@@ -53,7 +62,12 @@ export function encodeDesktopFrame(message: Record<string, unknown>): Buffer {
 export async function connectDesktopIpcTransport(options: {
   socketPath: string; timeoutMs: number;
 }): Promise<DesktopIpcTransport> {
-  const identity = readDesktopSocketIdentity(options.socketPath);
+  let identity: string;
+  try { identity = readDesktopSocketIdentity(options.socketPath); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new DesktopEndpointUnavailable("ENOENT");
+    throw error;
+  }
   const assertIdentity = () => {
     if (readDesktopSocketIdentity(options.socketPath) !== identity) {
       throw new DesktopIpcError("unsafe_socket", "Desktop IPC socket identity changed; reconnect required");
@@ -81,7 +95,12 @@ export async function connectDesktopIpcTransport(options: {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { cleanup(); reject(new DesktopIpcError("timeout", "Desktop IPC connection timeout")); }, options.timeoutMs);
       const connected = () => { cleanup(); resolve(); };
-      const failed = (error: Error) => { cleanup(); reject(error); };
+      const failed = (error: Error) => {
+        cleanup();
+        const failure = error as NodeJS.ErrnoException;
+        reject(failure.syscall === "connect" && (failure.code === "ECONNREFUSED" || failure.code === "ENOENT")
+          ? new DesktopEndpointUnavailable(failure.code) : error);
+      };
       const cleanup = () => { clearTimeout(timer); socket.off("connect", connected); disconnects.delete(failed); };
       socket.once("connect", connected); disconnects.add(failed);
     });

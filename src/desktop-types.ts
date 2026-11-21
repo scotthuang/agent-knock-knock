@@ -208,7 +208,9 @@ export interface DesktopIpcClientOptions {
   transportFactory?: (options: { socketPath: string; timeoutMs: number }) => Promise<DesktopIpcTransport>;
 }
 export interface DesktopTransportPort {
+  queue?: import("./desktop-task-queue.js").DesktopTaskQueuePort;
   observe(identity: DesktopThreadIdentity): Promise<DesktopSnapshot>;
+  readPersistedTurn?(identity: DesktopThreadIdentity, catalogCwd: string): Promise<DesktopTurn | null>;
   start(identity: DesktopThreadIdentity, options: DesktopSendTurnOptions): Promise<DesktopTurnReceipt>;
   answerAsync?(identity: DesktopThreadIdentity, options: DesktopAsyncAnswerOptions): Promise<DesktopAsyncAnswerReceipt>;
   respondRequest?(identity: DesktopThreadIdentity, options: DesktopRequestOptions): Promise<DesktopRequestReceipt>;

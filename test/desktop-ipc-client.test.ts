@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
 import { DESKTOP_20398_BUILD, DESKTOP_CREATION_BUILD, desktopCapabilityProfile, desktopAttemptCapabilities } from "../src/desktop-compatibility.js";
 import { DesktopIpcClient, VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { DesktopIpcError, type DesktopCompatibility, type DesktopIpcTransport } from "../src/desktop-types.js";
-import { DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
+import { connectDesktopIpcTransport, DesktopEndpointUnavailable, DesktopFrameDecoder, encodeDesktopFrame, readDesktopSocketIdentity } from "../src/desktop-ipc-transport.js";
 import { reduceDesktopSnapshot } from "../src/desktop-snapshot.js";
 
 const UNKNOWN_BUILD = { version: "future", build: "future", applicationIdentityVerified: true };
@@ -393,6 +395,21 @@ test("Desktop IPC trusts only private current-user sockets in a private real dir
   }
 });
 
+test("Legacy endpoint classifies absent and refused sockets only before connection and rejects an unsafe missing endpoint", async t => {
+  const root = fs.mkdtempSync("/tmp/akk-dipc-");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const socketPath = path.join(root, "refused.sock"), bound = path.join(root, "bound.sock");
+  const connectOnce = () => connectDesktopIpcTransport({ socketPath, timeoutMs: 2000 });
+  await assert.rejects(connectOnce, (e: unknown) => e instanceof DesktopEndpointUnavailable && e.code === "ENOENT");
+  fs.chmodSync(root, 0o755);
+  await assert.rejects(connectOnce, (e: unknown) => e instanceof DesktopIpcError && e.code === "unsafe_socket");
+  fs.chmodSync(root, 0o700);
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => server.once("error", reject).listen(bound, resolve));
+  try { fs.chmodSync(bound, 0o600); fs.renameSync(bound, socketPath); }
+  finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  await assert.rejects(connectOnce, (e: unknown) => e instanceof DesktopEndpointUnavailable && e.code === "ECONNREFUSED");
+});
 
 test("Desktop historical verification profiles remain separate from attemptable implemented capabilities", async () => {
   assert.deepEqual(desktopCapabilityProfile(VERIFIED_DESKTOP_BUILD), { send: true, approvals: true, blockingAnswers: true, asyncAnswers: true, nativeControls: true });

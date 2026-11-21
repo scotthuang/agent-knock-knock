@@ -5,6 +5,15 @@ core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update
 requires a new core release.
 
+## Codex Desktop build 29513 — core 0.16.22 / Pi poc.30 / DSH rc.35
+
+Both connectors pin core 0.16.22 and ship its matching Skill on `next`.
+A verified Desktop writer and native queue can offer Send even when the old
+Desktop socket is unavailable. The receipt distinguishes queued work from a
+verified execution turn. Approvals, answers and settings require a connection
+that advertises those actions. See the [Desktop compatibility and validation
+scope](codex-desktop-compatibility.md). Existing Pi and DSH Host ranges apply.
+
 ## Claude historical resume — core 0.16.21 / Pi poc.29 / DSH rc.34
 
 Both connectors pin core 0.16.21 and its synchronized Skill. Claude terminal

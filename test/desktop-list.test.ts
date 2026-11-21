@@ -147,3 +147,61 @@ test("unsupported Desktop sidebar metadata remains an explicit incomplete result
   assert.equal(host.desktop_scan.history_candidates, 341);
   assert.match(host.desktop_scan.limitations[0], /desktop_view=history/);
 });
+
+test("Desktop List checks only held lock hints on this page, caps queue probes and exposes only a fresh queue Send", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "akk-queue-list-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const rows = Array.from({ length: 8 }, (_, i): DesktopCatalogEntry => {
+    const identity = { codexHome: home, hostId: "local", threadId: "00000000-0000-7000-8000-" + String(i).padStart(12, "0") };
+    return { ...identity, conversationId: createDesktopConversationId(identity), cwd: "/fixture", title: "scope-" + i,
+      updatedAtMs: 1, originator: null, projectId: null, sourceKind: null, threadSource: null,
+      catalogMembership: "desktop_catalog", localVerifiable: true, metadataOnly: true, provenance: [] };
+  });
+  rows[7]!.archived = true;
+  const checked: string[] = [];
+  const runtime = { compatibility: { version: "fixture", build: "fixture", applicationIdentityVerified: true },
+    catalog: { async list() { return { sessions: rows, total: 8, complete: true, sources: [] }; } },
+    transport: { async observe() { throw new DesktopIpcError("unsafe_socket", "Identity failure"); }, queue: {
+      async prepare(entry: DesktopCatalogEntry) {
+        checked.push(entry.conversationId);
+        if (entry === rows[2]) throw new DesktopIpcError("thread_not_idle", "private draft");
+        if (entry === rows[3]) throw new Error("private owner/endpoint information");
+        return { ownerId: "private owner", endpointId: "private endpoint", baselineTurnId: "private baseline", cwd: entry.cwd };
+      }
+    } } } as unknown as DesktopRuntime;
+  const result = await listDesktopSessions(runtime, {}, async candidates => {
+    assert.deepEqual(candidates, rows.slice(0, 7));
+    return new Set(rows.slice(1, 7).map(row => row.conversationId));
+  });
+  assert.deepEqual(checked, rows.slice(1, 5).map(row => row.conversationId));
+  assert.equal(result.desktop_scan.live_count, 0); assert.equal(result.desktop_scan.queue_ready_count, 2);
+  for (const version of [4, 5]) {
+    let page = compactAkkListModelProjection(result, { listProjectionVersion: version, listLimit: 50 }) as any;
+    const host = { desktop_scan: page.desktop_scan, desktop_sessions: [...page.desktop_sessions] };
+    while (page.pagination.has_more) {
+      page = compactAkkListModelProjection(result, page.pagination.next_args) as any;
+      host.desktop_sessions.push(...page.desktop_sessions);
+    }
+    const ready = exactHostRow(host, rows[1]!.conversationId);
+    assert.equal(ready.connection_state, "desktop_queue_owner_verified"); assert.equal(ready.activity_state, "unknown");
+    assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.watch, false);
+    assert.equal(ready.capabilities.approve, false); assert.equal(ready.available_actions.native_inspect, undefined);
+    assert.equal(ready.can_send_reason, "native_queue_available");
+    assert.equal(exactHostRow(host, rows[0]!.conversationId).capabilities.send, false);
+    assert.equal(exactHostRow(host, rows[2]!.conversationId).can_send_reason, "desktop_queue_admission_blocked");
+    assert.equal(exactHostRow(host, rows[3]!.conversationId).capabilities.send, false);
+    assert.equal(exactHostRow(host, rows[5]!.conversationId).can_send_reason, "desktop_queue_probe_deferred");
+    assert.equal(host.desktop_scan.queue_ready_count, 2);
+    assert.doesNotMatch(JSON.stringify(host), /private (?:draft|owner|endpoint|baseline)/u);
+  }
+  const raw = result.desktop_sessions[1]!;
+  assert.equal(raw.live_draft_state, "unknown"); assert.equal(raw.pending_interaction_count, null);
+  assert.equal(raw.pending_async_count, null);
+  // A live IPC protocol/identity refusal is conclusive. Never turn it into queue availability.
+  fs.mkdirSync(path.join(home, "ipc"));
+  fs.writeFileSync(path.join(home, "ipc", "ipc.sock"), "");
+  const refused = await listDesktopSessions(runtime, {}, async () => { throw new Error("unexpected queue hint"); });
+  assert.equal(refused.desktop_scan.queue_ready_count, 0);
+  assert.ok(refused.desktop_sessions.every(row => row.observation_error === "unsafe_socket"));
+  assert.equal(checked.length, 4);
+});

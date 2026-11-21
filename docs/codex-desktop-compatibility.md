@@ -1,10 +1,15 @@
 # Codex Desktop support
 
-AKK can discover an existing local Codex Desktop conversation, send a task to
-its original Desktop owner, and monitor the exact native task for completion
-or attention. It can notify and answer asynchronous questions in the same active
-native task. It does not open a second CLI conversation from the same history.
-Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Starting in AKK 0.14.14, an application update alone does not disable these operations: AKK attempts its implemented native contracts and reports actual incompatibility.
+AKK can find an existing local Codex Desktop conversation, send it a task and
+watch that task through completion. With a live connection to the Desktop
+owner, AKK can also handle approvals and questions, change session settings
+and interrupt an exact task.
+
+On build 29513, AKK can queue work for the original thread after verifying its
+Desktop owner. If you manually reopen that thread in another client before the
+message runs, the new client may execute it. The Watch follows the original
+message. AKK keeps interactive controls available only through a verified owner
+connection that supports them.
 
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
@@ -25,6 +30,7 @@ possibly submitted operation.
 | `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
 | `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
+| `26.1117.31558` / `29513` | AKK 0.16.21 lists sidebar conversations. AKK 0.16.22 supports thread-scoped queued Send after verifying the local Desktop writer. Exact task settlement and one local callback were exercised on a dedicated conversation. A manual client switch can change the executor. Approvals, questions and settings require the separate owner IPC. [Evidence and owner boundary](evidence/desktop-29513.md) | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.

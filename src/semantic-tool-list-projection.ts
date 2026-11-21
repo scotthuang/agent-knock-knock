@@ -40,7 +40,7 @@ export function compactAkkListModelProjection(
     ...(Array.isArray(result.desktop_sessions) || recordValue(result.desktop_scan) ? {
       ...(!Array.isArray(result.conversations) ? { desktop_sessions: arrayValue(result.desktop_sessions).map(compactDesktopConversation) } : {}),
       desktop_scan: { ...compactAkkListScalars(recordValue(result.desktop_scan) ?? {}, [
-        "view", "total_candidates", "history_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "application_version", "application_build", "write_contract_verified", "approval_contract_verified", "send_contract_verified", "watch_error", "membership_is_not_live_identity",
+        "view", "total_candidates", "history_candidates", "returned", "next_cursor", "catalog_complete", "live_count", "queue_ready_count", "application_version", "application_build", "write_contract_verified", "approval_contract_verified", "send_contract_verified", "watch_error", "membership_is_not_live_identity",
         "sidebar_status", "sidebar_mode", "sidebar_selection_scope", "live_probe_scope", "compatibility_policy", "application_identity_verified"]),
         limitations: stringArrayValue(recordValue(result.desktop_scan)?.limitations) }
     } : {}),
