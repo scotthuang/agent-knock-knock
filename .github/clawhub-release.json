@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.21",
+  "version": "0.16.22",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "f73434a28547e7decd9441fe10ba10f59020fe45",
-  "asset": "scotthuang-agent-knock-knock-0.16.21.tgz",
-  "sha256": "c30cf6b17c3b45127c743cfc27b392e137f4bc5b9bfc57c43aca7ab3a26ac8e5",
-  "bytes": 4019284,
-  "changelog": "Allow exact Claude historical resume after the foreground settles even when background shells remain. Keep draft and input ownership checks and match interleaved tool results to the exact assistant message."
+  "commit": "f4176480ad78b75ccb91cacb4795bd54baa87436",
+  "asset": "scotthuang-agent-knock-knock-0.16.22.tgz",
+  "sha256": "c43833d0844cb60909a7eebff5b3935f5daf597e2735d4b1bc3573ffd011d68a",
+  "bytes": 4048891,
+  "changelog": "Support an exact, owner-verified Codex Desktop native queue when the legacy IPC endpoint is unavailable. Preserve existing IPC, admission fences, idempotent sends, and exact task observation."
 }
