@@ -11,6 +11,8 @@ import {
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
 import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
+import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
+import { desktopQueueWitness, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopNotification, DesktopStateRepository, DesktopTaskRecord } from "./desktop-state-store.js";
 import { createDesktopTaskRecovery, DesktopTaskError, desktopLive as live, desktopObservationStopped, desktopUnresolvedSend, desktopNotificationObsolete, suppressDesktopNotifications, type DesktopRecoveryInput } from "./desktop-task-recovery.js";
@@ -117,6 +119,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     this.interactionResponsesVerified = deps.interactionResponsesVerified ?? false;
     this.recovery = createDesktopTaskRecovery({ status: id => this.status(id), update: (id, op) => this.update(id, op),
       observe: target => deps.observe(target), applySnapshot: (task, snapshot, recover) => this.applySnapshot(task, snapshot, recover),
+      observeQueue: task => this.observeQueue(task), applyQueue: (task, observed, recover) => this.applyQueue(task, observed, recover),
       deliverPending: (id, notificationId) => this.deliverPending(id, notificationId), now: this.now, expire: task => this.expire(task) });
   }
   status(id: string): DesktopTaskRecord {
@@ -273,17 +276,37 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
           this.notify(task, `manual:${fingerprint}`, `Desktop task ${task.id} is waiting for a question or approval. Handle it manually in Desktop. AKK will continue watching this exact task.`);
         } else delete task.pending_manual_fingerprint;
         revokeObsoleteDesktopManualAttention(task);
-        if (["completed", "failed", "interrupted"].includes(turn.status)) {
-          if (!turn.itemsComplete) task.observation_error = "desktop_exact_turn_items_incomplete";
-          else {
-            task.status = turn.status as "completed" | "failed" | "interrupted";
-            suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
-            task.final_text = finalText(turn); task.pending_manual_count = 0;
-            this.notify(task, "settled", `Desktop task ${task.id} ${task.status}.\n${task.final_text || "No assistant text was returned for this exact turn."}`);
-          }
-        }
+        this.settleTurn(task, turn);
       }
     }
+  }
+  private settleTurn(task: DesktopTaskRecord, turn: DesktopTurn): void {
+    if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") return;
+    if (!turn.itemsComplete) { task.observation_error = "desktop_exact_turn_items_incomplete"; return; }
+    task.status = turn.status;
+    suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
+    task.final_text = finalText(turn); task.pending_manual_count = 0;
+    this.notify(task, "settled", `Desktop task ${task.id} ${task.status}.\n${task.final_text || "No assistant text was returned for this exact turn."}`);
+  }
+  private async observeQueue(task: DesktopTaskRecord): Promise<DesktopQueueObservation> {
+    if (!this.deps.queue) throw new DesktopTaskError("desktop_queue_unavailable", "Native Desktop thread queue observation is unavailable");
+    return this.deps.queue.observe(task.target, desktopQueueWitness(task));
+  }
+  private applyQueue(task: DesktopTaskRecord, observed: DesktopQueueObservation, recover = false): void {
+    const intent = task.send_intent!;
+    task.observed_at = this.now().toISOString();
+    if (intent.state === "reserved" || intent.state === "not_sent" || (!live(task) && !recover)) return;
+    if (observed.state !== "matched") { task.observation_error = observed.reason; return; }
+    const turn = observed.turn;
+    if (intent.baseline_turn_ids.includes(turn.turnId) || (task.native_turn_id && task.native_turn_id !== turn.turnId)) {
+      task.observation_error = "desktop_submission_turn_conflict"; return;
+    }
+    if (["completed", "failed", "interrupted"].includes(task.status)) return;
+    delete task.observation_error;
+    task.native_turn_id = turn.turnId; intent.state = "accepted";
+    if (live(task)) task.status = "watching";
+    if (turn.status === "unknown") task.observation_error = "desktop_queue_turn_status_unconfirmed";
+    this.settleTurn(task, turn);
   }
   private expire(task: DesktopTaskRecord): void {
     if (!desktopObservationStopped(task) && live(task) && this.now().getTime() >= Date.parse(task.deadline_at)) {
@@ -297,14 +320,18 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     const recoverUncertain = initial.status === "timed_out" && !initial.native_turn_id &&
       initial.send_intent && ["reserved", "uncertain"].includes(initial.send_intent.state);
     if (!desktopObservationStopped(initial) && (live(initial) || recoverUncertain)) {
-      let snapshot: DesktopSnapshot | undefined; let observationError: string | undefined;
-      try { snapshot = await this.deps.observe(initial.target); assertSnapshot(initial, snapshot); }
+      let snapshot: DesktopSnapshot | undefined; let observationError: string | undefined; let queued: DesktopQueueObservation | undefined;
+      try {
+        if (initial.send_intent?.delivery_path === "native_thread_queue") queued = await this.observeQueue(initial);
+        else { snapshot = await this.deps.observe(initial.target); assertSnapshot(initial, snapshot); }
+      }
       catch (error) { observationError = errorCode(error); }
       this.update(id, task => {
         if (desktopObservationStopped(task) || !live(task) && !(recoverUncertain && task.status === "timed_out")) return;
         // A concurrent monitor may have advanced a receipt/anchor. Apply only against the observed revision.
         if (task.revision !== initial.revision) return;
-        if (snapshot) {
+        if (queued) this.applyQueue(task, queued, Boolean(recoverUncertain));
+        else if (snapshot) {
           this.applySnapshot(task, snapshot, recoverUncertain);
         } else task.observation_error = observationError;
         this.expire(task);
@@ -319,7 +346,13 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     const id = sendId(input.controllerSession, input.messageId);
     const previous = this.repo.load(id); if (previous) return this.duplicate(previous, input);
     const task = this.make(input, id, "send");
-    const snapshot = await this.deps.observe(input.target); assertSnapshot(task, snapshot);
+    let snapshot: DesktopSnapshot;
+    try { snapshot = await this.deps.observe(input.target); }
+    catch (error) {
+      if (!(error instanceof DesktopEndpointUnavailable) || !this.deps.queue || input.requireEmptyThread) throw error;
+      return this.sendQueue(task, input, await this.deps.queue.prepare(input.target));
+    }
+    assertSnapshot(task, snapshot);
     if (!idle(snapshot)) throw new DesktopTaskError("thread_not_idle", "Desktop thread must be confirmed idle before send");
     if (input.requireEmptyThread && (snapshot.latestTurnId !== null || snapshot.turns.length !== 0)) {
       throw new DesktopTaskError("desktop_creation_thread_changed", "The new conversation already has a task; the initial request was not sent", "not_sent");
@@ -327,17 +360,8 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     task.send_intent = { message_id: input.messageId, client_user_message_id: this.uuid(), text: input.text,
       owner_client_id: snapshot.ownerClientId, baseline_turn_ids: snapshot.turns.map(turn => turn.turnId),
       state: "reserved", dispatched_at: this.now().toISOString() };
-    let created = false;
-    const reserved = this.repo.withLock(id, () => {
-      const existing = this.repo.load(id); if (existing) return this.duplicate(existing, input);
-      // withLock also holds the global store writer lease. This check and the
-      // reservation are atomic across distinct message IDs and CLI workers.
-      if (this.repo.list().some(other => desktopUnresolvedSend(other) && isDeepStrictEqual(other.target, input.target))) {
-        throw new DesktopTaskError("desktop_send_pending", "Another Desktop send is awaiting acceptance for this exact conversation");
-      }
-      const saved = this.repo.save(task, null); created = true; return saved;
-    });
-    if (!created) return reserved;
+    const existing = this.reserveSend(task, input);
+    if (existing) return existing;
     // Durable, non-replayable reservation precedes all native mutation. Even a crash here never retries start.
     try {
       const receipt = await this.deps.start(input.target, { threadId: input.target.threadId,
@@ -377,14 +401,81 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     }
     return this.reconcile(id);
   }
+  private reserveSend(task: DesktopTaskRecord, input: DesktopSendInput): DesktopTaskRecord | undefined {
+    // The global writer lease makes the unresolved-intent scan atomic across distinct message IDs.
+    return this.repo.withLock(task.id, () => {
+      const existing = this.repo.load(task.id); if (existing) return this.duplicate(existing, input);
+      if (this.repo.list().some(other => desktopUnresolvedSend(other) && isDeepStrictEqual(other.target, input.target))) {
+        throw new DesktopTaskError("desktop_send_pending", "Another Desktop send is awaiting acceptance for this exact conversation");
+      }
+      this.repo.save(task, null);
+      return undefined;
+    });
+  }
+  private async sendQueue(task: DesktopTaskRecord, input: DesktopSendInput, admission: DesktopQueueAdmission) {
+    const clientUserMessageId = this.uuid();
+    task.send_intent = { delivery_path: "native_thread_queue", message_id: input.messageId, client_user_message_id: clientUserMessageId,
+      text: input.text, owner_client_id: admission.ownerId, queue_endpoint_id: admission.endpointId, queue_cwd: admission.cwd,
+      baseline_turn_ids: admission.baselineTurnId === null ? [] : [admission.baselineTurnId], state: "reserved", dispatched_at: this.now().toISOString() };
+    const existing = this.reserveSend(task, input); if (existing) return existing;
+    try {
+      // The queue transport checks and claims this exact reservation on disk before its sole native append.
+      const receipt = await this.deps.queue!.submit(task.target, admission, { watchId: task.id, clientUserMessageId, prompt: input.text });
+      this.update(task.id, current => {
+        const intent = current.send_intent!;
+        if (receipt.clientUserMessageId !== clientUserMessageId || !receipt.queueId || intent.state === "reserved") {
+          throw new DesktopTaskError("desktop_queue_receipt_conflict", "Native queue acknowledgement does not match its claim");
+        }
+        intent.queue_id = receipt.queueId;
+      });
+    } catch (error) {
+      this.update(task.id, current => {
+        const intent = current.send_intent!;
+        intent.error_code = errorCode(error);
+        if (current.native_turn_id || intent.queue_id) return;
+        if ((error as { dispatchState?: string })?.dispatchState === "not_sent") {
+          intent.state = "not_sent";
+          if (live(current)) {
+            current.status = "failed";
+            this.notify(current, "settled", `Desktop task ${task.id} was not queued (${intent.error_code}). The same message ID will not be retried.`);
+          }
+        } else intent.state = "uncertain";
+      });
+    }
+    return this.reconcile(task.id);
+  }
   async watch(input: DesktopTaskInput): Promise<DesktopTaskRecord> {
     const task = this.make(input, `desktop-watch:${this.uuid()}`, "watch");
-    const snapshot = await this.deps.observe(input.target); assertSnapshot(task, snapshot);
+    let snapshot: DesktopSnapshot;
+    try { snapshot = await this.deps.observe(input.target); }
+    catch (error) {
+      if (!(error instanceof DesktopEndpointUnavailable) || !this.deps.queue) throw error;
+      return this.reuseQueueWatch(task);
+    }
+    assertSnapshot(task, snapshot);
     const active = snapshot.turns.filter(turn => turn.status === "inProgress");
     if (!snapshot.tailKnown || snapshot.runtimeStatus !== "active" || active.length !== 1 || snapshot.latestTurnId !== active[0].turnId) throw new DesktopTaskError("no_active_task", "Desktop has no uniquely confirmed active task to watch");
     task.native_turn_id = active[0].turnId; this.applySnapshot(task, snapshot);
     this.repo.withLock(task.id, () => this.repo.save(task, null));
     await this.deliverPending(task.id); return this.status(task.id);
+  }
+  private async reuseQueueWatch(request: DesktopTaskRecord): Promise<DesktopTaskRecord> {
+    const matches = this.repo.list().filter(existing => existing.send_intent?.delivery_path === "native_thread_queue" &&
+      existing.desktop_id === request.desktop_id && existing.controller_session === request.controller_session &&
+      isDeepStrictEqual(existing.callback_route, request.callback_route) && !desktopObservationStopped(existing) &&
+      live(existing) && Date.parse(existing.deadline_at) > this.now().getTime());
+    if (matches.length === 1) {
+      const original = matches[0]!, observed = await this.observeQueue(original);
+      if (original.send_intent?.state !== "reserved" && observed.state === "matched" && observed.turn.status === "inProgress") {
+        const existing = this.update(original.id, current => {
+          if (current.revision !== original.revision || desktopObservationStopped(current) || !live(current) ||
+            Date.parse(current.deadline_at) <= this.now().getTime()) throw new DesktopTaskError("desktop_task_changed", "Desktop observation changed; refresh Status");
+          this.applyQueue(current, observed);
+        });
+        if (existing.native_turn_id === observed.turn.turnId && existing.status === "watching" && !existing.observation_error) return existing;
+      }
+    }
+    throw new DesktopTaskError("no_active_task", "No unique active Desktop queue task is proven for this controller");
   }
   async reconcileAll() {
     const scan = this.repo.scanForReconciliation();

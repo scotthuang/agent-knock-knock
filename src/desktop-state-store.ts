@@ -18,6 +18,11 @@ export const DESKTOP_TASKS_DIRECTORY = "desktop-tasks";
 export type DesktopTaskStatus = "awaiting_acceptance" | "watching" | "completed" |
   "failed" | "interrupted" | "timed_out" | "cancelled";
 export interface DesktopSendIntent {
+  /** Absent on legacy owner-IPC tasks. The queue ID is independent of the native turn. */
+  delivery_path?: "native_thread_queue";
+  queue_endpoint_id?: string;
+  queue_cwd?: string;
+  queue_id?: string;
   message_id: string;
   client_user_message_id: string;
   text: string;
@@ -116,7 +121,19 @@ function assertSendIntent(r: DesktopTaskRecord): void {
     i.baseline_turn_ids.some(id => !nonblank(id)) || !validTime(i.dispatched_at) ||
     !["reserved", "uncertain", "accepted", "not_sent"].includes(i.state) ||
     (i.receipt_turn_id !== undefined && !nonblank(i.receipt_turn_id)) ||
-    (i.state === "accepted" && !r.native_turn_id) || (r.native_turn_id && i.state !== "accepted")) throw new Error("invalid Desktop send intent");
+    ((i.state === "accepted") !== Boolean(r.native_turn_id))) throw new Error("invalid Desktop send intent");
+  assertQueueIntent(i, r.native_turn_id);
+}
+function assertQueueIntent(i: DesktopSendIntent, nativeTurnId: string | undefined): void {
+  if (i.delivery_path === "native_thread_queue") {
+    if (!nonblank(i.queue_endpoint_id) || !nonblank(i.queue_cwd) || !path.isAbsolute(i.queue_cwd) || i.baseline_turn_ids.length > 1 ||
+      (i.queue_id !== undefined && (!nonblank(i.queue_id) || ["reserved", "not_sent"].includes(i.state))) ||
+      i.receipt_turn_id !== undefined || (nativeTurnId && i.baseline_turn_ids.includes(nativeTurnId))) {
+      throw new Error("invalid Desktop queue receipt or baseline");
+    }
+  } else if (i.delivery_path !== undefined || i.queue_id !== undefined || i.queue_endpoint_id !== undefined || i.queue_cwd !== undefined) {
+    throw new Error("invalid Desktop send transport");
+  }
 }
 function assertNotification(r: DesktopTaskRecord, n: DesktopNotification, ids: Set<string>): void {
   if (!n || !nonblank(n.id) || ids.has(n.id) ||
@@ -261,10 +278,13 @@ export function createDesktopStateStore(storeDir: string, locks: { acquire(lockP
         assertBackendRecoveryUpdate(current, record);
         if (current.native_turn_id && current.native_turn_id !== record.native_turn_id) throw new Error("Desktop exact turn anchor cannot change");
         if (current.send_intent) {
-          for (const key of ["message_id", "client_user_message_id", "text", "owner_client_id", "baseline_turn_ids", "dispatched_at"] as const) {
+          for (const key of ["message_id", "client_user_message_id", "text", "owner_client_id", "baseline_turn_ids", "dispatched_at", "delivery_path", "queue_endpoint_id", "queue_cwd"] as const) {
             if (!isDeepStrictEqual(current.send_intent[key], record.send_intent?.[key])) throw new Error("Desktop send intent cannot change");
           }
           if (current.send_intent.receipt_turn_id && current.send_intent.receipt_turn_id !== record.send_intent?.receipt_turn_id) throw new Error("Desktop send receipt cannot change");
+          if (current.send_intent.delivery_path === "native_thread_queue" &&
+            ((current.send_intent.queue_id && current.send_intent.queue_id !== record.send_intent?.queue_id) ||
+              (current.send_intent.state !== "reserved" && record.send_intent?.state === "reserved"))) throw new Error("Desktop queue admission cannot be replayed");
         }
       }
       const saved = { ...record, revision: (expectedRevision ?? 0) + 1 }; assertDesktopTaskRecord(saved);

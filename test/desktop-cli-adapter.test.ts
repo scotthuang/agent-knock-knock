@@ -16,10 +16,12 @@ import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 import { createDesktopSessionControls } from "../src/desktop-session-controls.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
+import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
+import { createDesktopPersistedTurnReader } from "../src/desktop-queue-inspection.js";
 import type { DesktopCompatibility, DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../src/desktop-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 
-function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD) {
+function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD, catalogCwd?: string) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId: "desktop-thread" };
@@ -38,9 +40,9 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
   const approvalDecisions: string[] = [];
   let deferredAnswer: DesktopTurnItem | undefined;
   let deferAnswer = false;
-  let readFailure = false;
+  let readFailure: Error | undefined;
   const transport: DesktopTransportPort = {
-    observe: async () => { if (readFailure) throw new Error("private IPC failure"); return structuredClone(snapshot); },
+    observe: async () => { if (readFailure) throw readFailure; return structuredClone(snapshot); },
     async answerAsync(_identity, input) {
       await input.beforeDispatch?.(snapshot); answers++;
       const question = desktopAsyncQuestions(snapshot).find(item => item.id === input.interactionId)!;
@@ -78,7 +80,8 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
   const repository = createDesktopStateStore(storeDir, { acquire: () => () => {} });
   const catalog = new DesktopSessionCatalog({ codexHomes: [target.codexHome], readMetadata: async () => [{
     source: { codexHome: target.codexHome, database: "/fixture/catalog", kind: "desktop_catalog", status: "ok" },
-    rows: [{ thread_id: target.threadId, host_id: "local", display_title: "Desktop test", source_updated_at: 1 }]
+    ...(catalogCwd ? { hosts: { local: "local" } } : {}),
+    rows: [{ thread_id: target.threadId, host_id: "local", display_title: "Desktop test", source_updated_at: 1, cwd: catalogCwd }]
   }] });
   const tasks = createDesktopTaskService({ repository, ...transport, interactionResponsesVerified: desktopCapabilityProfile(compatibility), deliver: () => {
     callbacks++; return { disposition: "accepted", accepted_at: new Date().toISOString(), acceptance_id: "callback-accepted" };
@@ -106,7 +109,8 @@ function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompa
     launchDesktopMonitor: async () => { launches++; return 1234; } };
   const run = async (command: string, options: Record<string, unknown> = {}) => JSON.parse((await executeCliCommand(command,
     { storeDir, ...options }, deps)).stdout);
-  return { id, tasks, run, deps, get snapshot() { return snapshot; }, failReads() { readFailure = true; }, get sends() { return sends; }, get callbacks() { return callbacks; },
+  return { id, tasks, run, deps, transport, get snapshot() { return snapshot; },
+    failReads(error = new Error("private IPC failure")) { readFailure = error; }, get sends() { return sends; }, get callbacks() { return callbacks; },
     get launches() { return launches; }, get closed() { return closed; }, get answers() { return answers; }, approvalDecisions,
     requestApproval(kind: "command" | "file") {
       const method = kind === "command" ? "item/commandExecution/requestApproval" : "item/fileChange/requestApproval";
@@ -171,6 +175,58 @@ test("Desktop Status public progress is fresh, exact-turn scoped and never copie
   assert.equal(JSON.stringify(failed).includes("private IPC failure"), false);
   assert.equal((await f.run("status", { watch: sent.watch_id })).progress.state, "read_error");
   assert.equal(f.callbacks, 1);
+});
+
+test("Desktop Status may display exact persisted history without authorizing input or claiming current GUI state", async t => {
+  const cwd = "/fixture/desktop-target";
+  const f = fixture(t, { ...VERIFIED_DESKTOP_BUILD, applicationIdentityVerified: true }, cwd);
+  const owner = { ownerId: "writer-a", endpointId: "socket-a" };
+  let reads = 0;
+  f.transport.readPersistedTurn = createDesktopPersistedTurnReader(async () => owner, async () => {
+    reads++;
+    return { cwd, latestTurn: { turnId: "disk-turn", status: "completed", itemsComplete: true, items: [
+      { id: "0", type: "reasoning", text: "private reasoning" }, { id: "1", type: "agentMessage", phase: "commentary", text: "Public progress" },
+      { id: "2", type: "agentMessage", phase: "final_answer", text: "Final answer" },
+      { id: "3", type: "agentMessage", phase: "final_answer", delivery: "async", text: "private question" }
+    ] } };
+  });
+  f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
+  assert.equal((await f.run("desktop-list")).desktop_sessions[0].persisted_history, undefined);
+  assert.equal(reads, 0);
+  const status = await f.run("status", { conversation: f.id });
+  assert.equal(reads, 1);
+  assert.equal(status.connection_state, "unconfirmed");
+  assert.equal(status.activity_state, "unknown");
+  assert.equal(status.pending_interaction_count, null);
+  assert.equal(status.capabilities.send || status.capabilities.watch || status.capabilities.approve, false);
+  assert.equal(status.progress.state, "read_error");
+  assert.equal(status.persisted_history.scope, "latest_persisted_turn");
+  assert.deepEqual(status.persisted_history.latest_turn, { id: "disk-turn", status: "completed", items_complete: true, final_text: "Final answer" });
+  assert.equal(status.persisted_history.progress.native_turn_id, "disk-turn");
+  assert.equal(status.persisted_history.progress.text, "Public progress");
+  assert.doesNotMatch(JSON.stringify(status), /private reasoning|private question|writer-a|socket-a/u);
+  assert.equal(f.sends, 0);
+});
+
+test("Desktop persisted Status rejects changed owner, endpoint, cwd, unverified sources and ambiguous legacy errors", async t => {
+  const cwd = "/fixture/desktop-target";
+  for (const change of ["owner", "socket", "cwd", "identity", "catalog", "legacy_denied", "legacy_timeout", "later_disconnect"]) {
+    const f = fixture(t, { ...VERIFIED_DESKTOP_BUILD, applicationIdentityVerified: change !== "identity" }, change === "catalog" ? undefined : cwd);
+    let proofs = 0, reads = 0;
+    f.transport.readPersistedTurn = createDesktopPersistedTurnReader(async () => {
+      proofs++;
+      return { ownerId: proofs === 2 && change === "owner" ? "new" : "old", endpointId: proofs === 2 && change === "socket" ? "new" : "old" };
+    }, async () => { reads++; return { cwd: change === "cwd" ? "/elsewhere" : cwd, latestTurn: null }; });
+    f.failReads(change === "legacy_denied" ? new DesktopIpcError("unsafe_socket", "unsafe") :
+      change === "legacy_timeout" ? new DesktopIpcError("timeout", "timeout") :
+      change === "later_disconnect" ? Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" }) :
+      new DesktopEndpointUnavailable("ENOENT"));
+    const result = await f.run("status", { conversation: f.id });
+    assert.equal(reads, ["owner", "socket", "cwd"].includes(change) ? 1 : 0, change);
+    assert.equal(result.persisted_history, undefined, change);
+    assert.equal(result.activity_state, "unknown", change);
+    assert.equal(result.capabilities.send, false, change);
+  }
 });
 
 test("Desktop CLI sends once, launches exact Watch, recovers completion and enforces controller ownership", async t => {

@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { DesktopIpcClient } from "./desktop-ipc-client.js";
+import { verifyDesktopQueueEndpoint, verifyDesktopQueueOwner } from "./desktop-queue-owner.js";
+import { createDesktopQueueObserver } from "./desktop-task-queue.js";
+import { readDesktopLatestPersistedTurn, readDesktopQueueSubmission } from "./desktop-native-queue.js";
+import { prepareDesktopQueue, submitDesktopQueueOnce } from "./desktop-queue-submit.js";
+import { canInspectDesktopHistory, createDesktopPersistedTurnReader } from "./desktop-queue-inspection.js";
 import { desktopCapabilityProfile } from "./desktop-compatibility.js";
 import { DesktopSessionCatalog } from "./desktop-session-catalog.js";
 import { createDesktopStateStore } from "./desktop-state-store.js";
@@ -54,6 +59,16 @@ export function createDesktopRuntime(options: DesktopRuntimeOptions) {
     return client;
   };
   const transport: DesktopTransportPort = {
+    readPersistedTurn: createDesktopPersistedTurnReader(verifyDesktopQueueOwner, readDesktopLatestPersistedTurn),
+    ...(compatibility.applicationIdentityVerified === true ? { queue: {
+      async prepare(target) {
+        const entry = await catalog.get(target);
+        if (!entry || !canInspectDesktopHistory(target, entry)) throw new Error("Native queue target must match a verified local Desktop catalog entry");
+        return prepareDesktopQueue(target, entry.cwd);
+      },
+      submit: (target, admission, input) => submitDesktopQueueOnce({ target, admission, storeDir: options.storeDir, ...input }),
+      observe: createDesktopQueueObserver(verifyDesktopQueueEndpoint, readDesktopQueueSubmission)
+    } } : {}),
     async observe(identity) {
       const client = await clientFor(identity);
       const owner = await client.discoverOwner(identity.threadId);

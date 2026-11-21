@@ -44,6 +44,8 @@
     "test/desktop-identity.test.ts",
     "test/desktop-ipc-client.test.ts",
     "test/desktop-metadata-reader.test.ts",
+    "test/desktop-native-queue.test.ts",
+    "test/desktop-queue-owner.test.ts",
     "test/desktop-public-projection.test.ts",
     "test/desktop-semantic.test.ts",
     "test/desktop-session-catalog.test.ts",

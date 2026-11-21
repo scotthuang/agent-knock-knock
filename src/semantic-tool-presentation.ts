@@ -717,7 +717,7 @@ export function isSubmissionError(result: unknown): boolean {
   if (!isRecord(result)) {
     return false;
   }
-  if (desktopResult(result)) return !desktopSubmissionAccepted(result);
+  if (desktopResult(result)) return !desktopSubmissionAccepted(result) && !desktopQueueAcknowledged(result);
   if (codexNativeResult(result)) return !codexNativeSubmissionAccepted(result);
   if (isSuccessfulTerminalDispatch(result)) {
     return false;
@@ -766,6 +766,18 @@ function claudeNativeSubmissionAccepted(result: Record<string, unknown>): boolea
     && result.send_state === "accepted" && result.native_thread_id === target.sessionId
     && typeof result.native_input_id === "string" && /^[0-9a-f-]{36}$/u.test(result.native_input_id)
     && isClaudeNativeWatchId(result.watch_id);
+}
+
+function desktopQueueAcknowledged(result: Record<string, unknown>): boolean {
+  if (result.source !== "codex_desktop" || result.delivery_path !== "native_thread_queue" ||
+      result.delivery_receipt !== "native_queue_accepted" || result.queue_receipt_verified !== true ||
+      result.status !== "awaiting_acceptance" || result.delivered !== false || result.agent_acceptance !== "unproven" ||
+      result.send_state !== "uncertain" || result.native_turn_id !== null || result.resend_allowed !== false ||
+      typeof result.queue_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{1,160}$/u.test(result.queue_id) ||
+      typeof result.watch_id !== "string" || !/^desktop-watch:[A-Za-z0-9_-]{8,128}$/u.test(result.watch_id) ||
+      !isDesktopConversationId(result.conversation_id)) return false;
+  try { return parseDesktopConversationId(result.conversation_id).threadId === result.native_thread_id; }
+  catch { return false; }
 }
 
 function desktopSubmissionAccepted(result: Record<string, unknown>): boolean {

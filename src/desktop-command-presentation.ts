@@ -7,6 +7,10 @@ export function formatDesktopCommandResult(result: Record<string, unknown>, acti
   return [`AKK Desktop ${action}: ${state}`,
     `conversation: ${nonBlankString(result.conversation_id) ?? "unknown"}`,
     ...optionalLine(result, "watch_id", "watch"), ...optionalLine(result, "native_turn_id", "native task"),
+    ...(result.delivery_path === "native_thread_queue" ? [
+      ...(result.delivery_receipt === "native_queue_accepted" ? ["Queued for the original thread. AKK is waiting for the exact task to start. Keep the existing Watch; do not resend."] : []),
+      "If you manually reopen this thread in another client, that client may execute its queued work."
+    ] : []),
     ...modelLines(result), ...effectLines(result, state), ...backendCallbackSummaryLines(result),
     ...optionalLine(result, "final_text", "result")].join("\n");
 }

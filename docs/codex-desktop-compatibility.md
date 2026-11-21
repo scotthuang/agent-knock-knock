@@ -25,6 +25,7 @@ possibly submitted operation.
 | `26.1007.30912` / `20156` | Send/Status/Watch, command/file approvals, blocking and asynchronous answers; settings and cancellation not live-verified | Project and projectless creation, original-owner first task |
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
 | `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
+| `26.1117.31558` / `29513` | AKK 0.16.21 lists sidebar conversations. AKK 0.16.22 supports thread-scoped queued Send after verifying the local Desktop writer. Exact task settlement and one local callback were exercised on a dedicated conversation. A manual client switch can change the executor. Approvals, questions and settings require the separate owner IPC. [Evidence and owner boundary](evidence/desktop-29513.md) | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.

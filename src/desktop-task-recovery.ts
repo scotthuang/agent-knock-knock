@@ -4,6 +4,7 @@ import { clearDesktopInteractionAttention } from "./desktop-task-interactions.js
 import { desktopInteractions } from "./desktop-request-interactions.js";
 import type { DesktopNotification, DesktopTaskRecord } from "./desktop-state-store.js";
 import type { DesktopSnapshot, DesktopThreadIdentity } from "./desktop-types.js";
+import type { DesktopQueueObservation } from "./desktop-task-queue.js";
 
 export class DesktopTaskError extends Error {
   constructor(public readonly code: string, message: string, public readonly dispatchState?: "not_sent") { super(message); this.name = "DesktopTaskError"; }
@@ -13,6 +14,8 @@ export interface DesktopRecoveryHost {
   status(id: string): DesktopTaskRecord;
   update(id: string, operation: (task: DesktopTaskRecord) => void): DesktopTaskRecord;
   observe(target: DesktopThreadIdentity): Promise<DesktopSnapshot>;
+  observeQueue(task: DesktopTaskRecord): Promise<DesktopQueueObservation>;
+  applyQueue(task: DesktopTaskRecord, observed: DesktopQueueObservation, recover?: boolean): void;
   applySnapshot(task: DesktopTaskRecord, snapshot: DesktopSnapshot, recover?: boolean): void;
   deliverPending(id: string, notificationId?: string): Promise<void>;
   now(): Date;
@@ -73,6 +76,13 @@ function retryNotification(task: DesktopTaskRecord, id?: string): DesktopNotific
 }
 export function createDesktopTaskRecovery(host: DesktopRecoveryHost) {
   const initial = (id: string, input: DesktopRecoveryInput) => { const task = host.status(id); owner(task, input); open(task); return task; };
+  const observe = async (task: DesktopTaskRecord) => task.send_intent?.delivery_path === "native_thread_queue"
+    ? { kind: "queue" as const, observation: await host.observeQueue(task) }
+    : { kind: "legacy" as const, observation: await host.observe(task.target) };
+  const apply = (task: DesktopTaskRecord, result: Awaited<ReturnType<typeof observe>>) => {
+    if (result.kind === "queue") host.applyQueue(task, result.observation, true);
+    else host.applySnapshot(task, result.observation, true);
+  };
   return {
     close(id: string, input: DesktopRecoveryInput & { reason?: string }): DesktopTaskRecord {
       const task = host.status(id); owner(task, input);
@@ -96,27 +106,31 @@ export function createDesktopTaskRecovery(host: DesktopRecoveryHost) {
       });
     },
     async recover(id: string, input: DesktopRecoveryInput): Promise<DesktopTaskRecord> {
-      const task = initial(id, input); const snapshot = await host.observe(task.target);
+      const task = initial(id, input);
+      if (task.send_intent?.delivery_path === "native_thread_queue" && ["completed", "failed", "interrupted"].includes(task.status)) return task;
+      const observed = await observe(task);
       return host.update(id, current => {
-        fresh(current, task, input); host.applySnapshot(current, snapshot, true);
+        fresh(current, task, input); apply(current, observed);
         host.expire(current); current.recovered_at = host.now().toISOString();
       });
     },
     async renew(id: string, input: DesktopRecoveryInput & { timeoutMs?: number }): Promise<DesktopTaskRecord> {
       const task = initial(id, input); const timeout = timeoutMs(input.timeoutMs);
-      const snapshot = await host.observe(task.target);
+      const observed = await observe(task);
       return host.update(id, current => {
-        fresh(current, task, input); host.applySnapshot(current, snapshot, true);
-        const turn = exactTurn(current, snapshot);
+        fresh(current, task, input); apply(current, observed);
         if (["completed", "failed", "interrupted"].includes(current.status)) return;
-        if (!turn || turn.status !== "inProgress" || snapshot.runtimeStatus !== "active") {
+        const active = observed.kind === "queue"
+          ? observed.observation.state === "matched" && observed.observation.turn.turnId === current.native_turn_id && observed.observation.turn.status === "inProgress"
+          : observed.observation.runtimeStatus === "active" && exactTurn(current, observed.observation)?.status === "inProgress";
+        if (!active) {
           throw new DesktopTaskError("desktop_exact_task_not_active", "Renew needs fresh active evidence for the original Desktop task");
         }
         current.deadline_at = backendRenewalDeadline(current, host.now(), timeout);
         current.renewed_at = host.now().toISOString(); current.renewal_count = (current.renewal_count ?? 0) + 1;
         current.status = "watching"; delete current.unwatched_at;
         suppressDesktopNotifications(current, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
-        host.applySnapshot(current, snapshot);
+        if (observed.kind === "legacy") host.applySnapshot(current, observed.observation);
       });
     },
     async retryCallback(id: string, input: DesktopRecoveryInput & { notificationId?: string }): Promise<DesktopTaskRecord> {

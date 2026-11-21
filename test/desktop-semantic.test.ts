@@ -121,6 +121,14 @@ test("Desktop send presentation separates exact accepted tasks from uncertain re
   ]) assert.equal(toolResult({ ...accepted(), ...changes }, { submissionErrors: true }).isError, true);
   assert.equal(toolResult(accepted(), { submissionErrors: true }).isError, undefined);
   assert.equal(toolResult({ ...accepted(), status: "completed" }, { submissionErrors: true }).isError, undefined);
+  const queued = { ...accepted(), native_turn_id: null, status: "awaiting_acceptance", delivery_path: "native_thread_queue",
+    delivery_receipt: "native_queue_accepted", queue_id: "native-queue-entry", queue_receipt_verified: true,
+    delivered: false, agent_acceptance: "unproven", send_state: "uncertain", resend_allowed: false };
+  assert.equal(toolResult(queued, { submissionErrors: true }).isError, undefined);
+  for (const conflict of [{ native_thread_id: "other" }, { queue_id: null }, { watch_id: null },
+    { delivered: true }, { resend_allowed: true }, { queue_receipt_verified: false }]) {
+    assert.equal(toolResult({ ...queued, ...conflict }, { submissionErrors: true }).isError, true);
+  }
 });
 
 test("Desktop semantic List routes filters and keeps public candidates while stripping native owner and raw state", async t => {

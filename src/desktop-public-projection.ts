@@ -60,8 +60,11 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
   const supportedInteractions = interactions.filter(item => desktopInteractionResponseAttemptable(item.kind, profile));
   const manualCount = task.pending_manual_count + interactions.length - supportedInteractions.length;
   const callback = backendCallbackPublicProjection(task, !terminal, desktopObservationStopped(task));
-  const canCancel = desktopAttemptCapabilities(profile).nativeControls && !terminal && Boolean(task.native_turn_id);
+  const queued = task.send_intent?.delivery_path === "native_thread_queue";
+  const canCancel = !queued && desktopAttemptCapabilities(profile).nativeControls && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
+  const recoveryCapabilities = desktopRecoveryCapabilities(task);
+  if (queued && !task.native_turn_id) { delete recovery_actions.renew; recoveryCapabilities.renew = false; }
   return {
     watch_id: task.watch_id, conversation_id: task.desktop_id, source: "codex_desktop",
     status: task.closed_at ? "closed" : task.status, observation_status: task.status,
@@ -70,14 +73,13 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    pending_manual_count: manualCount, final_text: task.final_text,
-    ...taskInteractionCounts(task, interactions),
+    final_text: task.final_text, ...taskInteractionCounts(task, interactions, manualCount, queued && !terminal),
     interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile)),
     callback_expected: callbackExpected(task, terminal),
     callback_configured: Boolean(task.callback_route), ...callback,
     ...desktopSendReceiptProjection(task.send_intent),
-    capabilities: { callback: Boolean(task.callback_route), interaction_notify: Boolean(task.callback_route),
-      ...interactionCapabilities(supportedInteractions), cancel: canCancel, ...desktopRecoveryCapabilities(task) },
+    capabilities: { callback: Boolean(task.callback_route), interaction_notify: !queued && Boolean(task.callback_route),
+      ...interactionCapabilities(supportedInteractions), cancel: canCancel, ...recoveryCapabilities },
     available_actions: { ...recovery_actions, status: { tool: "agent_knock_knock_status", input: { watch_id: task.watch_id } },
       ...(canCancel ? { cancel: { tool: "agent_knock_knock_cancel", input: { watch_id: task.watch_id } } } : {}) },
     ...(manualCount ? { manual_action: terminal
@@ -90,8 +92,11 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
 function desktopSendReceiptProjection(intent: DesktopTaskRecord["send_intent"]): Record<string, unknown> {
   if (!intent) return {};
   const accepted = intent.state === "accepted";
+  const queued = intent.delivery_path === "native_thread_queue";
   return { message_id: intent.message_id, delivery_receipt: accepted ? "native_task_verified"
-    : intent.state === "not_sent" ? "not_sent" : "acceptance_unproven",
+    : intent.state === "not_sent" ? "not_sent" : queued && intent.queue_id ? "native_queue_accepted" : "acceptance_unproven",
+    ...(queued ? { delivery_path: "native_thread_queue", execution_scope: "original_thread", execution_owner: "thread_owner_at_execution",
+      queue_id: intent.queue_id ?? null, queue_receipt_verified: Boolean(intent.queue_id) } : {}),
     delivered: accepted, agent_acceptance: accepted ? "proven" : "unproven",
     send_state: intent.state, send_error: intent.error_code, resend_allowed: false };
 }
@@ -134,8 +139,9 @@ function callbackExpected(task: DesktopTaskRecord, terminal: boolean): boolean {
   return Boolean(task.callback_route && !desktopObservationStopped(task) &&
     (!terminal || task.notifications.some(note => ["ready", "retry_wait", "leased"].includes(note.status))));
 }
-function taskInteractionCounts(task: DesktopTaskRecord, items: DesktopInteraction[]) {
-  return { pending_async_count: task.observation_error ? null : (task.pending_async_interactions ?? []).length,
+function taskInteractionCounts(task: DesktopTaskRecord, items: DesktopInteraction[], manualCount: number, queueOnly: boolean) {
+  if (queueOnly) return { pending_manual_count: null, pending_async_count: null, async_interactions_state: "unknown", pending_interaction_count: null };
+  return { pending_manual_count: manualCount, pending_async_count: task.observation_error ? null : (task.pending_async_interactions ?? []).length,
     async_interactions_state: task.observation_error ? "unknown" : "current",
     pending_interaction_count: task.observation_error ? null : items.length };
 }
