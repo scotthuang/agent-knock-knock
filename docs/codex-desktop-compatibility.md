@@ -1,10 +1,15 @@
 # Codex Desktop support
 
-AKK can discover an existing local Codex Desktop conversation, send a task to
-its original Desktop owner, and monitor the exact native task for completion
-or attention. It can notify and answer asynchronous questions in the same active
-native task. It does not open a second CLI conversation from the same history.
-Command/file approvals, blocking questions, session settings, and exact task interruption use that same original owner. Starting in AKK 0.14.14, an application update alone does not disable these operations: AKK attempts its implemented native contracts and reports actual incompatibility.
+AKK can find an existing local Codex Desktop conversation, send it a task and
+watch that task through completion. With a live connection to the Desktop
+owner, AKK can also handle approvals and questions, change session settings
+and interrupt an exact task.
+
+On build 29513, AKK can queue work for the original thread after verifying its
+Desktop owner. If you manually reopen that thread in another client before the
+message runs, the new client may execute it. The Watch follows the original
+message. AKK keeps interactive controls available only through a verified owner
+connection that supports them.
 
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
