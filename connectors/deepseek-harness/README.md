@@ -19,7 +19,7 @@ tests, lockfile, bundle manifest, and connector-specific release tag.
 
 ## Compatibility
 
-Connector **0.1.0-rc.35** pins AKK **0.16.22** in its package and lockfile,
+Connector **0.1.0-rc.36** pins AKK **0.16.22** in its package and lockfile,
 including scoped persistent callback recovery and verified running-process
 Codex version discovery, with the reviewed 0.170.0 CLI/backend adaptation and accurate Claude
 pane-observation diagnostics. It exposes that runtime's 27 semantic tools,
@@ -31,7 +31,7 @@ unresolved records.
 A newer root checkout does not silently replace this pinned dependency. This
 RC is published on `next`. The separately reviewed default `latest` remains
 **0.1.0-rc.24 / core 0.16.12** from 2026-11-08; this release does not promote it.
-Use `@next` or **0.1.0-rc.35** for the Desktop build 29513 queue adapter. Send checks the current Desktop writer and native queue. Its Watch follows the submitted message ID to the execution turn.
+Use `@next` or **0.1.0-rc.36** for the Desktop build 29513 queue adapter. Send checks the current Desktop writer and native queue. Its Watch follows the submitted message ID to the execution turn.
 
 The [0.171.0 review](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.20/docs/codex-0.171.0-compatibility.md)
 includes actual CLI/backend and isolated tmux/Herdr checks. It fixes ordinary
@@ -44,21 +44,18 @@ snapshot-stream 13 compatibility. Dedicated-thread Send, exact completion and
 a local callback passed; approvals and question answers were not newly live-tested
 on that build. See the [Desktop evidence](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.17/docs/evidence/desktop-28661.md).
 
-This local adaptation adds **DeepSeek Harness Web 0.2.2-rc.5 / Cordis 4.1.0**
+Connector rc.36 adds **DeepSeek Harness Web 0.2.2-rc.5 / Cordis 4.1.0**
 to the exact supported set. Its development SDK and runtime tests use rc.5,
 including the separately mounted native tool executor and raw JSON batch calls.
 The rc.3 entry and six older entries remain allowed; this change does not claim
 that those older Hosts were retested. rc.4 and other unlisted versions remain
 rejected, as do mixed runtime package sets.
 
-The base connector rc.35 pins core 0.16.22, retaining the Claude managed Send
-and resume fixes. The rc.5 adaptation is a local build, not a registry release;
-identify its artifact by source revision and SHA256, not the unchanged package
-version alone. See the [compatibility record](../../docs/pi-dsh-compatibility.md#dsh-022-rc5-local-adaptation--2026-11-25).
+See the [rc.5 compatibility record](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.36/docs/pi-dsh-compatibility.md#dsh-022-rc5--connector-rc36).
 
 | Scope | Declared / validated boundary |
 | --- | --- |
-| Local Web baseline | DSH `0.2.2-rc.5`, Cordis `4.1.0` |
+| Reviewed Web baseline | DSH `0.2.2-rc.5`, Cordis `4.1.0` |
 | Previous Web baseline (retained) | DSH `0.2.2-rc.3` |
 | Previously reviewed DSH RCs | `0.1.1-rc.2`, `0.1.5-rc.2`, `0.2.0-rc.2`, `0.2.1-rc.2` |
 | Separate preview coverage | `0.1.2-alpha.1`, `0.2.1-alpha.2` |
@@ -92,7 +89,7 @@ embedded launcher are outside this connector's validated scope. Existing Codex C
 terminal container when their advertised capability is available. Claude Code
 and terminal-specific operations retain their documented transport conditions;
 see [core compatibility](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.13/README.md#compatibility) and the
-[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.35/docs/pi-dsh-compatibility.md). This connector does
+[Pi/DSH validation matrix](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.36/docs/pi-dsh-compatibility.md). This connector does
 not launch replacement coding processes or create terminal panes.
 
 ## Demo
@@ -157,13 +154,13 @@ are unaffected by a tag change.
 
 DSH `0.2.1-rc.2` requires connector `0.1.0-rc.6` or a later release that
 explicitly supports that Host. Connector `0.1.0-rc.5` does not support this RC.
-For DSH **0.2.2-rc.3**, install this exact connector version (or verify that
+For DSH **0.2.2-rc.5** or **0.2.2-rc.3**, install this exact connector version (or verify that
 `@next` still selects it). The bare package currently selects rc.24, which does
 **not** support this Host. Users of older Hosts should inspect the compatibility
 notes rather than treating retained peer entries as a new live acceptance run.
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.35
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.36
 ```
 
 Stop the current Web Host cleanly if it is running, then start a fresh process
@@ -470,7 +467,7 @@ exact reviewed version:
 
 ```sh
 dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@next
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.35
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.36
 ```
 
 Restart the Web Host after either operation. The connector pins the exact AKK
@@ -674,7 +671,7 @@ npm run pack:check
 
 These commands typecheck the connector, run its fast wiring/profile/IPC/schema
 tests, and inspect the package tarball. They do not publish anything. The
-checkout lockfile uses the published DeepSeek Harness `0.2.2-rc.3`
+checkout lockfile uses the published DeepSeek Harness `0.2.2-rc.5`
 SDK packages and Cordis `4.1.0`. Its real ToolRuntime regression checks
 canonical result rendering, exact Agent ownership, typed questionnaire payloads,
 and rejection before dispatch when targets are ambiguous or stale. This is
@@ -719,7 +716,7 @@ gate to both connectors. Their package versions are validated independently.
 Publishing additionally requires both explicit flags:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-rc.35
+npm run release:check -- --publish --confirm-version 0.1.0-rc.36
 ```
 
 New prereleases publish to `next`; stable publications use `latest`. A reviewed
@@ -731,17 +728,17 @@ use the connector-specific namespace
 `deepseek-harness-v<version>` and are created separately after npm verification.
 
 
-### Reproduce the isolated rc.29 install smoke
+### Reproduce the isolated rc.36 install smoke
 
 Install the exact public Host and connector into a fresh directory, then run
-[`scripts/smoke-installed.mjs`](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.35/connectors/deepseek-harness/scripts/smoke-installed.mjs)
+[`scripts/smoke-installed.mjs`](https://github.com/scotthuang/agent-knock-knock/blob/deepseek-harness-v0.1.0-rc.36/connectors/deepseek-harness/scripts/smoke-installed.mjs)
 from this release's source checkout:
 
 ```sh
 smoke_dir="$(mktemp -d)"
 npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund \
-  @deepseek-ai/dsh@0.2.2-rc.3 \
-  @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.35
+  @deepseek-ai/dsh@0.2.2-rc.5 \
+  @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.36
 node connectors/deepseek-harness/scripts/smoke-installed.mjs "$smoke_dir"
 ```
 
@@ -749,6 +746,6 @@ The smoke verifies real launcher-owned SDK resolution, Cordis/native executor,
 the pinned public core/Skill handshake and List/Status through the Host batch
 API. Discovery and task content are synthetic fixtures. Lifecycle workers and
 callback transport are disabled; it does not start a Web server, use a model,
-read user sessions, or send a channel message. The other six allowed Host
+read user sessions, or send a channel message. The other seven allowed Host
 versions, live task-to-callback delivery, downgrade and rolling upgrade are not
 revalidated by this check. Remove only the temporary smoke directory afterward.

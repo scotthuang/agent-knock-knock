@@ -1,5 +1,10 @@
 # Changelog
 
+## DeepSeek Harness 0.1.0-rc.36 — 2026-11-25
+
+- Support DSH Web 0.2.2-rc.5 with Cordis 4.1.0. The launcher and its SDK packages must match. A mixed rc.3/rc.5 runtime or an unlisted Host version still fails before tool registration.
+- The connector pins AKK core 0.16.22 and uses the npm `next` channel. The seven earlier Host versions retain their existing support status. See the [compatibility record](docs/pi-dsh-compatibility.md#dsh-022-rc5--connector-rc36).
+
 ## 0.16.22 / Pi 0.1.0-poc.30 / DeepSeek Harness 0.1.0-rc.35 — 2026-11-21
 
 - Restore task delegation on macOS Codex Desktop build 29513 when its legacy IPC socket is unavailable. AKK verifies the original Desktop writer before queuing. The queue follows the exact thread if the user manually switches clients. Send reports queue acceptance first, then binds its existing Watch to the executing turn using the original client message ID.
