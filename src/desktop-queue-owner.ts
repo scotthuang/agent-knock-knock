@@ -10,7 +10,7 @@ export interface DesktopQueueOwner {
   /** Opaque process-incarnation/lock evidence. Never an independent write credential. */
   ownerId: string;
   endpointId: string;
-  draft: "none_persisted" | "present" | "unknown";
+  draft: "none_persisted" | "present" | "retained_editor" | "unknown";
   /** The renderer can hold buffered edits that are not present in the atom file. */
   liveDraft: "unknown";
 }
@@ -89,18 +89,20 @@ export function desktopQueueAccountEvidence(value: unknown, threadId: string) {
 }
 
 function persistedDraft(banks: RecordValue[], threadId: string): DesktopQueueOwner["draft"] {
-  let available = false;
-  for (const key of ["composer-prompt-drafts-v2", "composer-prompt-drafts-v1", "composer-retained-documents-v1"]) {
+  let available = false, malformed = false;
+  for (const key of ["composer-retained-documents-v1", "composer-prompt-drafts-v2", "composer-prompt-drafts-v1"]) {
     // Observe both banks conservatively during save/migration. Never return a draft's contents.
     for (const bank of banks) {
       const entries = bank[key];
       if (entries === undefined) continue;
-      if (!record(entries)) return "unknown";
+      if (!record(entries)) { malformed = true; continue; }
       if (key === "composer-prompt-drafts-v2") available = true;
-      if (entries[`local:${threadId}`] != null || entries[threadId] != null) return "present";
+      if (entries[`local:${threadId}`] != null || entries[threadId] != null) {
+        return key === "composer-retained-documents-v1" ? "retained_editor" : "present";
+      }
     }
   }
-  return available ? "none_persisted" : "unknown";
+  return available && !malformed ? "none_persisted" : "unknown";
 }
 
 async function readDraft(target: DesktopThreadIdentity) {

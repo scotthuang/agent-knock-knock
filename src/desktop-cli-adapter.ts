@@ -153,12 +153,14 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
     let history;
     let session = desktopSessionProjection(entry, undefined, false, error instanceof DesktopIpcError ? error.code : "live_owner_not_confirmed");
     if (error instanceof DesktopEndpointUnavailable && runtime.compatibility.applicationIdentityVerified === true &&
-        runtime.transport.readPersistedTurn && canInspectDesktopHistory(identity, entry)) {
+        canInspectDesktopHistory(identity, entry)) {
       session = await projectDesktopQueueAvailability(runtime, entry, error);
-      try {
-        const turn = await runtime.transport.readPersistedTurn(identity, entry.cwd);
-        history = desktopPersistedHistoryProjection(turn, cliNow().toISOString());
-      } catch { /* The shared reader cannot substitute an unverified writer's history. */ }
+      if (runtime.transport.readPersistedTurn) {
+        try {
+          const turn = await runtime.transport.readPersistedTurn(identity, entry.cwd);
+          history = desktopPersistedHistoryProjection(turn, cliNow().toISOString());
+        } catch { /* The shared reader cannot substitute an unverified writer's history. */ }
+      }
     }
     output({ ...session, progress: backendPublicProgressReadError(null, cliNow().toISOString()), ...history });
   }

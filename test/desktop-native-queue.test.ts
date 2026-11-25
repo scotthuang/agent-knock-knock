@@ -5,7 +5,12 @@ import http from "node:http";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { WebSocketServer } from "ws";
+import { createTerminalWatchOpenClawCallbackRoute } from "../src/callback-transport.js";
+import { createDesktopConversationId } from "../src/desktop-identity.js";
+import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
 import { readDesktopLatestPersistedTurn, readDesktopQueueSubmission } from "../src/desktop-native-queue.js";
+import { desktopTaskProjection } from "../src/desktop-public-projection.js";
+import { createDesktopTaskService, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { fixtureWriter } from "./desktop-native-queue-experiment.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
 
@@ -26,8 +31,11 @@ async function fixture(t: TestContext) {
   const server = http.createServer(), sockets = new WebSocketServer({ server });
   const state = {
     pages: new Map<string, ReturnType<typeof page>>([["", page([turn("baseline", [user("baseline-msg", "prior")])])]]),
+    queuePages: new Map<string, ReturnType<typeof page>>(),
     replacementHeadAfterCursor: undefined as ReturnType<typeof page> | undefined,
     threadStatus: "notLoaded", rejectReceipt: false, loseAck: false, queued: [] as unknown[], methods: [] as string[],
+    queueListError: 0, queueAddError: undefined as { code: number; message: string } | undefined,
+    directInput: undefined as boolean | undefined, serverVersion: "0.171.0",
     home, socketAlias: alias, socketLocal: local, target: { codexHome: home, threadId, hostId: "local" }
   };
   sockets.on("connection", ws => ws.on("message", bytes => {
@@ -35,19 +43,24 @@ async function fixture(t: TestContext) {
     state.methods.push(method);
     if (!id) return;
     let result: unknown;
-    if (method === "initialize") result = { userAgent: "codex/0.171.0", codexHome: home, platformFamily: "unix", platformOs: "macos" };
+    if (method === "initialize") result = { userAgent: "codex/" + state.serverVersion, codexHome: home, platformFamily: "unix", platformOs: "macos" };
     else if (method === "thread/read") result = { thread: { id: threadId, sessionId: threadId, cliVersion: "0.171.0", originator: "codex_work_desktop",
-      source: "vscode", ephemeral: false, threadSource: "user", cwd: home, historyMode: "paginated", status: {type: state.threadStatus}, turns: [] } };
+      source: "vscode", ephemeral: false, threadSource: "user", cwd: home, historyMode: "paginated", status: {type: state.threadStatus},
+      canAcceptDirectInput: state.directInput, turns: [] } };
     else if (method === "thread/turns/list") {
       result = state.pages.get(params.cursor ?? "");
       if (params.cursor && state.replacementHeadAfterCursor) state.pages.set("", state.replacementHeadAfterCursor);
     }
-    else if (method === "thread/queue/list") result = page(state.queued);
+    else if (method === "thread/queue/list") {
+      if (state.queueListError) { ws.send(JSON.stringify({id, error: {code: state.queueListError, message:"list unavailable"}})); return; }
+      result = state.queuePages.get(params.cursor ?? "") ?? page(state.queued.slice(0, params.limit), state.queued.length > params.limit ? "more" : null);
+    }
     else if (method === "thread/queue/add") {
       assert.equal(params.threadId, threadId);
+      if (state.queueAddError) { ws.send(JSON.stringify({id, error: state.queueAddError})); return; }
       state.queued.push({ id: "queue-id", clientUserMessageId: params.clientUserMessageId, input: params.input });
       if (state.loseAck) { ws.terminate(); return; }
-      result = { queuedSubmission: state.rejectReceipt ? { id: "wrong", clientUserMessageId: "other", input: [] } : state.queued[0] };
+      result = { queuedSubmission: state.rejectReceipt ? { id: "wrong", clientUserMessageId: "other", input: [] } : state.queued.at(-1) };
     } else throw new Error("Unexpected native method in queue fixture");
     ws.send(JSON.stringify({ id, result }));
   }));
@@ -90,23 +103,29 @@ test("native queue requires a genuine fresh admission and exact pending store re
   assert.equal(writer.repo.load(watchId)?.send_intent?.state, "reserved");
   assert.deepEqual(await submit(await prepare()), {clientUserMessageId: clientId, queueId: "queue-id"});
   assert.equal(writer.repo.load(watchId)?.send_intent?.state, "uncertain");
-  await assert.rejects(prepare(), /not empty/);
-  s.queued.length=0; // Owner consumed it. A second admission must still not dispatch the same reservation.
+  assert.ok((await prepare()).notices?.includes("desktop_queue_appends_behind_existing"));
+  await assert.rejects(submit(await prepare()), (err: unknown) => err instanceof DesktopIpcError && err.dispatchState === "unknown");
+  s.queued.length=0; // Consumption still does not make the same reservation dispatchable.
   await assert.rejects(submit(await prepare()), (err: unknown) => err instanceof DesktopIpcError && err.dispatchState === "unknown");
   assert.equal(s.methods.filter(m => m === "thread/queue/add").length,1);
 });
 
-test("busy, question, unsafe baseline, malformed receipt and lost ACK preserve single native dispatch", async t => {
+test("an active unanswered question blocks; malformed or lost acknowledgements preserve single dispatch", async t => {
   const s = await fixture(t), writer = await fixtureWriter(s.target);
   const prepare = () => writer.prepareDesktopQueue(s.target, s.home);
   const base = s.pages.get("")!;
-  for (const variant of [turn("active", [user()], {status:"inProgress",completedAt:null}),
-    turn("synthetic", [user()], {status:"interrupted",completedAt:null}),
-    turn("question", [user(), {id:"q",type:"agentMessage",text:"choose",delivery:"async", questions:[{title:"q", options:null}]}]),
-    turn("approval", [user(), {id:"q",type:"fileChange",status:"inProgress"}])]) {
-    s.pages.set("", page([variant]));
-    await assert.rejects(prepare(), (err: unknown) => err instanceof DesktopIpcError && err.dispatchState === "not_sent");
+  const question = {id:"q",type:"agentMessage",text:"choose",delivery:"async",questions:[{title:"q",options:null}]};
+  s.pages.set("", page([turn("question", [user(), question], {status:"inProgress",completedAt:null})]));
+  await assert.rejects(prepare(), {reason:"desktop_queue_question_pending",dispatchState:"not_sent"});
+  for (const overlay of [{moderation:{moderated:false,display:"desktop"}}, {}]) {
+    const itemsView = "moderation" in overlay ? "full" : "summary";
+    s.pages.set("", page([turn("question", [{...question,...overlay}], {status:"inProgress",itemsView})]));
+    await assert.rejects(prepare(), {reason:"desktop_queue_question_pending",dispatchState:"not_sent"});
   }
+  assert.equal(s.methods.includes("thread/queue/add"), false);
+  s.pages.set("", page([turn("question", [user(),question,
+    user("answer","human",'<send_user_message_question_reply>{"questionItemId":"q","answer":"ok"}</send_user_message_question_reply>')], {status:"inProgress",completedAt:null})]));
+  assert.equal((await prepare()).baselineTurnId, "question");
   s.pages.set("",base);
   for (const variant of ["loseAck","rejectReceipt"] as const) {
     s.queued.length = 0; s[variant] = true;
@@ -119,6 +138,70 @@ test("busy, question, unsafe baseline, malformed receipt and lost ACK preserve s
     s[variant] = false;
   }
   assert.deepEqual(s.methods.filter(m => m.includes("queue/add")), ["thread/queue/add", "thread/queue/add"]);
+});
+
+test("ordinary Send appends behind human input across active work, approval and unfamiliar history", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  const approval = {id:"command",type:"commandExecution",status:"inProgress"};
+  const children = [{id:"child",type:"subAgentActivity",kind:"started"}, {id:"future",type:"futureActivity",status:"unknown"}];
+  const other = {id:"human-queued",clientUserMessageId:"human",input:[{type:"text",text:"first"}]};
+  s.serverVersion = "0.999.0";
+  s.pages.set("", page([turn("baseline", children)]));
+  writer.setOwner({draft:"unknown"});
+  assert.ok((await writer.prepareDesktopQueue(s.target,s.home)).notices?.includes("desktop_queue_draft_unknown"));
+  s.queued.push(other);
+  s.pages.set("", page([turn("baseline", [approval, ...children], {status:"inProgress",completedAt:null})]));
+  const a = await writer.prepareDesktopQueue(s.target,s.home);
+  assert.ok(a.notices?.includes("desktop_queue_parent_running"));
+  assert.ok(a.notices?.includes("desktop_queue_appends_behind_existing"));
+  const watchId = "desktop-watch:queue-tail";
+  writer.reserve(watchId,a,clientId,prompt);
+  s.queueListError = -32603; // read depth became unavailable on the same attested endpoint.
+  assert.ok((await writer.prepareDesktopQueue(s.target,s.home)).notices?.includes("desktop_queue_depth_unknown"));
+  await writer.submitDesktopQueueOnce({target:s.target,admission:a,storeDir:writer.storeDir,watchId,clientUserMessageId:clientId,prompt});
+  assert.deepEqual(s.queued,[other,{id:"queue-id",clientUserMessageId:clientId,input:[{type:"text",text:prompt,text_elements:[]}]}]);
+  assert.equal(s.methods.filter(method => method === "thread/queue/add").length,1);
+  assert.ok(!s.methods.some(method => ["thread/queue/start","thread/queue/delete","thread/queue/update","thread/queue/reorder","turn/steer"].includes(method)));
+});
+
+test("known draft, editor, direct input denial, unavailable queue or changed anchor cannot dispatch", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  const prepare = () => writer.prepareDesktopQueue(s.target,s.home);
+  for (const [draft,reason] of [["present","desktop_queue_saved_draft"],["retained_editor","desktop_queue_retained_editor"]]) {
+    writer.setOwner({draft}); await assert.rejects(prepare(),{reason,dispatchState:"not_sent"});
+  }
+  writer.setOwner();
+  s.directInput=false; await assert.rejects(prepare(),{reason:"desktop_queue_write_denied"}); s.directInput=true;
+  s.queued.push({ id: "missing-client-id", input: [] });
+  await assert.rejects(prepare(), {reason:"desktop_queue_contract_unavailable"});
+  s.queued.length = 0;
+  s.queueListError=-32601; await assert.rejects(prepare(),{reason:"desktop_queue_contract_unavailable"});
+  s.queueListError=0;
+  const a=await prepare(), watchId="desktop-watch:queue-anchor";
+  writer.reserve(watchId,a,clientId,prompt);
+  s.pages.set("",page([turn("different",[])]));
+  await assert.rejects(writer.submitDesktopQueueOnce({target:s.target,admission:a,storeDir:writer.storeDir,watchId,clientUserMessageId:clientId,prompt}),{code:"owner_changed"});
+  s.pages.set("",page([])); await assert.rejects(prepare(),{reason:"desktop_queue_baseline_unavailable"});
+  assert.equal(s.methods.includes("thread/queue/add"),false);
+  assert.equal(writer.repo.load(watchId)?.send_intent?.state,"reserved");
+});
+
+test("queue capacity and permission rejections are distinguished from unknown dispatch errors", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  for (const [message,code,expected,state] of [
+    ["queue cannot contain more than 100 submissions",-32600,"desktop_queue_full","not_sent"],
+    ["direct app-server input is not allowed for unloaded spawned sub-agents",-32600,"desktop_queue_write_denied","not_sent"],
+    ["queue cannot contain more than 100 submissions",-32603,"rpc_error","unknown"],
+    ["ambiguous rejected response",-32600,"rpc_error","unknown"],
+  ] as const) {
+    const watchId="desktop-watch:queue-error-"+s.methods.length;
+    const a=await writer.prepareDesktopQueue(s.target,s.home);
+    writer.reserve(watchId,a,clientId,prompt);
+    s.queueAddError={code,message};
+    await assert.rejects(writer.submitDesktopQueueOnce({target:s.target,admission:a,storeDir:writer.storeDir,watchId,clientUserMessageId:clientId,prompt}),
+      {code:expected,dispatchState:state});
+  }
+  assert.equal(s.methods.filter(method=>method==="thread/queue/add").length,4);
 });
 
 test("correlation spans pages, ignores equal human text, and does not settle transient terminal projections", async t => {
@@ -165,6 +248,17 @@ test("persisted reads reject an empty continuation and emit only public output a
   assert.ok(s.methods.every(method => !method.startsWith("thread/queue/")));
 });
 
+test("only turns after the Send baseline need full content for exact task attribution", async t => {
+  const s = await fixture(t);
+  const anchor = { id: "baseline", status: "future_state", itemsView: "notLoaded" };
+  s.pages.set("", page([turn("original-turn", [user()]), anchor, { id: "older", itemsView: "summary" }]));
+  const result = await readDesktopQueueSubmission(s.target, input);
+  assert.equal(result.state, "matched");
+  if (result.state === "matched") assert.equal(result.turn.turnId, "original-turn");
+  s.pages.set("", page([{id:"newer",itemsView:"summary"}, turn("original-turn", [user()]), anchor]));
+  await assert.rejects(readDesktopQueueSubmission(s.target, input));
+});
+
 test("edited, steered, ambiguous or unanchored native history cannot prove the task", async t => {
   const s = await fixture(t), baseline = turn("baseline", []);
   const cases = [
@@ -181,7 +275,85 @@ test("edited, steered, ambiguous or unanchored native history cannot prove the t
     assert.equal((await readDesktopQueueSubmission(s.target, input)).state, "uncertain");
   }
   s.pages.set("", page([baseline, turn("old", [user()])]));
-  assert.equal((await readDesktopQueueSubmission(s.target,input)).state, "pending");
+  assert.deepEqual(await readDesktopQueueSubmission(s.target,input), { state: "uncertain", reason: "desktop_queue_ack_unconfirmed" });
   s.pages = new Map([["",page([turn("a",[user()])],"cycle")],["cycle",page([turn("unrelated",[])],"cycle")]]);
   assert.equal((await readDesktopQueueSubmission(s.target,input)).state, "uncertain");
+});
+
+test("queue position changes, edits or disappearance never attest execution; only the original message in its own later turn can settle", async t => {
+  const s = await fixture(t), witness = { ...input, acknowledgedQueueId: "ack-id" };
+  const row = (id: string, clientUserMessageId: string, text: string) => ({
+    id, clientUserMessageId, input: [{ type: "text", text, text_elements: [] }]
+  });
+  const ours = row("ack-id", clientId, prompt), human = row("human", "human-client", prompt);
+  const observe = () => readDesktopQueueSubmission(s.target, witness);
+  s.queuePages.set("", page([human], "p2"));
+  s.queuePages.set("p2", page([ours]));
+  const waiting = { state: "pending", reason: "desktop_queue_entry_waiting" };
+  assert.deepEqual(await observe(), waiting);
+  s.queuePages.set("", page([ours, human]));
+  assert.deepEqual(await observe(), waiting);
+  assert.deepEqual(await readDesktopQueueSubmission(s.target, input), { state: "pending", reason: "desktop_queue_entry_unconfirmed_ack" });
+  for (const changed of [row("ack-id", clientId, "PRIVATE EDIT"), row("ack-id", "other-client", prompt), row("other-id", clientId, prompt)]) {
+    s.queuePages.set("", page([human, changed]));
+    assert.deepEqual(await observe(), { state: "uncertain", reason: "desktop_queue_entry_conflict" });
+  }
+  s.queuePages.set("", page([human], "p2")); s.queuePages.set("p2", page([human], "p2"));
+  assert.deepEqual(await observe(), { state: "uncertain", reason: "desktop_queue_inventory_incomplete" });
+  s.queuePages.set("", page([human]));
+  assert.deepEqual(await observe(), { state: "uncertain", reason: "desktop_queue_entry_not_observed" });
+  s.pages.set("", page([turn("human-turn", [user("m", "human-client")]), turn("original-turn", [user()]), turn("baseline", [])]));
+  const observed = await observe();
+  assert.equal(observed.state, "matched");
+  if (observed.state === "matched") assert.equal(observed.turn.turnId, "original-turn");
+  assert.ok(s.methods.every(method => !method.startsWith("thread/queue/") || method === "thread/queue/list"));
+});
+
+test("ordinary Desktop Send appends behind a human and settles its own Watch once through the native wire, Store and callback outbox", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  const baseline = turn("baseline", [user("u", "older"), { id: "child", type: "subAgentActivity", kind: "started" }]);
+  s.pages.set("", page([baseline]));
+  const human = { id: "human-entry", clientUserMessageId: "human", input: [{ type: "text", text: prompt, text_elements: [] }] };
+  s.queued.push(human);
+  const delivered: string[] = [];
+  const deps: DesktopTaskServiceDependencies = {
+    repository: writer.repo,
+    observe: async () => { throw new DesktopEndpointUnavailable("ECONNREFUSED"); },
+    start: async () => assert.fail("The fallback must not start a turn"),
+    queue: {
+      prepare: target => writer.prepareDesktopQueue(target, s.home),
+      submit: (target, admission, claim) => writer.submitDesktopQueueOnce({ target, admission, ...claim, storeDir: writer.storeDir }),
+      observe: readDesktopQueueSubmission
+    },
+    deliver: async ({ envelope }) => {
+      delivered.push(envelope.event.id);
+      return { disposition: "accepted", accepted_at: new Date().toISOString(), acceptance_id: "isolated-controller-receipt" };
+    }
+  };
+  const request = { target: s.target, desktopId: createDesktopConversationId(s.target), controllerSession: "isolated-controller",
+    callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "isolated-controller" }),
+    messageId: "one-original-request", text: prompt };
+  const service = createDesktopTaskService(deps);
+  const task = await service.send(request), queued = desktopTaskProjection(task);
+  assert.equal(queued.delivery_receipt, "native_queue_accepted");
+  assert.equal(queued.native_turn_id, null); assert.equal(queued.delivered, false);
+  assert.deepEqual(s.queued, [human, { id: "queue-id", clientUserMessageId: task.send_intent!.client_user_message_id, input: human.input }]);
+  assert.equal(delivered.length, 0);
+  const ownClient = (s.queued[1] as { clientUserMessageId: string }).clientUserMessageId;
+  s.queued.shift();
+  const otherTurn = turn("human-turn", [user("human-user", "human", prompt)]);
+  s.pages.set("", page([otherTurn, baseline]));
+  const resumed = createDesktopTaskService(deps);
+  assert.equal((await resumed.reconcile(task.id)).native_turn_id, undefined);
+  assert.equal(delivered.length, 0);
+  s.queued.pop();
+  s.pages.set("", page([turn("actual-turn", [user("own-user", ownClient), { id: "f", type: "agentMessage",
+    phase: "final_answer", text: "fixture finished" }]), otherTurn, baseline]));
+  const done = desktopTaskProjection(await resumed.reconcile(task.id));
+  assert.equal(done.status, "completed"); assert.equal(done.native_turn_id, "actual-turn"); assert.equal(done.final_text, "fixture finished");
+  assert.equal(done.watch_id, task.id); assert.equal(done.callback_state, "accepted"); assert.equal(done.channel_delivery_state, "unknown");
+  await service.reconcile(task.id);
+  assert.equal((await resumed.send(request)).id, task.id);
+  assert.deepEqual(delivered, [`${task.id}:settled`]);
+  assert.equal(s.methods.filter(m => m === "thread/queue/add").length, 1);
 });

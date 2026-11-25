@@ -55,26 +55,31 @@ function harness(t: TestContext) {
 function queueHarness(t: TestContext) {
   const h = harness(t);
   const admission = { ownerId: "desktop-writer", endpointId: "shared-socket", cwd: "/project", baselineTurnId: "preexisting-turn" };
-  const queue = { writes: 0, reads: 0, ackLost: false, client: "",
+  const queue = { writes: 0, reads: 0, ackLost: false, client: "", submissions: new Map<string, { prompt: string; queueId?: string }>(),
     observation: { state: "pending", reason: "desktop_queue_turn_not_observed" } as DesktopQueueObservation };
   h.deps.observe = async () => { throw new DesktopEndpointUnavailable("ECONNREFUSED"); };
   h.deps.queue = {
     prepare: async () => admission,
     submit: async (identity, original, { watchId, clientUserMessageId, prompt }) => {
-      assert.deepEqual(identity, target); assert.deepEqual(original, admission); assert.equal(prompt, input.text);
+      assert.deepEqual(identity, target); assert.deepEqual(original, admission);
       h.repository.withLock(watchId, () => {
         const task = h.repository.load(watchId)!;
         assert.equal(task.send_intent!.state, "reserved"); assert.equal(task.send_intent!.client_user_message_id, clientUserMessageId);
+        assert.equal(task.send_intent!.text, prompt);
         task.send_intent!.state = "uncertain"; h.repository.save(task, task.revision);
       });
       queue.writes++; queue.client = clientUserMessageId;
+      const queueId = queue.writes === 1 ? "queue-entry" : `queue-entry-${queue.writes}`;
+      queue.submissions.set(clientUserMessageId, { prompt, ...(!queue.ackLost ? { queueId } : {}) });
       if (queue.ackLost) throw new DesktopIpcError("timeout", "Queue add ACK lost", "unknown");
-      return { queueId: "queue-entry", clientUserMessageId };
+      return { queueId, clientUserMessageId };
     },
     observe: async (identity, witness) => {
       queue.reads++;
       assert.deepEqual(identity, target);
-      assert.deepEqual(witness, { clientUserMessageId: queue.client, prompt: input.text, baselineTurnId: "preexisting-turn",
+      const origin = queue.submissions.get(witness.clientUserMessageId)!;
+      assert.deepEqual(witness, { clientUserMessageId: witness.clientUserMessageId, prompt: origin.prompt, baselineTurnId: "preexisting-turn",
+        ...(origin.queueId ? { acknowledgedQueueId: origin.queueId } : {}),
         expectedCwd: "/project", expectedEndpointId: admission.endpointId });
       return structuredClone(queue.observation);
     }
@@ -119,6 +124,28 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");
   assert.equal((await restarted.reconcile(one.id)).status, "completed");
+});
+
+test("independent queue requests survive an older ACK loss; changing just the message ID cannot replay it", async t => {
+  const h = queueHarness(t), restarted = createDesktopTaskService(h.deps);
+  h.queue.ackLost = true;
+  const unknown = await h.service.send(input);
+  assert.equal(unknown.send_intent?.queue_id, undefined);
+  assert.equal((await restarted.send(input)).id, unknown.id);
+  await assert.rejects(restarted.send({ ...input, messageId: "retry-with-different-id" }), { code: "desktop_send_pending" });
+  assert.equal(h.queue.writes, 1);
+  h.queue.ackLost = false;
+  const next = { ...input, messageId: "independent", text: "different follow-up" };
+  const [a, b] = await Promise.all([h.service.send(next), restarted.send(next)]);
+  assert.equal(a.id, b.id);
+  const other = await restarted.send({ ...next, messageId: "third", text: "third follow-up" });
+  assert.equal(h.queue.writes, 3);
+  const confirmed = h.service.status(a.id);
+  assert.equal(confirmed.send_intent?.queue_id, "queue-entry-2");
+  assert.equal(other.send_intent?.queue_id, "queue-entry-3");
+  assert.notEqual(confirmed.send_intent?.client_user_message_id, other.send_intent?.client_user_message_id);
+  assert.equal(confirmed.native_turn_id, undefined);
+  assert.equal(restarted.status(unknown.id).send_intent?.queue_id, undefined);
 });
 
 test("Desktop queue Watch rejects a replaced or unverifiable shared daemon on either side of its read", async t => {

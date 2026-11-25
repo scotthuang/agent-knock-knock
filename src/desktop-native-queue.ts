@@ -9,7 +9,7 @@ import { readDesktopSocketIdentity } from "./desktop-ipc-transport.js";
 import { desktopUserMessageText } from "./desktop-snapshot.js";
 import { DesktopIpcError, type DesktopThreadIdentity, type DesktopTurn, type DesktopTurnItem } from "./desktop-types.js";
 
-interface Submission { clientUserMessageId: string; prompt: string }
+interface Submission { clientUserMessageId: string; prompt: string; acknowledgedQueueId?: string }
 type DesktopQueueObservation = { state: "matched"; turn: DesktopTurn }
   | { state: "pending" | "uncertain"; reason: string };
 
@@ -104,13 +104,17 @@ function projectTurn(value: unknown): DesktopTurn {
     ...(turn.status === "failed" ? { error: "Native Desktop task failed" } : {}) };
 }
 
-async function turnsPage(rpc: CodexNativeRpc, threadId: string, limit: number, cursor?: string) {
+async function turnsPage(rpc: CodexNativeRpc, threadId: string, limit: number, cursor?: string, baselineId?: string | null) {
   const page = nativePage(await rpc.call("thread/turns/list", {
     threadId, sortDirection: "desc", itemsView: "full", limit, ...(cursor ? { cursor } : {})
-  }), projectTurn);
+  }), nativeRecord);
   if (!page.data.length && page.nextCursor !== null) throw new DesktopIpcError("invalid_response", "Empty Desktop history page claims a continuation");
   if (page.data.length > limit) throw new DesktopIpcError("invalid_response", "Desktop queue history exceeded the requested limit");
-  return page;
+  // Admission records the baseline's identity only. Its display format and older
+  // turns have no bearing on the uniquely matching message after that boundary.
+  const boundary = baselineId ? page.data.findIndex(turn => turn.id === baselineId) : -1;
+  const relevant = boundary < 0 ? page.data : page.data.slice(0, boundary);
+  return { data: relevant.map(projectTurn), nextCursor: page.nextCursor, reachedBaseline: boundary >= 0 };
 }
 
 export function readDesktopLatestPersistedTurn(target: DesktopThreadIdentity) {
@@ -137,6 +141,40 @@ function matchTurns(turns: DesktopTurn[], input: Submission): DesktopQueueObserv
   return match ? { state: "matched", turn: publicTurn(match) } : { state: "pending", reason: "desktop_queue_turn_not_observed" };
 }
 
+function identifyQueueEntry(row: Record<string, unknown>, input: Submission): "other" | "original" | "conflict" {
+  const id = nativeId(row.id), client = nativeId(row.clientUserMessageId);
+  if (client !== input.clientUserMessageId && id !== input.acknowledgedQueueId) return "other";
+  if (client !== input.clientUserMessageId || (input.acknowledgedQueueId && input.acknowledgedQueueId !== id)) return "conflict";
+  const parts = userInputs(row.input);
+  return parts.length === 1 && parts[0]?.type === "text" && parts[0].text === input.prompt ? "original" : "conflict";
+}
+
+/** Queue visibility describes a single observation. Absence may also mean the owner has just consumed the item. */
+async function observeWaitingEntry(rpc: CodexNativeRpc, threadId: string, input: Submission, check: () => void): Promise<DesktopQueueObservation> {
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let found = false;
+  for (let pageNo = 0; pageNo < MAX_PAGES; pageNo++) {
+    const page = nativePage(await rpc.call("thread/queue/list", { threadId, limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) }),
+      row => identifyQueueEntry(nativeRecord(row), input));
+    check();
+    if (page.data.length > PAGE_SIZE || (!page.data.length && page.nextCursor !== null)) break;
+    for (const entry of page.data) {
+      if (entry === "other") continue;
+      if (found || entry === "conflict") return { state: "uncertain", reason: "desktop_queue_entry_conflict" };
+      found = true;
+    }
+    if (page.nextCursor === null) {
+      if (found) return { state: "pending", reason: input.acknowledgedQueueId ? "desktop_queue_entry_waiting" : "desktop_queue_entry_unconfirmed_ack" };
+      return { state: "uncertain", reason: input.acknowledgedQueueId ? "desktop_queue_entry_not_observed" : "desktop_queue_ack_unconfirmed" };
+    }
+    if (cursors.has(page.nextCursor)) break;
+    cursor = page.nextCursor;
+    cursors.add(cursor);
+  }
+  return { state: "uncertain", reason: "desktop_queue_inventory_incomplete" };
+}
+
 /** Examine the entire interval after the pre-send anchor. Partial pages cannot prove uniqueness. */
 export function readDesktopQueueSubmission(target: DesktopThreadIdentity, input: Submission & {
   baselineTurnId: string | null; expectedCwd?: string;
@@ -150,21 +188,22 @@ export function readDesktopQueueSubmission(target: DesktopThreadIdentity, input:
     let cursor: string | undefined;
     const finish = async (): Promise<DesktopQueueObservation> => {
       if (cursor !== undefined) {
-        const head = await turnsPage(rpc, target.threadId, PAGE_SIZE);
+        const head = await turnsPage(rpc, target.threadId, PAGE_SIZE, undefined, input.baselineTurnId);
         check();
         if (!isDeepStrictEqual(firstPage, head)) return { state: "uncertain", reason: "desktop_queue_history_changed" };
       }
-      return matchTurns([...turns.values()], input);
+      const matched = matchTurns([...turns.values()], input);
+      return matched.state === "pending" ? observeWaitingEntry(rpc, target.threadId, input, check) : matched;
     };
     for (let pageNo = 0; pageNo < MAX_PAGES; pageNo++) {
-      const page = await turnsPage(rpc, target.threadId, PAGE_SIZE, cursor);
+      const page = await turnsPage(rpc, target.threadId, PAGE_SIZE, cursor, input.baselineTurnId);
       if (pageNo === 0) firstPage = page;
       check();
       for (const turn of page.data) {
-        if (turn.turnId === input.baselineTurnId) return finish();
         if (turns.has(turn.turnId)) return { state: "uncertain", reason: "desktop_queue_history_conflict" };
         turns.set(turn.turnId, turn);
       }
+      if (page.reachedBaseline) return finish();
       if (page.nextCursor === null) return input.baselineTurnId === null ? finish()
         : { state: "uncertain", reason: "desktop_queue_baseline_missing" };
       if (cursors.has(page.nextCursor)) break;

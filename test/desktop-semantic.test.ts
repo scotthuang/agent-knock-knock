@@ -76,6 +76,8 @@ test("Desktop semantic Send goes directly to its conversation and binds stable I
 
 test("Desktop semantic mutation rejects mixed targets, unsupported types and missing controller or tool-call identity before relay", async t => {
   const h = harness(t);
+  await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "Conditional task",
+    desktopQueueOnlyIfEmpty: true }), /cannot atomically append only if the queue is empty/u);
   for (const extra of [{ terminal_id: terminalId }, { session_id: "session-one" }, { turn_id: "turn-one" }, { type: "response" }]) {
     await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "No send", ...extra }));
   }

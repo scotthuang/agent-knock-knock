@@ -187,7 +187,9 @@ export interface DesktopInterruptReceipt { interruptedTurnId: string; snapshot: 
 export type DesktopDispatchState = "not_sent" | "unknown" | "accepted";
 export type DesktopIpcErrorCode = "invalid_response" | "incompatible_desktop" | "timeout" | "closed"
   | "rpc_error" | "no_live_owner" | "owner_changed" | "snapshot_changed" | "thread_not_idle" | "duplicate_submission"
-  | "unexpected_existing_turn" | "invalid_argument" | "unsafe_socket" | "stale_interaction";
+  | "unexpected_existing_turn" | "invalid_argument" | "unsafe_socket" | "stale_interaction"
+  | "desktop_queue_saved_draft" | "desktop_queue_retained_editor" | "desktop_queue_question_pending"
+  | "desktop_queue_baseline_unavailable" | "desktop_queue_contract_unavailable" | "desktop_queue_write_denied" | "desktop_queue_full";
 export class DesktopIpcError extends Error {
   constructor(public readonly code: DesktopIpcErrorCode, message: string,
     public readonly dispatchState: DesktopDispatchState = "not_sent", public readonly acceptedTurnId?: string) {

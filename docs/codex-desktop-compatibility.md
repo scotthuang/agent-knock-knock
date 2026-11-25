@@ -11,6 +11,31 @@ message runs, the new client may execute it. The Watch follows the original
 message. AKK keeps interactive controls available only through a verified owner
 connection that supports them.
 
+### Sending to a thread with a queue
+
+When List or Status offers `native_queue_available`, an ordinary Send appends one
+independent message to the selected thread. A running parent turn, an old
+sub-agent activity record or messages already in the queue can leave the new
+task waiting. AKK leaves existing entries and command approvals in place. The
+send-time check verifies the thread, project, Desktop writer, shared endpoint
+and pre-send turn again. The owner IPC retains its own requirements for starting
+a turn and handling interactions.
+
+A saved draft, retained editor or known unanswered questionnaire has a specific
+restriction in Status. Draft ordering and preservation with a queued task still
+need Desktop verification. Keep the draft intact. The queue reader cannot see
+unsaved typing or every live dialog. A supported queue can also have temporarily
+unknown depth. Ordinary Send requests tail placement. If the user requires
+an empty queue **at the instant of submission**, pass `desktopQueueOnlyIfEmpty: true`
+(CLI `--desktop-queue-only-if-empty`). AKK stops before dispatch because
+Codex offers no atomic empty-queue condition.
+
+Keep the Watch returned by Send. A queue acknowledgement confirms admission.
+Execution requires the unchanged original client message in a unique subsequent
+turn. If its entry disappears, it may have been consumed or removed; use that
+Watch to look for the matching turn. An edited or conflicting entry, a missing
+acknowledgement or a partial history read never justifies resending.
+
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
 for packaged and optional source installation.
@@ -31,6 +56,7 @@ possibly submitted operation.
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
 | `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
 | `26.1117.31558` / `29513` | AKK 0.16.21 lists sidebar conversations. AKK 0.16.22 supports thread-scoped queued Send after verifying the local Desktop writer. Exact task settlement and one local callback were exercised on a dedicated conversation. A manual client switch can change the executor. Approvals, questions and settings require the separate owner IPC. [Evidence and owner boundary](evidence/desktop-29513.md) | Not retested |
+| `26.1117.41037` / `29803` | Read-only verification with local backend `0.172.0` confirmed the Desktop writer, original thread, persisted turn and queue. Queue admission and receipt handling for running and queued work have isolated regression coverage. | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.

@@ -18,13 +18,15 @@ import { createDesktopSessionControls } from "../src/desktop-session-controls.js
 import { DesktopIpcError } from "../src/desktop-types.js";
 import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
 import { createDesktopPersistedTurnReader } from "../src/desktop-queue-inspection.js";
+import { DesktopQueueAdmissionError } from "../src/desktop-queue-submit.js";
 import type { DesktopCompatibility, DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../src/desktop-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 
-function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD, catalogCwd?: string) {
+function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD,
+  catalogCwd?: string, threadId = "desktop-thread") {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId: "desktop-thread" };
+  const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId };
   fs.mkdirSync(target.codexHome);
   fs.writeFileSync(path.join(target.codexHome, ".codex-global-state.json"), JSON.stringify({
     "pinned-thread-ids": [target.threadId], "electron-persisted-atom-state": {
@@ -205,6 +207,35 @@ test("Desktop Status may display exact persisted history without authorizing inp
   assert.equal(status.persisted_history.progress.native_turn_id, "disk-turn");
   assert.equal(status.persisted_history.progress.text, "Public progress");
   assert.doesNotMatch(JSON.stringify(status), /private reasoning|private question|writer-a|socket-a/u);
+  assert.equal(f.sends, 0);
+});
+
+test("Desktop Status reports native queue availability and the specific reason when independent append becomes blocked", async t => {
+  const cwd = "/fixture/desktop-target";
+  const f = fixture(t, { version: "unreviewed", build: "unreviewed", applicationIdentityVerified: true },
+    cwd, "00000000-0000-7000-8000-000000000042");
+  f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
+  let blocked = false;
+  f.transport.queue = {
+    async prepare() {
+      if (blocked) throw new DesktopQueueAdmissionError("desktop_queue_question_pending");
+      return { cwd, ownerId: "writer-a", endpointId: "socket-a", baselineTurnId: "parent",
+        notices: ["desktop_queue_parent_running", "desktop_queue_live_input_unobserved"] };
+    },
+    async submit() { throw new Error("Status must not dispatch"); },
+    async observe() { throw new Error("No queue request has been submitted"); }
+  };
+  const ready = await f.run("status", { conversation: f.id });
+  assert.equal(ready.available_actions.send.input.conversation_id, f.id);
+  assert.ok(ready.queue_notices.includes("desktop_queue_parent_running"));
+  assert.equal(ready.pending_interaction_count, null);
+  assert.equal(ready.available_actions.approve, undefined);
+  blocked = true;
+  const denied = await f.run("status", { conversation: f.id });
+  assert.equal(denied.capabilities.send, false);
+  assert.equal(denied.available_actions.send, undefined);
+  assert.equal(denied.observation_error, "desktop_queue_question_pending");
+  assert.equal(denied.can_send_reason, "desktop_queue_question_pending");
   assert.equal(f.sends, 0);
 });
 

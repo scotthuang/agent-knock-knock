@@ -178,6 +178,7 @@ export const sendParameters = {
           { required: ["session_id"] },
           { required: ["terminal_id"] },
           { required: ["type"] },
+          { required: ["desktopQueueOnlyIfEmpty"] },
           { required: ["idleTimeoutMinutes"] },
           { required: ["agentTimeoutMinutes"] },
           { required: ["agentHardTimeoutMinutes"] }
@@ -251,8 +252,11 @@ export const sendParameters = {
       type: "string",
       minLength: 1,
       description:
-        "Message for the coding agent. Each accepted ordinary send creates a new turn " +
-          "inside the selected session without clearing native agent context."
+        "Message for the coding agent. A Desktop queue receipt means the message was appended to the original thread. Its Watch identifies the subsequent executing turn."
+    },
+    desktopQueueOnlyIfEmpty: {
+      type: "boolean",
+      description: "Set true when the user requires an empty Desktop queue at the instant of submission. The current native contract cannot guarantee this and the call stops before any submission. Omit for ordinary tail append."
     },
     type: {
       type: "string",

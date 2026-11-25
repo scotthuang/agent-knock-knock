@@ -12,7 +12,7 @@ import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, de
 import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
-import { desktopQueueWitness, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
+import { desktopQueueWitness, desktopSendConflictsWithUnresolved, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopNotification, DesktopStateRepository, DesktopTaskRecord } from "./desktop-state-store.js";
 import { createDesktopTaskRecovery, DesktopTaskError, desktopLive as live, desktopObservationStopped, desktopUnresolvedSend, desktopNotificationObsolete, suppressDesktopNotifications, type DesktopRecoveryInput } from "./desktop-task-recovery.js";
@@ -405,8 +405,10 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     // The global writer lease makes the unresolved-intent scan atomic across distinct message IDs.
     return this.repo.withLock(task.id, () => {
       const existing = this.repo.load(task.id); if (existing) return this.duplicate(existing, input);
-      if (this.repo.list().some(other => desktopUnresolvedSend(other) && isDeepStrictEqual(other.target, input.target))) {
-        throw new DesktopTaskError("desktop_send_pending", "Another Desktop send is awaiting acceptance for this exact conversation");
+      const conflict = this.repo.list().find(other => desktopUnresolvedSend(other) && isDeepStrictEqual(other.target, input.target) &&
+        desktopSendConflictsWithUnresolved(task, other));
+      if (conflict) {
+        throw new DesktopTaskError("desktop_send_pending", "A potentially conflicting Desktop send still has no execution proof; check the original Watch");
       }
       this.repo.save(task, null);
       return undefined;

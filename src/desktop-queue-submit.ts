@@ -2,10 +2,10 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { cliNow, cliNowMs, cliPid, cliSleepSync } from "./cli-runtime-context.js";
 import { CodexNativeRpc } from "./codex-native-client-rpc.js";
-import { nativeId, nativePage, nativeRecord, parseNativeThread, parseNativeTurn } from "./codex-native-snapshot.js";
+import { answeredNativeQuestionIds, nativeId, nativePage, nativeRecord, parseNativeThread, parseNativeTurn } from "./codex-native-snapshot.js";
 import { CodexNativeError } from "./codex-native-types.js";
 import { desktopQueueSocketIdentity } from "./desktop-native-queue.js";
-import { verifyDesktopQueueOwner } from "./desktop-queue-owner.js";
+import { verifyDesktopQueueOwner, type DesktopQueueOwner } from "./desktop-queue-owner.js";
 import { createDesktopStateStore, type DesktopTaskRecord } from "./desktop-state-store.js";
 import type { DesktopQueueAdmission } from "./desktop-task-queue.js";
 import { DesktopIpcError, type DesktopThreadIdentity } from "./desktop-types.js";
@@ -16,18 +16,36 @@ interface Send {
   target: DesktopThreadIdentity; admission: DesktopQueueAdmission; storeDir: string;
   watchId: string; clientUserMessageId: string; prompt: string;
 }
-const admissions = new WeakMap<DesktopQueueAdmission, { target: DesktopThreadIdentity; socket: string; expires: number }>();
-const knownItems = new Set(["userMessage", "agentMessage", "reasoning", "plan", "webSearch", "imageView", "contextCompaction",
-  "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "imageGeneration", "collabAgentToolCall"]);
-const finishedActions = new Set(["completed", "failed", "declined", "interrupted"]);
+const admissions = new WeakMap<DesktopQueueAdmission, {
+  target: DesktopThreadIdentity; socket: string; draft: DesktopQueueOwner["draft"]; expires: number;
+}>();
+const admissionLifetimeMs = 30_000;
+// One short-lived read witness. A timeout may hide queue depth even where the native
+// method has already been observed. This witness is never a grant to the append operation.
+let lastQueueRead: { ownerId: string; endpointId: string; socket: string; expires: number } | undefined;
+const admissionReasons = {
+  desktop_queue_saved_draft: "A saved draft is present. Keep it intact; its ordering and preservation on independent append are unverified.",
+  desktop_queue_retained_editor: "A retained editor document is present. Its isolation from a queued submission is unverified.",
+  desktop_queue_question_pending: "An unresolved question is present on the active turn. Queue isolation for this interaction is unverified.",
+  desktop_queue_baseline_unavailable: "No exact pre-send turn boundary is available for tracking this submission.",
+  desktop_queue_contract_unavailable: "Cannot establish the native thread queue contract on this endpoint.",
+  desktop_queue_write_denied: "The native thread explicitly disallows direct input.",
+  desktop_queue_full: "The native queue is full. The request was not enqueued."
+};
 
-function idle(message: string): never { throw new DesktopIpcError("thread_not_idle", message); }
+/** Fixed public diagnostics after locating a writer; no native content or write authority. */
+export class DesktopQueueAdmissionError extends DesktopIpcError {
+  constructor(readonly reason: keyof typeof admissionReasons) {
+    super(reason, admissionReasons[reason]);
+  }
+}
 function changed(): never { throw new DesktopIpcError("owner_changed", "Desktop queue owner, socket or exact task scope changed"); }
 function socketPath(target: DesktopThreadIdentity) { return path.join(target.codexHome, "app-server-control", "app-server-control.sock"); }
 
 async function ownerGate(target: DesktopThreadIdentity) {
   const owner = await verifyDesktopQueueOwner(target).catch(() => { throw new DesktopIpcError("no_live_owner", "Cannot verify Desktop queue owner"); });
-  if (owner.draft !== "none_persisted") idle("Desktop has a retained editor, a saved draft, or unknown draft state");
+  if (owner.draft === "present") throw new DesktopQueueAdmissionError("desktop_queue_saved_draft");
+  if (owner.draft === "retained_editor") throw new DesktopQueueAdmissionError("desktop_queue_retained_editor");
   return owner;
 }
 
@@ -35,31 +53,63 @@ function verifySharedThread(rawThread: unknown, id: string, cwd: string): void {
   const thread = parseNativeThread(rawThread, id);
   if (thread.cwd !== cwd || thread.sessionId !== id || thread.originator !== "codex_work_desktop" || thread.source !== "vscode" ||
       thread.historyMode !== "paginated" || thread.threadSource !== "user" || thread.parentThreadId != null ||
-      thread.attachedToThreadId != null || thread.canAcceptDirectInput === false || thread.ephemeral !== false) changed();
-  if (thread.status.type !== "notLoaded") idle("Shared daemon is not the eligible non-owner queue endpoint");
+      thread.attachedToThreadId != null || thread.ephemeral !== false || thread.status.type !== "notLoaded") changed();
+  if (thread.canAcceptDirectInput === false) throw new DesktopQueueAdmissionError("desktop_queue_write_denied");
 }
 
-function completedBaseline(rawTurn: Record<string, unknown>): string {
-  const turn = parseNativeTurn(rawTurn);
-  if (turn.status !== "completed" || !turn.itemsComplete || !Number.isSafeInteger(rawTurn.completedAt) ||
-      Number(rawTurn.completedAt) <= 0 || rawTurn.error != null || !turn.items.some(i => i.type === "userMessage")) idle("Desktop has no durable completed turn");
-  for (const item of turn.items) {
-    if (!knownItems.has(item.type) || (item.status != null && !finishedActions.has(String(item.status))) ||
-        item.delivery === "async" || item.questions?.length) idle("Desktop has an interaction, non-terminal item or unknown native item");
+function queueBaseline(rawTurn: Record<string, unknown>, notices: string[]): string {
+  // Older turns and sub-agent activity are not renderer interactions or write permissions.
+  // Only the exact turn boundary is needed to find our own subsequent client message.
+  const turnId = nativeId(rawTurn.id);
+  if (rawTurn.status === "inProgress") {
+    notices.push("desktop_queue_parent_running");
+    if (Array.isArray(rawTurn.items) && rawTurn.items.some(item => item?.type === "agentMessage" &&
+        item.delivery === "async" && Array.isArray(item.questions) && item.questions.length > 0)) {
+      const turn = parseNativeTurn(rawTurn);
+      // Display directives govern publication of text. They do not settle a question.
+      const answered = answeredNativeQuestionIds(turn);
+      const pending = turn.items.some(item => item.type === "agentMessage" && item.delivery === "async" &&
+        item.questions?.some((_question, index, questions) =>
+          !(questions.length === 1 && answered.has(item.id)) &&
+          !answered.has(JSON.stringify(["request_user_input_async", item.id, index]))));
+      if (!turn.itemsComplete || pending) throw new DesktopQueueAdmissionError("desktop_queue_question_pending");
+    }
   }
-  return turn.id;
+  return turnId;
 }
 
-async function nativeGate(rpc: CodexNativeRpc, target: DesktopThreadIdentity, cwd: string): Promise<string> {
+async function inspectQueue(rpc: CodexNativeRpc, threadId: string, previouslyVerified: boolean, notices: string[]) {
+  try {
+    const page = nativePage(await rpc.call("thread/queue/list", {threadId, limit: 1}), raw => {
+      const entry = nativeRecord(raw);
+      nativeId(entry.id);
+      nativeId(entry.clientUserMessageId);
+      if (!Array.isArray(entry.input)) throw new DesktopQueueAdmissionError("desktop_queue_contract_unavailable");
+    });
+    if (page.data.length > 1 || (page.data.length === 0 && page.nextCursor !== null)) {
+      throw new DesktopQueueAdmissionError("desktop_queue_contract_unavailable");
+    }
+    if (page.data.length) notices.push("desktop_queue_appends_behind_existing");
+  } catch (error) {
+    // A transient read failure does not revoke a contract already probed on this exact live endpoint.
+    if (previouslyVerified && error instanceof CodexNativeError && (error.code === "timeout" || error.rpcCode === -32603)) {
+      notices.push("desktop_queue_depth_unknown");
+      return;
+    }
+    throw new DesktopQueueAdmissionError("desktop_queue_contract_unavailable");
+  }
+}
+
+async function nativeGate(rpc: CodexNativeRpc, target: DesktopThreadIdentity, cwd: string, previouslyVerified = false) {
   const id = target.threadId;
   const { thread: rawThread } = nativeRecord(await rpc.call("thread/read", { threadId: id, includeTurns: false }));
   verifySharedThread(rawThread, id, cwd);
   const page = nativePage(await rpc.call("thread/turns/list", {threadId: id, limit: 1, sortDirection: "desc", itemsView: "full"}), nativeRecord);
-  if (page.data.length !== 1) idle("No single completed Desktop baseline is available");
-  const baseline = completedBaseline(page.data[0]);
-  const queued = nativePage(await rpc.call("thread/queue/list", {threadId: id, limit: 1}), nativeRecord);
-  if (queued.data.length || queued.nextCursor !== null) idle("Existing native Desktop queue is not empty");
-  return baseline;
+  if (page.data.length !== 1) throw new DesktopQueueAdmissionError("desktop_queue_baseline_unavailable");
+  const notices = ["desktop_queue_live_input_unobserved"];
+  const baselineTurnId = queueBaseline(page.data[0], notices);
+  await inspectQueue(rpc, id, previouslyVerified, notices);
+  return { baselineTurnId, notices };
 }
 
 /** Issues a short-lived, process-local admission. A serialized or reconstructed result conveys no write authority. */
@@ -68,11 +118,29 @@ export async function prepareDesktopQueue(target: DesktopThreadIdentity, expecte
   const first = await ownerGate(target), socket = desktopQueueSocketIdentity(socketPath(target));
   const rpc = await CodexNativeRpc.connect({codexHome: target.codexHome, timeoutMs: 5_000});
   try {
-    const baselineTurnId = await nativeGate(rpc, target, expectedCwd);
+    const cached = lastQueueRead;
+    const priorRead = cached?.ownerId === first.ownerId && cached.endpointId === first.endpointId &&
+      cached.socket === socket && cached.expires > performance.now();
+    const { baselineTurnId, notices } = await nativeGate(rpc, target, expectedCwd, priorRead).catch(error => {
+      if (cached === lastQueueRead && error instanceof DesktopQueueAdmissionError && error.reason === "desktop_queue_contract_unavailable") {
+        lastQueueRead = undefined;
+      }
+      throw error;
+    });
     const last = await ownerGate(target);
     if (first.ownerId !== last.ownerId || first.endpointId !== last.endpointId || socket !== desktopQueueSocketIdentity(socketPath(target))) changed();
-    const admission = Object.freeze({ ownerId: first.ownerId, endpointId: first.endpointId, cwd: expectedCwd, baselineTurnId });
-    admissions.set(admission, { target: { ...target }, socket, expires: performance.now() + 30_000 });
+    if (first.draft !== last.draft) changed();
+    if (last.draft === "unknown") notices.push("desktop_queue_draft_unknown");
+    const admission = Object.freeze({ ownerId: first.ownerId, endpointId: first.endpointId, cwd: expectedCwd,
+      baselineTurnId, notices: Object.freeze(notices) });
+    let expires = performance.now() + admissionLifetimeMs;
+    if (cached && notices.includes("desktop_queue_depth_unknown")) {
+      expires = cached.expires;
+      if (expires <= performance.now()) throw new DesktopQueueAdmissionError("desktop_queue_contract_unavailable");
+    } else {
+      lastQueueRead = { ownerId: last.ownerId, endpointId: last.endpointId, socket, expires };
+    }
+    admissions.set(admission, { target: { ...target }, socket, draft: last.draft, expires });
     return admission;
   } finally { rpc.close(); }
 }
@@ -133,17 +201,22 @@ export async function submitDesktopQueueOnce(input: Send) {
   admissions.delete(send.admission);
   nativeId(send.clientUserMessageId);
   const owner = await ownerGate(send.target);
-  if (owner.ownerId !== send.admission.ownerId || owner.endpointId !== send.admission.endpointId ||
+  if (owner.ownerId !== send.admission.ownerId || owner.endpointId !== send.admission.endpointId || owner.draft !== grant.draft ||
       grant.expires <= performance.now() || grant.socket !== desktopQueueSocketIdentity(socketPath(send.target))) changed();
   const rpc = await CodexNativeRpc.connect({codexHome: send.target.codexHome, timeoutMs: 5_000});
   try {
-    if (await nativeGate(rpc, send.target, send.admission.cwd) !== send.admission.baselineTurnId) changed();
+    if ((await nativeGate(rpc, send.target, send.admission.cwd, true)).baselineTurnId !== send.admission.baselineTurnId) changed();
     const fresh = await ownerGate(send.target);
-    if (fresh.ownerId !== owner.ownerId || fresh.endpointId !== owner.endpointId) changed();
+    if (fresh.ownerId !== owner.ownerId || fresh.endpointId !== owner.endpointId || fresh.draft !== owner.draft) changed();
     let raw: unknown;
     try { raw = await dispatch(rpc, send, grant.socket, grant.expires); }
     catch (error) {
-      if (error instanceof CodexNativeError) throw new DesktopIpcError("rpc_error", "Desktop queue did not acknowledge the submission", error.dispatchState);
+      if (error instanceof CodexNativeError) {
+        if (error.code === "queue_full") throw new DesktopQueueAdmissionError("desktop_queue_full");
+        if (error.code === "queue_write_denied") throw new DesktopQueueAdmissionError("desktop_queue_write_denied");
+        if (error.code === "unsupported_capability") throw new DesktopQueueAdmissionError("desktop_queue_contract_unavailable");
+        throw new DesktopIpcError("rpc_error", "Desktop queue did not acknowledge the submission", error.dispatchState);
+      }
       throw error;
     }
     return parseReceipt(raw, send);

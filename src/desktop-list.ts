@@ -9,6 +9,8 @@ import { desktopSessionProjection } from "./desktop-public-projection.js";
 import { DesktopIpcError } from "./desktop-types.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
 import { canInspectDesktopHistory } from "./desktop-queue-inspection.js";
+import { DesktopQueueAdmissionError } from "./desktop-queue-submit.js";
+import { desktopQueueNotices } from "./desktop-task-queue.js";
 
 const MAX_QUEUE_PROBES = 4;
 const execFileAsync = promisify(execFile);
@@ -24,21 +26,28 @@ export async function projectDesktopQueueAvailability(runtime: DesktopRuntime, e
   error: DesktopEndpointUnavailable): Promise<Record<string, unknown>> {
   const base = endpointUnavailable(entry, error, Boolean(queueCandidate(runtime, entry)));
   if (!queueCandidate(runtime, entry)) return base;
+  const { observation_error, ...row } = base;
   try {
     const admission = await runtime.transport.queue!.prepare(entry);
-    if (admission.cwd !== entry.cwd) return base;
+    if (admission.cwd !== entry.cwd) {
+      return { ...row, observation_error: "owner_changed", can_send_reason: "owner_changed" };
+    }
+    const input = { conversation_id: entry.conversationId };
+    const notices = desktopQueueNotices.filter(notice => admission.notices?.includes(notice));
+    return { ...row, connection_state: "desktop_queue_owner_verified", can_send_reason: "native_queue_available",
+      owner_ipc_state: "unavailable", live_draft_state: "unknown", activity_state: "unknown",
+      ...(notices.length ? { queue_notices: notices } : {}),
+      capabilities: { ...(base.capabilities as Record<string, unknown>), send: true },
+      available_actions: { status: { tool: "agent_knock_knock_status", input }, send: { tool: "agent_knock_knock_send", input } } };
   } catch (failure) {
-    if (failure instanceof DesktopIpcError && failure.code === "thread_not_idle") {
-      return { ...base, can_send_reason: "desktop_queue_admission_blocked" };
+    if (failure instanceof DesktopQueueAdmissionError) return { ...row, owner_ipc_state: "unavailable",
+      connection_state: "desktop_queue_admission_blocked", observation_error: failure.reason, can_send_reason: failure.reason };
+    if (failure instanceof DesktopIpcError && failure.code !== "no_live_owner") {
+      const reason = failure.code === "thread_not_idle" ? "desktop_queue_admission_blocked" : failure.code;
+      return { ...row, owner_ipc_state: "unavailable", observation_error: reason, can_send_reason: reason };
     }
     return base;
   }
-  const { observation_error, ...row } = base;
-  const input = { conversation_id: entry.conversationId };
-  return { ...row, connection_state: "desktop_queue_owner_verified", can_send_reason: "native_queue_available",
-    owner_ipc_state: "unavailable", live_draft_state: "unknown", activity_state: "unknown",
-    capabilities: { ...(base.capabilities as Record<string, unknown>), send: true },
-    available_actions: { status: { tool: "agent_knock_knock_status", input }, send: { tool: "agent_knock_knock_send", input } } };
 }
 
 function endpointUnavailable(entry: DesktopCatalogEntry, error: DesktopEndpointUnavailable, queueEligible: boolean) {
