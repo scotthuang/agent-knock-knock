@@ -13,7 +13,13 @@ export function formatDesktopCommandResult(result: Record<string, unknown>, acti
 }
 function queueLines(result: Record<string, unknown>): string[] {
   if (result.delivery_path !== "native_thread_queue") {
-    if (result.can_send_reason === "native_queue_available") return ["Send appends an independent task to this thread's queue."];
+    if (result.can_send_reason === "native_queue_available") {
+      const lines = ["Send appends one task to this thread's queue. Keep the returned Watch to follow execution."];
+      if (Array.isArray(result.queue_notices) && result.queue_notices.includes("desktop_queue_question_pending")) {
+        lines.push("A Desktop question may still need your answer. Appending a task leaves it for you to handle.");
+      }
+      return lines;
+    }
     return result.connection_state === "desktop_queue_admission_blocked" ? optionalLine(result, "can_send_reason", "queue restriction") : [];
   }
   const lines = optionalLine(result, "observation_error", "queue observation");
@@ -21,6 +27,10 @@ function queueLines(result: Record<string, unknown>): string[] {
     lines.push("The acknowledged entry is no longer visible. It may have been consumed or removed; AKK has no matching turn yet.");
   } else if (result.observation_error === "desktop_queue_entry_conflict") {
     lines.push("The visible queue entry conflicts with the original submission. AKK cannot attribute it to this task.");
+  } else if (result.observation_error === "desktop_queue_history_requires_recover") {
+    lines.push("Use Recover on this Watch for a deeper read of the original submission. Keep the same receipt.");
+  } else if (result.observation_error === "desktop_queue_recovery_scan_limit" || result.observation_error === "desktop_queue_recovery_read_deadline") {
+    lines.push("The deeper read exhausted its history or time budget before confirming attribution. Keep this Watch; do not resend.");
   }
   if (result.delivery_receipt === "native_queue_accepted") {
     lines.push("The original thread accepted the queue entry. Execution remains unconfirmed. Keep the existing Watch; do not resend.");

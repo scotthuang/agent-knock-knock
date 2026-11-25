@@ -2,7 +2,7 @@ import { desktopAttemptCapabilities, desktopCompatibilityProjection, desktopInte
   desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
-import { desktopObservationStopped } from "./desktop-task-recovery.js";
+import { desktopObservationStopped, desktopVerifiedQueueWait } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
 import type { DesktopInteraction, DesktopSnapshot } from "./desktop-types.js";
@@ -64,7 +64,7 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
   const canCancel = !queued && desktopAttemptCapabilities(profile).nativeControls && !terminal && Boolean(task.native_turn_id);
   const { recovery_actions, ...recovery } = backendTaskRecoveryProjection(task);
   const recoveryCapabilities = desktopRecoveryCapabilities(task);
-  if (queued && !task.native_turn_id) { delete recovery_actions.renew; recoveryCapabilities.renew = false; }
+  if (queued && !task.native_turn_id && !desktopVerifiedQueueWait(task)) { delete recovery_actions.renew; recoveryCapabilities.renew = false; }
   return {
     watch_id: task.watch_id, conversation_id: task.desktop_id, source: "codex_desktop",
     status: task.closed_at ? "closed" : task.status, observation_status: task.status,

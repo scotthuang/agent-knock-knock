@@ -175,7 +175,8 @@ async function sendOrWatchDesktopTask(runtime: DesktopRuntime, command: "send" |
   const input = { target: identity, desktopId: id, controllerSession, timeoutMs: timeout,
     callbackRoute: { ...route, capabilities: { wake: true, respond: false } } };
   const task = command === "send" ? await runtime.tasks.send({ ...input,
-    text: required(options.message ?? options.request, "message"), messageId: str(options.messageId) ?? randomUUID() })
+    text: required(options.message ?? options.request, "message"), messageId: str(options.messageId) ?? randomUUID(),
+    requestId: str(options.desktopRequestId) })
     : await runtime.tasks.watch(input);
   const result = desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility));
   if (desktopTaskNeedsReconciliation(task)) {

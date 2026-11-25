@@ -64,7 +64,7 @@ export async function runDesktopMonitor(watchId: string, options: DesktopRuntime
     for (;;) {
       const runtime = createDesktopRuntime(options);
       let pending: boolean;
-      try { pending = desktopTaskNeedsReconciliation(await runtime.tasks.reconcile(watchId)); }
+      try { pending = desktopTaskNeedsReconciliation(await runtime.tasks.reconcile(watchId, "monitor")); }
       finally { await runtime.close(); }
       if (!pending) return;
       await cliSleep(2000);

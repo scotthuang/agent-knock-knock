@@ -13,6 +13,22 @@ connection that supports them.
 
 ### Sending to a thread with a queue
 
+For an ordinary new task, pass the exact Desktop conversation and request
+text. A separate user instruction can use the same words in a new tool call.
+The original controller can look up its receipt by Watch ID or reuse the
+same invocation identity (CLI `--message-id`) with the original input.
+
+If a Host needs to recognize the same instruction across different tool
+calls, supply an optional `desktopRequestId` (CLI `--desktop-request-id`) on
+the first call. Retain that key and use the same controller, target, callback
+route and text to retrieve the original receipt. Use a fresh key or omit it
+for a separately requested task. The key works across owner IPC and the shared
+queue. A queue ACK confirms only the native append. If the outer result is
+lost and the original key and invocation identity are unavailable, inspect
+the controller's Watches and their Status. Starting a fresh call could submit
+the message twice. After history cleanup, a retained tombstone still prevents
+replay of the original operation.
+
 When List or Status offers `native_queue_available`, an ordinary Send appends one
 independent message to the selected thread. A running parent turn, an old
 sub-agent activity record or messages already in the queue can leave the new
@@ -21,11 +37,18 @@ send-time check verifies the thread, project, Desktop writer, shared endpoint
 and pre-send turn again. The owner IPC retains its own requirements for starting
 a turn and handling interactions.
 
-A saved draft, retained editor or known unanswered questionnaire has a specific
-restriction in Status. Draft ordering and preservation with a queued task still
-need Desktop verification. Keep the draft intact. The queue reader cannot see
-unsaved typing or every live dialog. A supported queue can also have temporarily
-unknown depth. Ordinary Send requests tail placement. If the user requires
+If Status reports a saved draft or a retained editor, AKK leaves it in place.
+Desktop has not been verified to preserve the draft's order relative to a
+queued message. Unsaved typing may be invisible to the queue reader.
+
+An unanswered question on the current turn produces the Status notice
+`desktop_queue_question_pending`. An independent Send can still append
+one message at the tail. The person handling the question can answer it in
+Desktop. AKK sends no answer, keystroke or forced start. The same notice
+applies if the shared reader reports `interrupted` with no completion time.
+Answered questions and durably ended turns do not produce this notice.
+
+A supported queue can also have temporarily unknown depth. If the user requires
 an empty queue **at the instant of submission**, pass `desktopQueueOnlyIfEmpty: true`
 (CLI `--desktop-queue-only-if-empty`). AKK stops before dispatch because
 Codex offers no atomic empty-queue condition.
@@ -35,6 +58,17 @@ Execution requires the unchanged original client message in a unique subsequent
 turn. If its entry disappears, it may have been consumed or removed; use that
 Watch to look for the matching turn. An edited or conflicting entry, a missing
 acknowledgement or a partial history read never justifies resending.
+
+For a long queue, ordinary observation examines up to 13 pages of eight turns
+(including the pre-send boundary) within 15 seconds. This covers one full
+[100-entry queue](https://github.com/openai/codex/blob/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex-rs/app-server/tests/suite/v2/thread_queue.rs#L391-L425).
+If more history intervenes, use Recover on the same Watch for up to 128 pages
+(1,024 turns including the boundary) within 25 seconds. Both budgets include
+time for the extra head recheck after a multi-page result and any queue read. A partial
+scan, changed head or conflicting client ID cannot prove a match. If the deeper
+budget is exhausted, attribution remains uncertain; keep the original receipt.
+After a unique match is recorded, subsequent reads verify the original user
+item in that exact bound turn and check newer turns for conflicts.
 
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)

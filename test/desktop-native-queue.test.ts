@@ -110,23 +110,9 @@ test("native queue requires a genuine fresh admission and exact pending store re
   assert.equal(s.methods.filter(m => m === "thread/queue/add").length,1);
 });
 
-test("an active unanswered question blocks; malformed or lost acknowledgements preserve single dispatch", async t => {
+test("malformed or lost acknowledgements preserve single native dispatch", async t => {
   const s = await fixture(t), writer = await fixtureWriter(s.target);
   const prepare = () => writer.prepareDesktopQueue(s.target, s.home);
-  const base = s.pages.get("")!;
-  const question = {id:"q",type:"agentMessage",text:"choose",delivery:"async",questions:[{title:"q",options:null}]};
-  s.pages.set("", page([turn("question", [user(), question], {status:"inProgress",completedAt:null})]));
-  await assert.rejects(prepare(), {reason:"desktop_queue_question_pending",dispatchState:"not_sent"});
-  for (const overlay of [{moderation:{moderated:false,display:"desktop"}}, {}]) {
-    const itemsView = "moderation" in overlay ? "full" : "summary";
-    s.pages.set("", page([turn("question", [{...question,...overlay}], {status:"inProgress",itemsView})]));
-    await assert.rejects(prepare(), {reason:"desktop_queue_question_pending",dispatchState:"not_sent"});
-  }
-  assert.equal(s.methods.includes("thread/queue/add"), false);
-  s.pages.set("", page([turn("question", [user(),question,
-    user("answer","human",'<send_user_message_question_reply>{"questionItemId":"q","answer":"ok"}</send_user_message_question_reply>')], {status:"inProgress",completedAt:null})]));
-  assert.equal((await prepare()).baselineTurnId, "question");
-  s.pages.set("",base);
   for (const variant of ["loseAck","rejectReceipt"] as const) {
     s.queued.length = 0; s[variant] = true;
     const admission = await prepare(), watchId = "desktop-watch:queue-"+variant;
@@ -138,6 +124,47 @@ test("an active unanswered question blocks; malformed or lost acknowledgements p
     s[variant] = false;
   }
   assert.deepEqual(s.methods.filter(m => m.includes("queue/add")), ["thread/queue/add", "thread/queue/add"]);
+});
+
+test("independent append leaves a pending question unanswered during an active turn or transient interruption", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  const prepare = () => writer.prepareDesktopQueue(s.target, s.home);
+  const notice = "desktop_queue_question_pending";
+  const question = { id: "q", type: "agentMessage", text: "fixture", delivery: "async", questions: [{ title: "q", options: null }] };
+  const child = { id: "child-start", type: "subAgentActivity", kind: "started" };
+  const answer = user("answer", "human", '<send_user_message_question_reply>{"questionItemId":"q","answer":"ok"}</send_user_message_question_reply>');
+  for (const status of ["inProgress", "interrupted"]) {
+    const active = { status, completedAt: null };
+    s.pages.set("", page([turn("baseline", [user(), child], active)]));
+    const admission = await prepare();
+    assert.ok(!admission.notices?.includes(notice)); // A sub-agent entry alone is no evidence of a question.
+    const watchId = "desktop-watch:pending-question-" + status;
+    const requestClientId = clientId + "-" + status;
+    writer.reserve(watchId, admission, requestClientId, prompt);
+
+    const pendingPage = page([turn("baseline", [user(), child, question], active)]);
+    s.pages.set("", pendingPage);
+    assert.ok((await prepare()).notices?.includes(notice));
+    const before = s.methods.length;
+    await writer.submitDesktopQueueOnce({ target: s.target, admission, storeDir: writer.storeDir,
+      watchId, clientUserMessageId: requestClientId, prompt });
+    const reads = new Set(["initialize", "initialized", "thread/read", "thread/turns/list", "thread/queue/list"]);
+    assert.deepEqual(s.methods.slice(before).filter(method => !reads.has(method)), ["thread/queue/add"]);
+    assert.deepEqual(s.queued.at(-1), {id: "queue-id", clientUserMessageId: requestClientId,
+      input: [{type:"text", text: prompt, text_elements: []}]});
+    assert.ok((await prepare()).notices?.includes(notice)); // The user's question still needs their answer.
+
+    s.pages.set("", page([turn("baseline", [user(), child, question, answer], active)]));
+    assert.ok(!(await prepare()).notices?.includes(notice));
+  }
+  for (const status of ["completed", "failed", "interrupted"]) {
+    s.pages.set("", page([turn("baseline", [user(), child, question], { status, completedAt:100 })]));
+    assert.ok(!(await prepare()).notices?.includes(notice));
+  }
+  for (const [itemsView, overlay] of [["full", {moderation:{moderated:false,display:"desktop"}}], ["summary", {}]] as const) {
+    s.pages.set("", page([turn("baseline", [{...question, ...overlay}], {status:"inProgress", completedAt:null, itemsView})]));
+    assert.ok((await prepare()).notices?.includes(notice));
+  }
 });
 
 test("ordinary Send appends behind human input across active work, approval and unfamiliar history", async t => {
@@ -309,6 +336,81 @@ test("queue position changes, edits or disappearance never attest execution; onl
   assert.ok(s.methods.every(method => !method.startsWith("thread/queue/") || method === "thread/queue/list"));
 });
 
+test("an ordinary observer covers the native queue capacity without binding early or confusing similar human turns", async t => {
+  const s = await fixture(t);
+  const rows = Array.from({length: 100}, (_, i) =>
+    turn("turn-" + i, [user("msg-" + i, i === 0 ? clientId : "human-" + i)]));
+  rows.push(turn("baseline", []));
+  function paginate(data: unknown[]) {
+    for (let i = 0; i < data.length; i += 8) s.pages.set(i ? String(i) : "", page(data.slice(i,i+8), i+8 < data.length ? String(i+8) : null));
+  }
+  paginate(rows);
+  const matched = await readDesktopQueueSubmission(s.target, input);
+  assert.equal(matched.state === "matched" && matched.turn.turnId, "turn-0");
+  rows[95] = turn("other", [user("duplicate", clientId)]);
+  paginate(rows);
+  assert.deepEqual(await readDesktopQueueSubmission(s.target, input), {state:"uncertain", reason:"desktop_queue_submission_conflict"});
+  const outsideDeepWindow = Array.from({length:1024}, (_, i) => turn("deep-" + i, [user("m",i ? "other" : clientId)]));
+  paginate([...outsideDeepWindow,turn("baseline",[])]);
+  const calls = s.methods.length;
+  assert.deepEqual(await readDesktopQueueSubmission(s.target,{...input,historyScan:"recover"}),
+    {state:"uncertain",reason:"desktop_queue_recovery_scan_limit"});
+  assert.equal(s.methods.slice(calls).filter(method => method === "thread/turns/list").length,128);
+});
+
+test("Recover on the original Watch can verify a long queue interval, rejects a deep duplicate, then follows only its proven turn", async t => {
+  const s = await fixture(t), writer = await fixtureWriter(s.target);
+  const deps: DesktopTaskServiceDependencies = {
+    repository: writer.repo,
+    observe: async () => { throw new DesktopEndpointUnavailable("ECONNREFUSED"); },
+    start: async () => assert.fail("queue observation must not start a turn"),
+    queue: {
+      prepare: target => writer.prepareDesktopQueue(target, s.home),
+      submit: (target, admission, claim) => writer.submitDesktopQueueOnce({target, admission, ...claim, storeDir:writer.storeDir}),
+      observe: readDesktopQueueSubmission
+    }
+  };
+  const controllerSession = "isolated-controller";
+  const sent = await createDesktopTaskService(deps).send({target:s.target, desktopId:createDesktopConversationId(s.target),
+    controllerSession, messageId:"deep-original", requestId:"long-queue-recovery-request", text:prompt});
+  const ownId = sent.send_intent!.client_user_message_id;
+  const rows = Array.from({length: 132}, (_, i) => turn("turn-" + i, [user("m-" + i,"human-" + i)]));
+  rows[0] = turn("mine", [user("m",ownId)], {status:"inProgress",completedAt:null});
+  rows.push(turn("baseline", []));
+  function paginate() {
+    for (let i = 0; i < rows.length; i += 8) s.pages.set(i ? String(i) : "", page(rows.slice(i,i+8), i+8 < rows.length ? String(i+8) : null));
+  }
+  paginate();
+  const service = createDesktopTaskService(deps);
+  const incomplete = await service.reconcile(sent.id);
+  assert.equal(incomplete.observation_error, "desktop_queue_history_requires_recover");
+  assert.equal(incomplete.native_turn_id, undefined);
+  rows[125] = turn("conflicting", [user("duplicate",ownId)]);
+  paginate();
+  const conflict = await service.recover(sent.id, {controllerSession});
+  assert.equal(conflict.observation_error, "desktop_queue_submission_conflict");
+  assert.equal(conflict.native_turn_id, undefined);
+  rows[125] = turn("human", []);
+  paginate();
+  assert.equal((await service.recover(sent.id,{controllerSession})).native_turn_id, "mine");
+
+  // A different identity cannot replace the already bound turn, even though
+  // it carries an apparently identical message after the original queue event.
+  rows[0] = turn("imposter",[user("imposter",ownId)]);
+  rows[1] = turn("mine", [user("m", "different-client")]);
+  paginate();
+  const changed = await service.reconcile(sent.id);
+  assert.equal(changed.observation_error, "desktop_queue_bound_turn_conflict");
+  assert.equal(changed.native_turn_id, "mine");
+  rows[0] = turn("new-human", []);
+  rows[1] = turn("mine", [user("m",ownId)]);
+  paginate();
+  const reads = s.methods.length;
+  assert.equal((await service.reconcile(sent.id)).status,"completed");
+  assert.equal(s.methods.slice(reads).filter(method => method === "thread/turns/list").length,1);
+  assert.equal(s.methods.filter(method => method === "thread/queue/add").length,1);
+});
+
 test("ordinary Desktop Send appends behind a human and settles its own Watch once through the native wire, Store and callback outbox", async t => {
   const s = await fixture(t), writer = await fixtureWriter(s.target);
   const baseline = turn("baseline", [user("u", "older"), { id: "child", type: "subAgentActivity", kind: "started" }]);
@@ -332,7 +434,7 @@ test("ordinary Desktop Send appends behind a human and settles its own Watch onc
   };
   const request = { target: s.target, desktopId: createDesktopConversationId(s.target), controllerSession: "isolated-controller",
     callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "isolated-controller" }),
-    messageId: "one-original-request", text: prompt };
+    messageId: "first-outer-invocation", requestId: "one-original-request", text: prompt };
   const service = createDesktopTaskService(deps);
   const task = await service.send(request), queued = desktopTaskProjection(task);
   assert.equal(queued.delivery_receipt, "native_queue_accepted");

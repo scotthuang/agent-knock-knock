@@ -218,9 +218,9 @@ test("Desktop Status reports native queue availability and the specific reason w
   let blocked = false;
   f.transport.queue = {
     async prepare() {
-      if (blocked) throw new DesktopQueueAdmissionError("desktop_queue_question_pending");
+      if (blocked) throw new DesktopQueueAdmissionError("desktop_queue_saved_draft");
       return { cwd, ownerId: "writer-a", endpointId: "socket-a", baselineTurnId: "parent",
-        notices: ["desktop_queue_parent_running", "desktop_queue_live_input_unobserved"] };
+        notices: ["desktop_queue_parent_running", "desktop_queue_question_pending", "desktop_queue_live_input_unobserved"] };
     },
     async submit() { throw new Error("Status must not dispatch"); },
     async observe() { throw new Error("No queue request has been submitted"); }
@@ -228,14 +228,15 @@ test("Desktop Status reports native queue availability and the specific reason w
   const ready = await f.run("status", { conversation: f.id });
   assert.equal(ready.available_actions.send.input.conversation_id, f.id);
   assert.ok(ready.queue_notices.includes("desktop_queue_parent_running"));
+  assert.ok(ready.queue_notices.includes("desktop_queue_question_pending"));
   assert.equal(ready.pending_interaction_count, null);
   assert.equal(ready.available_actions.approve, undefined);
   blocked = true;
   const denied = await f.run("status", { conversation: f.id });
   assert.equal(denied.capabilities.send, false);
   assert.equal(denied.available_actions.send, undefined);
-  assert.equal(denied.observation_error, "desktop_queue_question_pending");
-  assert.equal(denied.can_send_reason, "desktop_queue_question_pending");
+  assert.equal(denied.observation_error, "desktop_queue_saved_draft");
+  assert.equal(denied.can_send_reason, "desktop_queue_saved_draft");
   assert.equal(f.sends, 0);
 });
 
@@ -262,12 +263,12 @@ test("Desktop persisted Status rejects changed owner, endpoint, cwd, unverified 
 
 test("Desktop CLI sends once, launches exact Watch, recovers completion and enforces controller ownership", async t => {
   const f = fixture(t);
-  const input = { conversation: f.id, message: "Only reply READY", messageId: "stable-cli-message", openclawSession: "controller-one" };
+  const input = { conversation: f.id, message: "Only reply READY", messageId: "stable-cli-message", desktopRequestId: "intent-stable-cli-message", openclawSession: "controller-one" };
   const receipt = await f.run("send", input);
   assert.equal(receipt.agent_acceptance, "proven"); assert.equal(receipt.native_turn_id, "turn-one");
   assert.equal(receipt.callback_expected, true); assert.equal(receipt.monitor_pid, 1234);
   assert.equal(f.sends, 1);
-  const same = await f.run("send", input);
+  const same = await f.run("send", { ...input, messageId: "changed-tool-call" });
   assert.equal(same.watch_id, receipt.watch_id); assert.equal(f.sends, 1);
   const explicit = await f.run("watch-terminal", { conversation: f.id, openclawSession: "controller-two" });
   assert.equal(explicit.native_turn_id, "turn-one"); assert.notEqual(explicit.watch_id, receipt.watch_id);

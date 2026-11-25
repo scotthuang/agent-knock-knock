@@ -20,6 +20,7 @@ export function desktopSendToolArgs(params: Record<string, unknown>, config: Rec
   const args = ["send", "--conversation", id, "--message", requiredString(params.request, "request"), "--background",
     "--openclaw-session", requiredString(context.sessionKey, "controller session")];
   args.push("--message-id", requiredString(messageId, "stable Desktop tool call identity"));
+  pushOptional(args, "--desktop-request-id", params.desktopRequestId);
   pushOptional(args, "--store-dir", resolvePluginStoreDir(config));
   pushOptional(args, "--openclaw-bin", config.openclawBin);
   pushOptional(args, "--codex-home", config.codexHome);

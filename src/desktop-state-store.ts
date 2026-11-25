@@ -24,6 +24,8 @@ export interface DesktopSendIntent {
   queue_cwd?: string;
   queue_id?: string;
   message_id: string;
+  /** SHA-256 of the caller's preallocated business-request key. Legacy Sends lack this field. */
+  request_key_sha256?: string;
   client_user_message_id: string;
   text: string;
   owner_client_id: string;
@@ -122,6 +124,7 @@ function assertSendIntent(r: DesktopTaskRecord): void {
     !["reserved", "uncertain", "accepted", "not_sent"].includes(i.state) ||
     (i.receipt_turn_id !== undefined && !nonblank(i.receipt_turn_id)) ||
     ((i.state === "accepted") !== Boolean(r.native_turn_id))) throw new Error("invalid Desktop send intent");
+  if (i.request_key_sha256 !== undefined && (typeof i.request_key_sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(i.request_key_sha256))) throw new Error("invalid Desktop request key digest");
   assertQueueIntent(i, r.native_turn_id);
 }
 function assertQueueIntent(i: DesktopSendIntent, nativeTurnId: string | undefined): void {
@@ -278,7 +281,7 @@ export function createDesktopStateStore(storeDir: string, locks: { acquire(lockP
         assertBackendRecoveryUpdate(current, record);
         if (current.native_turn_id && current.native_turn_id !== record.native_turn_id) throw new Error("Desktop exact turn anchor cannot change");
         if (current.send_intent) {
-          for (const key of ["message_id", "client_user_message_id", "text", "owner_client_id", "baseline_turn_ids", "dispatched_at", "delivery_path", "queue_endpoint_id", "queue_cwd"] as const) {
+          for (const key of ["message_id", "request_key_sha256", "client_user_message_id", "text", "owner_client_id", "baseline_turn_ids", "dispatched_at", "delivery_path", "queue_endpoint_id", "queue_cwd"] as const) {
             if (!isDeepStrictEqual(current.send_intent[key], record.send_intent?.[key])) throw new Error("Desktop send intent cannot change");
           }
           if (current.send_intent.receipt_turn_id && current.send_intent.receipt_turn_id !== record.send_intent?.receipt_turn_id) throw new Error("Desktop send receipt cannot change");

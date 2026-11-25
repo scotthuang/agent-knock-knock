@@ -38,6 +38,14 @@ exceed its original hard lifetime. Recover does not renew either deadline.
 An upgrade alone never extends saved deadlines, revives expired observation or
 replays accepted notifications.
 
+If a Desktop queue entry is still waiting when its Watch expires, background
+polling stops. Request Status or Recover on the original Watch to check the
+original message for a later turn and its outcome. Finding the turn leaves the
+deadline unchanged. To continue unattended observation, Renew that same Watch
+while the acknowledged, unchanged entry is visible in the queue or its exact
+turn is running. These operations keep the original submission and callback
+identity. An explicit Unwatch still suppresses completion notifications.
+
 Closed management cannot be reopened. Unwatch does not release an unresolved
 Send reservation; Close explicitly releases management without asserting that
 the native submission failed. Reusing the original Send message ID still returns

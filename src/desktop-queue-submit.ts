@@ -4,7 +4,7 @@ import { cliNow, cliNowMs, cliPid, cliSleepSync } from "./cli-runtime-context.js
 import { CodexNativeRpc } from "./codex-native-client-rpc.js";
 import { answeredNativeQuestionIds, nativeId, nativePage, nativeRecord, parseNativeThread, parseNativeTurn } from "./codex-native-snapshot.js";
 import { CodexNativeError } from "./codex-native-types.js";
-import { desktopQueueSocketIdentity } from "./desktop-native-queue.js";
+import { desktopQueueSocketIdentity, durableDesktopQueueTurnStatus } from "./desktop-native-queue.js";
 import { verifyDesktopQueueOwner, type DesktopQueueOwner } from "./desktop-queue-owner.js";
 import { createDesktopStateStore, type DesktopTaskRecord } from "./desktop-state-store.js";
 import type { DesktopQueueAdmission } from "./desktop-task-queue.js";
@@ -26,7 +26,6 @@ let lastQueueRead: { ownerId: string; endpointId: string; socket: string; expire
 const admissionReasons = {
   desktop_queue_saved_draft: "A saved draft is present. Keep it intact; its ordering and preservation on independent append are unverified.",
   desktop_queue_retained_editor: "A retained editor document is present. Its isolation from a queued submission is unverified.",
-  desktop_queue_question_pending: "An unresolved question is present on the active turn. Queue isolation for this interaction is unverified.",
   desktop_queue_baseline_unavailable: "No exact pre-send turn boundary is available for tracking this submission.",
   desktop_queue_contract_unavailable: "Cannot establish the native thread queue contract on this endpoint.",
   desktop_queue_write_denied: "The native thread explicitly disallows direct input.",
@@ -61,21 +60,32 @@ function queueBaseline(rawTurn: Record<string, unknown>, notices: string[]): str
   // Older turns and sub-agent activity are not renderer interactions or write permissions.
   // Only the exact turn boundary is needed to find our own subsequent client message.
   const turnId = nativeId(rawTurn.id);
-  if (rawTurn.status === "inProgress") {
-    notices.push("desktop_queue_parent_running");
+  const status = durableDesktopQueueTurnStatus(rawTurn);
+  if (status === "inProgress") notices.push("desktop_queue_parent_running");
+  if (status === "unknown" || status === "inProgress") {
     if (Array.isArray(rawTurn.items) && rawTurn.items.some(item => item?.type === "agentMessage" &&
         item.delivery === "async" && Array.isArray(item.questions) && item.questions.length > 0)) {
-      const turn = parseNativeTurn(rawTurn);
-      // Display directives govern publication of text. They do not settle a question.
-      const answered = answeredNativeQuestionIds(turn);
-      const pending = turn.items.some(item => item.type === "agentMessage" && item.delivery === "async" &&
-        item.questions?.some((_question, index, questions) =>
-          !(questions.length === 1 && answered.has(item.id)) &&
-          !answered.has(JSON.stringify(["request_user_input_async", item.id, index]))));
-      if (!turn.itemsComplete || pending) throw new DesktopQueueAdmissionError("desktop_queue_question_pending");
+      // A separate native append never answers this question. If the history shape
+      // cannot prove all visible questions answered, disclose that fact without
+      // turning an informational history read into a veto on the queued message.
+      if (hasUnansweredQueueQuestion(rawTurn)) notices.push("desktop_queue_question_pending");
     }
   }
   return turnId;
+}
+
+function hasUnansweredQueueQuestion(rawTurn: Record<string, unknown>): boolean {
+  try {
+    const turn = parseNativeTurn(rawTurn);
+    const answered = answeredNativeQuestionIds(turn);
+    return turn.items.some(item => item.type === "agentMessage" && item.delivery === "async" &&
+      item.questions?.some((_question, index, questions) =>
+        !(questions.length === 1 && answered.has(item.id)) &&
+        !answered.has(JSON.stringify(["request_user_input_async", item.id, index]))));
+  } catch (error) {
+    if (error instanceof CodexNativeError && error.code === "invalid_response") return true;
+    throw error;
+  }
 }
 
 async function inspectQueue(rpc: CodexNativeRpc, threadId: string, previouslyVerified: boolean, notices: string[]) {

@@ -81,7 +81,8 @@ export const semanticToolDescriptions = {
     "terminal input or replacement process is used. Preserve uncertain receipts " +
     "and never repeat a send blindly. For Desktop, pass request and the exact conversation_id from List. AKK " +
     "uses the original owner or, when advertised, appends once to the original thread's native queue. " +
-    "Queueing may wait behind running or queued work. Use the returned Watch to verify the exact executing turn. " +
+    "New requests need only the target and message. Optionally supply desktopRequestId on the first call to correlate the same request across tool calls. " +
+    "If the result is lost, inspect the original Watch; keep any original key unchanged. Queueing may wait behind other work. " +
     "Set desktopQueueOnlyIfEmpty when that is a strict user condition. Keep uncertain receipts; never retry or answer a pending interaction with Send. " +
     "For other advertised terminal actions, start a new AKK Turn, use one advertised terminal_user_explicit " +
     "user-priority send, or explicitly recover one current uncertain submission " +

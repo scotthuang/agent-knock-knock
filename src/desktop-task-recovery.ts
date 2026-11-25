@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { resolveMonitorHardTimeoutMs } from "./monitor-deadline-policy.js";
 import { backendObservationStopped, backendRenewalDeadline, prepareBackendCallbackRetry } from "./backend-task-recovery.js";
 import { clearDesktopInteractionAttention } from "./desktop-task-interactions.js";
@@ -14,7 +15,7 @@ export interface DesktopRecoveryHost {
   status(id: string): DesktopTaskRecord;
   update(id: string, operation: (task: DesktopTaskRecord) => void): DesktopTaskRecord;
   observe(target: DesktopThreadIdentity): Promise<DesktopSnapshot>;
-  observeQueue(task: DesktopTaskRecord): Promise<DesktopQueueObservation>;
+  observeQueue(task: DesktopTaskRecord, historyScan?: "recover"): Promise<DesktopQueueObservation>;
   applyQueue(task: DesktopTaskRecord, observed: DesktopQueueObservation, recover?: boolean): void;
   applySnapshot(task: DesktopTaskRecord, snapshot: DesktopSnapshot, recover?: boolean): void;
   deliverPending(id: string, notificationId?: string): Promise<void>;
@@ -23,6 +24,11 @@ export interface DesktopRecoveryHost {
 }
 export const desktopObservationStopped = backendObservationStopped;
 export const desktopLive = (task: DesktopTaskRecord): boolean => task.status === "awaiting_acceptance" || task.status === "watching";
+/** Both the original append receipt and a current read of that unchanged queue entry must agree. */
+export function desktopVerifiedQueueWait(task: DesktopTaskRecord): boolean {
+  return !task.native_turn_id && task.send_intent?.delivery_path === "native_thread_queue" &&
+    Boolean(task.send_intent.queue_id) && task.observation_error === "desktop_queue_entry_waiting";
+}
 export function desktopUnresolvedSend(task: DesktopTaskRecord): boolean {
   return task.kind === "send" && !task.closed_at && !task.native_turn_id &&
     Boolean(task.send_intent && ["reserved", "uncertain"].includes(task.send_intent.state));
@@ -59,9 +65,16 @@ function exactTurn(task: DesktopTaskRecord, snapshot: DesktopSnapshot) {
   const matching = snapshot.turns.filter(turn => turn.turnId === task.native_turn_id);
   return matching.length === 1 ? matching[0] : undefined;
 }
-function fresh(task: DesktopTaskRecord, initial: DesktopTaskRecord, input: DesktopRecoveryInput): void {
+/** A monitor may persist the same observation while a deeper queue read is pending.
+ * Preserve all other fields, including the observation's reason, anchors, receipts and stop state. */
+function queueRecoveryFence({ revision, updated_at, observed_at, ...state }: DesktopTaskRecord) {
+  return state;
+}
+function fresh(task: DesktopTaskRecord, initial: DesktopTaskRecord, input: DesktopRecoveryInput, queueRead = false): void {
   owner(task, input); open(task);
-  if (task.revision !== initial.revision) throw new DesktopTaskError("desktop_task_changed", "Desktop task changed during recovery; refresh Status");
+  if (task.revision === initial.revision) return;
+  if (queueRead && isDeepStrictEqual(queueRecoveryFence(task), queueRecoveryFence(initial))) return;
+  throw new DesktopTaskError("desktop_task_changed", "Desktop task changed during recovery; refresh Status");
 }
 function timeoutMs(value?: number): number {
   const timeout = resolveMonitorHardTimeoutMs(value);
@@ -77,7 +90,7 @@ function retryNotification(task: DesktopTaskRecord, id?: string): DesktopNotific
 export function createDesktopTaskRecovery(host: DesktopRecoveryHost) {
   const initial = (id: string, input: DesktopRecoveryInput) => { const task = host.status(id); owner(task, input); open(task); return task; };
   const observe = async (task: DesktopTaskRecord) => task.send_intent?.delivery_path === "native_thread_queue"
-    ? { kind: "queue" as const, observation: await host.observeQueue(task) }
+    ? { kind: "queue" as const, observation: await host.observeQueue(task, "recover") }
     : { kind: "legacy" as const, observation: await host.observe(task.target) };
   const apply = (task: DesktopTaskRecord, result: Awaited<ReturnType<typeof observe>>) => {
     if (result.kind === "queue") host.applyQueue(task, result.observation, true);
@@ -110,7 +123,7 @@ export function createDesktopTaskRecovery(host: DesktopRecoveryHost) {
       if (task.send_intent?.delivery_path === "native_thread_queue" && ["completed", "failed", "interrupted"].includes(task.status)) return task;
       const observed = await observe(task);
       return host.update(id, current => {
-        fresh(current, task, input); apply(current, observed);
+        fresh(current, task, input, observed.kind === "queue"); apply(current, observed);
         host.expire(current); current.recovered_at = host.now().toISOString();
       });
     },
@@ -118,17 +131,18 @@ export function createDesktopTaskRecovery(host: DesktopRecoveryHost) {
       const task = initial(id, input); const timeout = timeoutMs(input.timeoutMs);
       const observed = await observe(task);
       return host.update(id, current => {
-        fresh(current, task, input); apply(current, observed);
+        fresh(current, task, input, observed.kind === "queue"); apply(current, observed);
         if (["completed", "failed", "interrupted"].includes(current.status)) return;
+        const waiting = observed.kind === "queue" && observed.observation.state === "pending" && desktopVerifiedQueueWait(current);
         const active = observed.kind === "queue"
           ? observed.observation.state === "matched" && observed.observation.turn.turnId === current.native_turn_id && observed.observation.turn.status === "inProgress"
           : observed.observation.runtimeStatus === "active" && exactTurn(current, observed.observation)?.status === "inProgress";
-        if (!active) {
-          throw new DesktopTaskError("desktop_exact_task_not_active", "Renew needs fresh active evidence for the original Desktop task");
+        if (!active && !waiting) {
+          throw new DesktopTaskError("desktop_exact_task_not_active", "Renew needs the original active Desktop task or its acknowledged, unchanged waiting queue entry");
         }
         current.deadline_at = backendRenewalDeadline(current, host.now(), timeout);
         current.renewed_at = host.now().toISOString(); current.renewal_count = (current.renewal_count ?? 0) + 1;
-        current.status = "watching"; delete current.unwatched_at;
+        current.status = waiting ? "awaiting_acceptance" : "watching"; delete current.unwatched_at;
         suppressDesktopNotifications(current, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
         if (observed.kind === "legacy") host.applySnapshot(current, observed.observation);
       });

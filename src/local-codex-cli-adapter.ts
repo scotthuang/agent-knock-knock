@@ -1,6 +1,6 @@
 import { dispatchClaudeNativeCli, claudeNativeListForCli } from "./claude-native-cli-adapter.js";
 import { dispatchDesktopCreationCli } from "./desktop-creation-cli.js";
-import { assertDesktopQueueCondition } from "./desktop-task-queue.js";
+import { assertDesktopQueueCondition, assertDesktopRequestOptions } from "./desktop-task-queue.js";
 import { dispatchDesktopCli, desktopListForCli } from "./desktop-cli-adapter.js";
 import { dispatchCodexNativeCli, codexNativeListForCli } from "./codex-native-cli-adapter.js";
 
@@ -9,7 +9,10 @@ export { codexNativeListForCli } from "./codex-native-cli-adapter.js";
 
 /** Native resource IDs never fall through to terminal selectors. */
 export async function dispatchLocalCodexCli(command: string | undefined, options: Record<string, unknown>): Promise<boolean> {
-  if (command === "send") assertDesktopQueueCondition(options.desktopQueueOnlyIfEmpty);
+  if (command === "send") {
+    assertDesktopQueueCondition(options.desktopQueueOnlyIfEmpty);
+    assertDesktopRequestOptions(options.conversation ?? options.conversationId ?? options.session ?? options.terminal, options);
+  }
   return await dispatchDesktopCreationCli(command, options) || await dispatchClaudeNativeCli(command, options) || await dispatchCodexNativeCli(command, options) || await dispatchDesktopCli(command, options);
 }
 
