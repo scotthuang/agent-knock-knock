@@ -116,18 +116,30 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   await assert.rejects(restarted.watch({ ...input, controllerSession: "another-controller" }), { code: "no_active_task" });
   h.state.now += 60000;
   assert.ok(Date.parse((await restarted.renew(one.id, owner)).deadline_at) > Date.parse(deadline));
-  h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"),
-    items: [{ id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE" }] } };
+  const display = { version: 1, mode: "show", trustedContacts: "check" } as const;
+  h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"), items: [
+    { id: "progress", type: "agentMessage", phase: "commentary", text: "Progress only" },
+    { id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE", answerDisplay: display }
+  ] } };
   await Promise.all([restarted.reconcile(one.id), h.service.reconcile(one.id)]);
   const done = await restarted.reconcile(one.id);
   assert.equal(done.status, "completed"); assert.equal(done.final_text, "DONE");
   assert.equal(done.notifications.length, 1); assert.equal(done.notifications[0].status, "accepted");
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.metadata?.turn_id, "execution-turn");
+  assert.deepEqual(done.final_text_display, [display]);
+  const callback = h.state.notifications[0].envelope;
+  assert.equal(callback.route.controller_session_id, input.controllerSession);
+  assert.deepEqual(callback.event.metadata?.final_text_display, [display]);
+  assert.equal(callback.event.metadata?.trusted_contacts_check_status, "not_performed_by_akk");
+  assert.match(callback.event.body, /trusted.?contact/i);
+  assert.match(callback.event.body, /DONE/);
+  assert.doesNotMatch(callback.event.body, /Progress only/);
   assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");
   assert.equal((await restarted.reconcile(one.id)).status, "completed");
+  assert.equal(h.state.notifications.length, 1);
 });
 
 test("independent queue requests survive an older ACK loss; changing just the message ID cannot replay it", async t => {
@@ -496,6 +508,29 @@ test("commentary and analysis never become final output or stale manual-action c
   assert.equal(result.final_text, ""); assert.equal(result.pending_manual_count, 0);
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.type, "desktop_watch.settled");
+});
+
+test("a passive Desktop Watch on the same turn cannot collect the original requester's directed answer", async t => {
+  const h = harness(t);
+  const sent = await h.service.send({ ...input, callbackRoute: route });
+  const controllerSession = "passive-controller";
+  const watched = await h.service.watch({ ...input, controllerSession,
+    callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: controllerSession }) });
+  assert.equal(watched.native_turn_id, sent.native_turn_id);
+  const complete = turn("native-one", "completed", h.state.clientId);
+  complete.items.push({ id: "final", type: "agentMessage", phase: "final_answer",
+    answerDisplay: { version: 1, mode: "show", trustedContacts: "skip" }, text: "REQUESTER-ONLY" });
+  h.state.snapshot = snapshot([complete]);
+  const observer = await h.service.reconcile(watched.id);
+  assert.equal(observer.status, "completed");
+  assert.doesNotMatch(JSON.stringify(observer), /REQUESTER-ONLY/);
+  assert.equal(h.state.notifications.length, 1);
+  assert.equal(h.state.notifications[0].route.controller_session_id, controllerSession);
+  assert.doesNotMatch(JSON.stringify(h.state.notifications[0].envelope), /REQUESTER-ONLY/);
+  assert.equal((await h.service.reconcile(sent.id)).final_text, "REQUESTER-ONLY");
+  assert.equal(h.state.notifications.length, 2);
+  assert.equal(h.state.notifications[1].route.controller_session_id, input.controllerSession);
+  assert.match(h.state.notifications[1].envelope.event.body, /REQUESTER-ONLY/);
 });
 
 test("Desktop target identity must agree with the canonical conversation ID", async t => {

@@ -1,8 +1,9 @@
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn, type DesktopTurnItem,
   type DesktopPendingRequest, type DesktopTurnStatus } from "./desktop-types.js";
+import { isDeepStrictEqual } from "node:util";
 import { desktopAsyncQuestions } from "./desktop-async-interactions.js";
 import { parseDesktopRequestInteraction } from "./desktop-request-interactions.js";
-import { desktopSettingsSnapshot, projectDesktopItemDetails } from "./desktop-snapshot-details.js";
+import { desktopSettingsSnapshot, projectDesktopAnswerItem, projectDesktopItemDetails } from "./desktop-snapshot-details.js";
 import { validNativeItemTime } from "./backend-public-progress.js";
 
 export function desktopRecord(value: unknown): value is Record<string, unknown> {
@@ -71,23 +72,36 @@ function item(value: unknown): DesktopTurnItem {
   }
   if (result.type === "userMessage" && !result.content) invalid("Desktop user message has no content");
   if (result.type === "agentMessage" && typeof result.text !== "string") invalid("Desktop agent message has no text");
-  return result;
+  return projectDesktopAnswerItem(result, value.moderation);
+}
+
+function snapshotItems(items: unknown[], summaryView: boolean, summaryIds: unknown): DesktopTurnItem[] {
+  const ids = new Set<string>();
+  return items.map(value => {
+    const entry = item(value);
+    if (ids.has(entry.id)) invalid("Duplicate Desktop item id in one turn");
+    ids.add(entry.id);
+    // A summary can contain text while omitting its display directive. Only full items establish visibility.
+    if (entry.type === "agentMessage" && (summaryView || (summaryIds != null &&
+      (!Array.isArray(summaryIds) || summaryIds.includes(entry.id))))) {
+      delete entry.text;
+      delete entry.questions;
+    }
+    return entry;
+  });
 }
 
 function parseTurn(value: unknown): DesktopTurn {
   if (!desktopRecord(value) || !Array.isArray(value.items)) invalid("Invalid Desktop turn shape");
+  const summaryView = value.itemsView !== undefined && value.itemsView !== "full";
+  const summaryIds = desktopRecord(value.itemsPagination) ? value.itemsPagination.summaryItemIds : null;
   const result: DesktopTurn = {
     turnId: identifier(value.turnId, "turn id"),
     status: statuses.has(String(value.status)) ? value.status as DesktopTurnStatus : "unknown",
-    items: value.items.map(item),
+    items: snapshotItems(value.items, summaryView, summaryIds),
     itemsComplete: true
   };
-  const ids = new Set<string>();
-  for (const entry of result.items) {
-    if (ids.has(entry.id)) invalid("Duplicate Desktop item id in one turn");
-    ids.add(entry.id);
-  }
-  if (value.itemsView !== undefined && value.itemsView !== "full") result.itemsComplete = false;
+  if (summaryView) result.itemsComplete = false;
   if (value.itemsPagination !== undefined && value.itemsPagination !== null) {
     const p = value.itemsPagination;
     result.itemsComplete = result.itemsComplete && desktopRecord(p) && p.hasLoadedOldest === true && p.isLoadingOlder === false
@@ -109,7 +123,14 @@ function overlayTurn(canonical: DesktopTurn, live: DesktopTurn): DesktopTurn {
       && (previous.clientId !== entry.clientId || JSON.stringify(previous.content) !== JSON.stringify(entry.content))))) {
       invalid("Conflicting Desktop item identity");
     }
-    items.set(entry.id, entry);
+    // A live overlay can omit presentation metadata from the canonical copy. Keep the
+    // directive together with the body it governed; never apply it to a different body.
+    if (previous?.answerDisplay && !entry.answerDisplay) continue;
+    if (previous?.answerDisplay && entry.answerDisplay && !isDeepStrictEqual(previous.answerDisplay, entry.answerDisplay)) {
+      items.set(entry.id, { id: entry.id, type: entry.type, phase: entry.phase ?? previous.phase, answerDisplay: { mode: "unsupported" } });
+    } else {
+      items.set(entry.id, entry);
+    }
   }
   return { ...canonical, ...live, items: [...items.values()], itemsComplete: canonical.itemsComplete && live.itemsComplete };
 }

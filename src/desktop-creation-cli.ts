@@ -98,7 +98,7 @@ async function creationTaskProjection(r: DesktopCreationRecord, runtime: Desktop
     || path.resolve(task.target.codexHome) !== path.resolve(r.input.codexHome) || task.send_intent?.message_id !== r.id) {
     throw new Error("Desktop creation Watch identity differs from its immutable task");
   }
-  const projected = desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility));
+  const projected = desktopTaskProjection(task, desktopCapabilityProfile(runtime.compatibility), r.controllerSession);
   const { status, available_actions, ...fields } = projected;
   const result: Options = { ...output, ...fields, task_status: status, creation_status: output.creation_status,
     status: output.creation_status, request_state: task.send_intent?.state === "accepted" ? "accepted"

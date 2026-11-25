@@ -2,6 +2,7 @@ import { desktopAttemptCapabilities, desktopCompatibilityProjection, desktopInte
   desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
+import { desktopDisplayFields } from "./desktop-final-answer.js";
 import { desktopObservationStopped, desktopVerifiedQueueWait } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
@@ -52,8 +53,22 @@ function sessionSendAvailability(snapshot: DesktopSnapshot | undefined, profile:
   return { can_send_reason: snapshot.canSend ? "ready" : snapshot.idleBlockedReason ?? "desktop_not_sendable" };
 }
 
+/** A Watch created by a bystander is not the request that produced the answer. */
+export function desktopSendBelongsToRequester(task: DesktopTaskRecord, controller: string | undefined): boolean {
+  return task.kind === "send" && task.send_intent?.state === "accepted" && !!task.native_turn_id
+    && !!controller && task.controller_session === controller;
+}
+
+function storedAnswerProjection(task: DesktopTaskRecord, controller?: string) {
+  if (task.final_text_display?.length && !desktopSendBelongsToRequester(task, controller)) {
+    return { final_text: "", final_text_display: [{ mode: "desktop_only", reason: "original_requester_required" }] };
+  }
+  return { final_text: task.final_text, ...desktopDisplayFields(task.final_text_display) };
+}
+
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
-export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = false): Record<string, unknown> {
+export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = false,
+  controller?: string): Record<string, unknown> {
   const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = !terminal ? actionableTaskInteractions(task) : [];
@@ -73,7 +88,8 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    final_text: task.final_text, ...taskInteractionCounts(task, interactions, manualCount, queued && !terminal),
+    ...storedAnswerProjection(task, controller),
+    ...taskInteractionCounts(task, interactions, manualCount, queued && !terminal),
     interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile)),
     callback_expected: callbackExpected(task, terminal),
     callback_configured: Boolean(task.callback_route), ...callback,

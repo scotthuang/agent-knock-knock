@@ -1107,6 +1107,10 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-final-answer.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-identity.ts",
       "owner": "codex-desktop"
     },

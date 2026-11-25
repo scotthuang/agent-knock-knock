@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isPublicAgentMessage, validNativeItemTime } from "./backend-public-progress.js";
+import { validNativeItemTime } from "./backend-public-progress.js";
 import type { CodexAppServerThreadItem } from "./codex-app-server-read-client.js";
 import { CodexNativeRpc } from "./codex-native-client-rpc.js";
 import { nativeId, nativePage, nativeRecord, parseNativeThread, parseNativeTurn } from "./codex-native-snapshot.js";
 import { readDesktopSocketIdentity } from "./desktop-ipc-transport.js";
 import { desktopUserMessageText } from "./desktop-snapshot.js";
+import { projectDesktopAnswerItem } from "./desktop-snapshot-details.js";
 import { DesktopIpcError, type DesktopThreadIdentity, type DesktopTurn, type DesktopTurnItem } from "./desktop-types.js";
 
 interface Submission { clientUserMessageId: string; prompt: string; acknowledgedQueueId?: string }
@@ -86,15 +87,14 @@ function userInputs(value: unknown): { type: string; text?: string }[] {
 function projectItem(raw: CodexAppServerThreadItem): DesktopTurnItem {
   const item: DesktopTurnItem = { id: raw.id, type: raw.type };
   if (raw.type === "userMessage") { item.clientId = raw.clientId; item.content = userInputs(raw.content); }
-  if (isPublicAgentMessage(raw)) {
-    if (raw.delivery !== "async" && !raw.questions?.length && (raw.phase === "commentary" || raw.phase === "final_answer")) {
-      item.text = raw.text; item.phase = raw.phase;
-    }
+  if (raw.type === "agentMessage" && raw.delivery == null && !raw.questions?.length &&
+      (raw.phase === "commentary" || raw.phase === "final_answer")) {
+    item.text = raw.text; item.phase = raw.phase;
   }
   if (typeof raw.status === "string" && ["inProgress", "completed", "failed", "interrupted", "declined", "pending"].includes(raw.status)) item.status = raw.status;
   if (validNativeItemTime(raw.startedAtMs)) item.startedAtMs = raw.startedAtMs;
   if (validNativeItemTime(raw.completedAtMs)) item.completedAtMs = raw.completedAtMs;
-  return item;
+  return projectDesktopAnswerItem(item, raw.moderation);
 }
 
 /** IDs and full user inputs exist only while matching native items in memory. */
@@ -102,7 +102,8 @@ function publicTurn(turn: DesktopTurn): DesktopTurn {
   const actionTypes = new Set(["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch",
     "imageGeneration", "imageView", "plan", "collabAgentToolCall"]);
   return { ...turn, items: turn.items.filter(item =>
-    item.type === "agentMessage" ? typeof item.text === "string" : actionTypes.has(item.type)) };
+    item.type === "agentMessage" ? typeof item.text === "string" || (item.phase === "final_answer" && !!item.answerDisplay)
+      : actionTypes.has(item.type)) };
 }
 
 /** A non-owner may project an interrupted turn before the owner has actually stopped. */

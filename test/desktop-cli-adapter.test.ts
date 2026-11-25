@@ -210,6 +210,63 @@ test("Desktop Status may display exact persisted history without authorizing inp
   assert.equal(f.sends, 0);
 });
 
+test("Desktop Status scopes a directed final to the sending controller, exact turn and original Watch", async t => {
+  const cwd = "/fixture/requester-project";
+  const f = fixture(t, { ...VERIFIED_DESKTOP_BUILD, applicationIdentityVerified: true }, cwd);
+  const sender = { openclawSession: "sender" }, observer = { openclawSession: "observer" };
+  const entry = { conversation: f.id };
+  const sent = await f.run("send", { ...sender, ...entry, messageId: "request-1", message: "fixture question" });
+  const watched = await f.run("watch-terminal", { ...observer, ...entry });
+  f.finish();
+  const answer = f.snapshot.turns[0].items.at(-1)!;
+  answer.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
+  const owner = await f.run("status", { ...sender, watch: sent.watch_id });
+  assert.equal(owner.final_text, "EXACT_DONE");
+  assert.deepEqual(owner.final_text_display, [answer.answerDisplay]);
+  assert.equal(owner.trusted_contacts_check_status, "not_performed_by_akk");
+  for (const params of [{ watch: sent.watch_id }, { ...observer, watch: watched.watch_id }, { ...observer, ...entry }, entry]) {
+    assert.doesNotMatch(JSON.stringify(await f.run("status", params)), /EXACT_DONE/);
+  }
+  const live = await f.run("native-inspect", { ...sender, ...entry, inspection: "status" });
+  assert.equal(live.latest_turn.final_text, owner.final_text);
+  assert.deepEqual(live.latest_turn.final_text_display, owner.final_text_display);
+  f.transport.readPersistedTurn = async () => f.snapshot.turns[0];
+  f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
+  const history = async (context: Record<string, string>) => (await f.run("status", { ...entry, ...context })).persisted_history.latest_turn;
+  assert.equal((await history(sender)).final_text, owner.final_text);
+  assert.equal((await history(observer)).final_text, "");
+  f.snapshot.turns[0].turnId = "different-turn";
+  assert.equal((await history(sender)).final_text, "");
+});
+
+test("Status re-renders a settled historical Watch without rewriting it or repeating its callback", async t => {
+  for (const previousText of ["", "previously visible"]) {
+    const f = fixture(t);
+    const requester = { openclawSession: "original" };
+    const receipt = await f.run("send", { ...requester, conversation: f.id, messageId: "historical", message: "fixture question" });
+    const watch = { ...requester, watch: receipt.watch_id };
+    f.finish();
+    const final = f.snapshot.turns[0].items.at(-1)!;
+    final.text = previousText;
+    await f.run("watch-status", watch);
+    const settled = f.tasks.status(watch.watch);
+    assert.equal(settled.final_text, previousText);
+    assert.equal(f.callbacks, 1);
+    f.snapshot.latestTurnId = "successor";
+    f.snapshot.turns.push({ turnId: "successor", status: "completed", itemsComplete: true, items: [] });
+    final.text = "exact original turn";
+    final.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
+    assert.equal((await f.run("watch-status", watch)).final_text, final.text);
+    assert.equal((await f.run("watch-status", { watch: watch.watch })).final_text, "");
+    final.answerDisplay = { version: 1, mode: "block", reason: "cyber" };
+    const blocked = await f.run("watch-status", watch);
+    assert.equal(blocked.final_text, "");
+    assert.deepEqual(blocked.final_text_display, [final.answerDisplay]);
+    assert.deepEqual(f.tasks.status(watch.watch), settled);
+    assert.equal(f.callbacks, 1);
+  }
+});
+
 test("Desktop Status reports native queue availability and the specific reason when independent append becomes blocked", async t => {
   const cwd = "/fixture/desktop-target";
   const f = fixture(t, { version: "unreviewed", build: "unreviewed", applicationIdentityVerified: true },

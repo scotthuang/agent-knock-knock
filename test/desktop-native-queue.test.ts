@@ -241,10 +241,20 @@ test("correlation spans pages, ignores equal human text, and does not settle tra
   if (result.state === "matched") { assert.equal(result.turn.turnId, "exact"); assert.equal(result.turn.status, "unknown"); }
   s.pages.set("p2", page([turn("exact", [user(), {id:"secret",type:"reasoning",text:"private reasoning"},
     {id:"moderated",type:"agentMessage",text:"private answer",moderation:{moderated:true,display:"hidden"}},
+    {id:"shown",type:"agentMessage",phase:"final_answer",text:"for requester",moderation:{
+      moderated:true,display:{version:1,mode:"show",trustedContacts:"check"}}},
+    {id:"hidden",type:"agentMessage",phase:"final_answer",text:"private answer",moderation:{
+      moderated:true,display:{version:1,mode:"hide",replacement:{kind:"wellbeingPromptHelpline"}}}},
     {id:"final",type:"agentMessage",text:"ready",phase:"final_answer"}]), turn("baseline", [])]));
   result = await readDesktopQueueSubmission(s.target, input);
   assert.equal(result.state, "matched");
-  if (result.state === "matched") assert.equal(result.turn.status, "completed");
+  if (result.state === "matched") {
+    assert.equal(result.turn.status, "completed");
+    const shown = result.turn.items.find(item => item.id === "shown");
+    assert.equal(shown?.text, "for requester");
+    assert.equal(shown?.answerDisplay?.mode === "show" && shown.answerDisplay.trustedContacts, "check");
+    assert.equal(result.turn.items.find(item => item.id === "hidden")?.answerDisplay?.mode, "hide");
+  }
   assert.doesNotMatch(JSON.stringify(result), /private reasoning|private answer|queue proof|controller-message|userMessage/);
   assert.match(JSON.stringify(result), /ready/);
   s.threadStatus = "idle"; // A different owner has since manually loaded the already-observed exact native thread.

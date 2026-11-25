@@ -8,7 +8,7 @@ import {
   createCallbackEnvelope, parseCallbackAttemptOutcome, parseCallbackRoute,
   type CallbackAttemptOutcome, type CallbackEnvelopeV1, type CallbackRouteV1
 } from "./callback-transport.js";
-import type { DesktopAsyncInteraction, DesktopInteraction, DesktopThreadIdentity } from "./desktop-types.js";
+import type { DesktopAsyncInteraction, DesktopFinalDisplay, DesktopInteraction, DesktopThreadIdentity } from "./desktop-types.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import { assertDesktopAsyncInteraction } from "./desktop-async-state.js";
 import { assertDesktopInteraction } from "./desktop-interaction-state.js";
@@ -71,6 +71,7 @@ export interface DesktopTaskRecord extends BackendRecoveryFields {
   /** All executable interactions; old async-only records remain readable. */
   pending_interactions?: DesktopInteraction[];
   final_text?: string;
+  final_text_display?: DesktopFinalDisplay[];
   notifications: DesktopNotification[];
 }
 export interface DesktopStateScan {

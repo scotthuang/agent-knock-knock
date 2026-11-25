@@ -1,3 +1,12 @@
+/** Safe presentation metadata. Native text, free-form reasons and contact data never belong here. */
+export type DesktopFinalDisplay =
+  | { version: 1; mode: "show"; trustedContacts: "check" | "skip" }
+  | { version: 1; mode: "hide"; replacement: "wellbeingPromptHelpline" }
+  | { version: 1; mode: "block"; reason: "protection" | "cyber" }
+  | { version: 1; mode: "desktop_only"; reason: "wellbeingHelpline"; subject: "answer" | "prompt"; trustedContacts: "check" | "skip" }
+  | { mode: "desktop_only"; reason: "original_requester_required" }
+  | { mode: "unsupported" };
+
 /** AKK projections of identity-checked Desktop private IPC. Never expose raw snapshots. */
 export interface DesktopThreadIdentity { codexHome: string; hostId: string; threadId: string }
 export interface DesktopCompatibility { version: string; build: string; applicationIdentityVerified?: boolean }
@@ -5,6 +14,7 @@ export interface DesktopTurnItem {
   id: string;
   type: string;
   text?: string;
+  answerDisplay?: DesktopFinalDisplay;
   clientId?: string | null;
   content?: { type: string; text?: string }[];
   phase?: string | null;

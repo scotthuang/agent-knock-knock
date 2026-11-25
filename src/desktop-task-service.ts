@@ -11,6 +11,7 @@ import {
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
 import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
+import { desktopDisplayFields, desktopDisplayNotice, desktopFinalAnswer } from "./desktop-final-answer.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
 import { desktopQueueWitness, desktopRequestKeyDigest, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
@@ -85,13 +86,6 @@ function errorCode(error: unknown): string {
 function submissionTurn(snapshot: DesktopSnapshot, clientId: string, text: string): DesktopTurn | undefined {
   return findDesktopSubmission(snapshot, clientId, text)?.turn;
 }
-function finalText(turn: DesktopTurn): string {
-  const messages = turn.items.filter(item => item.type === "agentMessage" && item.delivery !== "async" && typeof item.text === "string");
-  const finals = messages.filter(item => item.phase === "final_answer");
-  // Older snapshots can omit phase; explicit commentary/analysis must never
-  // become the task's final result when no final answer exists.
-  return (finals.length ? finals : messages.filter(item => item.phase == null)).map(item => item.text).join("\n\n");
-}
 function assertSnapshot(task: Pick<DesktopTaskRecord, "target">, snapshot: DesktopSnapshot): void {
   if (snapshot.threadId !== task.target.threadId || !snapshot.ownerClientId || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) throw new DesktopTaskError("desktop_identity_mismatch", "Desktop observation did not match the exact thread");
 }
@@ -156,7 +150,8 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       source: { kind: "desktop_watch", watch_id: task.id, desktop_id: task.desktop_id },
       event: { id, type: `desktop_watch.${key.split(":")[0]}`, body, requires_response: false,
         metadata: { watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId,
-          ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}) } }
+          ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}),
+          ...(key === "settled" ? desktopDisplayFields(task.final_text_display) : {}) } }
     }) });
   }
   private make(input: DesktopTaskInput, id: string, kind: "send" | "watch"): DesktopTaskRecord {
@@ -301,8 +296,15 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     if (!turn.itemsComplete) { task.observation_error = "desktop_exact_turn_items_incomplete"; return; }
     task.status = turn.status;
     suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
-    task.final_text = finalText(turn); task.pending_manual_count = 0;
-    this.notify(task, "settled", `Desktop task ${task.id} ${task.status}.\n${task.final_text || "No assistant text was returned for this exact turn."}`);
+    const originalRequester = task.kind === "send" && task.send_intent?.state === "accepted" && task.native_turn_id === turn.turnId;
+    const answer = desktopFinalAnswer(turn, originalRequester);
+    task.final_text = answer.final_text;
+    if (answer.final_text_display) task.final_text_display = answer.final_text_display;
+    task.pending_manual_count = 0;
+    const notice = answer.final_text_display ? desktopDisplayNotice(answer.final_text_display) : "";
+    const body = [`Desktop task ${task.id} ${task.status}.`, notice, answer.final_text].filter(Boolean);
+    if (!notice && !answer.final_text) body.push("No assistant text was returned for this exact turn.");
+    this.notify(task, "settled", body.join("\n"));
   }
   private async observeQueue(task: DesktopTaskRecord, historyScan?: "recover"): Promise<DesktopQueueObservation> {
     if (!this.deps.queue) throw new DesktopTaskError("desktop_queue_unavailable", "Native Desktop thread queue observation is unavailable");

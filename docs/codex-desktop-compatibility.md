@@ -11,6 +11,31 @@ message runs, the new client may execute it. The Watch follows the original
 message. AKK keeps interactive controls available only through a verified owner
 connection that supports them.
 
+### Reading a Desktop answer
+
+Codex app-server 0.172.0 can attach a versioned display directive to an
+`agentMessage` with phase `final_answer`. For version 1 `show`, the original
+Send's controller receives the text and `final_text_display` on exact Watch
+Status and in its completion callback. Conversation Status can show it when
+the same controller's accepted Send matches the displayed thread and turn.
+Keep the Watch ID to read a particular task after the conversation moves on.
+Standalone observers and inventory queries cannot retrieve a directed answer.
+The Host is responsible for returning it to the initiating user in that
+session. AKK's binding identifies a controller session, not an individual
+reader in a shared chat.
+
+`trustedContacts: "check"` accompanies the answer. AKK passes the requirement
+to the original controller and includes its limitation in text callbacks.
+Structured results report `trusted_contacts_check_status: "not_performed_by_akk"`.
+The first-party client handles the account feature; AKK has no
+contact-check receipt and does not look up or notify anyone. A required
+wellbeing annotation or replacement is rendered in Desktop. For `hide`,
+`block`, malformed or unfamiliar directives, AKK withholds the original text
+and reports the display outcome. Commentary remains progress. On an explicit
+Watch Status read, the sender can retrieve an older directed answer if Codex
+still returns the exact complete turn. This read does not change the stored
+completion or replay the notification.
+
 ### Sending to a thread with a queue
 
 For an ordinary new task, pass the exact Desktop conversation and request

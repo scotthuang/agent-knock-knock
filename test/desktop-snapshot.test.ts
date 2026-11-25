@@ -33,6 +33,14 @@ test("Desktop snapshot merges exact canonical/live turn identities without losin
   assert.equal("raw" in snapshot, false);
 });
 
+test("Desktop summary text cannot establish the visibility of a recovered answer", () => {
+  for (const projection of [{ itemsView: "summary" }, { itemsPagination: { summaryItemIds: ["reply-one"] } }]) {
+    const snapshot = reduceDesktopSnapshot(state({ turns: [turn("turn-one", projection)] }), identity);
+    assert.equal(snapshot.turns[0].itemsComplete, false);
+    assert.equal(snapshot.turns[0].items.find(item => item.id === "reply-one")?.text, undefined);
+  }
+});
+
 test("Desktop snapshot projection whitelists identity even when caller passes a larger options object", () => {
   const extendedIdentity = { ...identity, prompt: "PRIVATE_PROMPT", callbackRoute: { secret: "PRIVATE_ROUTE" },
     beforeDispatch: async () => {} };
@@ -40,6 +48,35 @@ test("Desktop snapshot projection whitelists identity even when caller passes a 
   assert.deepEqual(snapshot, reduceDesktopSnapshot(state(), identity));
   assert.doesNotThrow(() => structuredClone(snapshot));
   assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_|beforeDispatch|callbackRoute/u);
+});
+
+test("Desktop overlays retain display instructions on the same final and cannot expose hidden text or question titles", () => {
+  const answer = { id: "reply", type: "agentMessage", phase: "final_answer", text: "requester's answer" };
+  const shown = { ...answer, moderation: { moderated: true, display: { version: 1, mode: "show", trustedContacts: "check" } } };
+  const hidden = { ...answer, text: "WITHHELD", moderation: { moderated: true,
+    display: { version: 1, mode: "hide", replacement: { kind: "wellbeingPromptHelpline" } } } };
+  const unmarked = { ...answer, text: "WITHHELD in unmarked overlay" };
+  for (const [history, live, expectedMode, expectedText] of [
+    [shown, unmarked, "show", answer.text], [unmarked, shown, "show", answer.text],
+    [hidden, unmarked, "hide", undefined], [unmarked, hidden, "hide", undefined],
+    [shown, hidden, "unsupported", undefined], [hidden, shown, "unsupported", undefined]
+  ] as const) {
+    const snapshot = reduceDesktopSnapshot(state({
+      turnHistory: canonical([turn("t", { items: [history] })]),
+      turns: [turn("t", { items: [live] })]
+    }), identity);
+    const result = snapshot.turns[0].items[0];
+    assert.equal(result.answerDisplay?.mode, expectedMode);
+    assert.equal(result.text, expectedText);
+    assert.doesNotMatch(JSON.stringify(snapshot), /WITHHELD/);
+  }
+  const question = { ...shown, delivery: "async", text: "WITHHELD question",
+    questions: [{ title: "WITHHELD title", options: ["WITHHELD option"] }] };
+  const snapshot = reduceDesktopSnapshot(state({ turns: [turn("t", { status: "inProgress", items: [
+    question, { ...shown, id: "commentary", phase: "commentary", text: "WITHHELD commentary" }
+  ] })] }), identity);
+  assert.doesNotMatch(JSON.stringify(snapshot), /WITHHELD/);
+  assert.deepEqual(snapshot.asyncQuestions, []);
 });
 
 test("Desktop snapshot fails closed on unknown tail, pending requests, unconfirmed receipts, and unknown runtime", () => {
