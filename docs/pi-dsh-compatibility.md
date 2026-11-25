@@ -1,5 +1,31 @@
 # Pi and DeepSeek Harness connector compatibility
 
+## DSH 0.2.2-rc.5 / connector rc.36
+
+Connector 0.1.0-rc.36 pins core 0.16.22 and adds exactly
+`0.2.2-rc.5` to both the five DSH peer constraints and the runtime allowlist.
+The launcher's anchor and runtime packages must still have the same version;
+unknown and mixed package sets fail closed. It does not widen support to a
+continuous range, rc.4, or future releases. Existing seven entries are retained.
+No Store, profile revision, callback protocol, or permission policy changes.
+
+Compared with the rc.3 SDK, the installed rc.5 Cordis, Agent, commands, tools,
+Skill, native tool executor, system prompt and Session JS/declarations are
+byte-identical. The LLM JS/declarations add the `CONTENT_REFUSED` error variant;
+message creation and tool schemas are unchanged. Runtime helpers and optional
+recovery APIs are still resolved from the real launcher's package tree.
+
+The connector's SDK baseline and installed-smoke assertions now use rc.5.
+Fast coverage includes exact Host acceptance, rejection of rc.5 with an rc.3
+tools package, native tool argument/result preservation, callback routing,
+and List/Watches separation. The acceptance regression fails on the original
+allowlist. The connector has its own prerelease on npm `next`.
+
+Not established by this adaptation: revalidation of the seven older Hosts,
+dual Host coexistence, rollback of in-flight callbacks, external notification
+receipt, or real agent Send/resume completion.
+
+
 These are independently versioned controller connectors. Installing an AKK
 core/OpenClaw release does not update an already installed connector. Select
 the appropriate recommendation or an exact version. Neither connector update

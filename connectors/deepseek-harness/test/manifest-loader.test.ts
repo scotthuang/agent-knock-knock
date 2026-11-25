@@ -69,7 +69,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
     "@deepseek-ai/dsh-skill",
     "@deepseek-ai/dsh-tools",
   ]) {
-    assert.equal(manifest.devDependencies[packageName], "0.2.2-rc.3");
+    assert.equal(manifest.devDependencies[packageName], "0.2.2-rc.5");
   }
   assert.equal(manifest.devDependencies["@deepseek-ai/cordis"], "4.1.0");
   assert.ok(manifest.files.includes("skills/**/*.md"));
@@ -122,7 +122,7 @@ test("declares a standalone bundle and the reviewed DSH compatibility set", () =
   assert.doesNotMatch(patch, /akk-bind/u);
 });
 
-for (const version of SUPPORTED_DSH_VERSIONS) {
+for (const version of new Set([...SUPPORTED_DSH_VERSIONS, "0.2.2-rc.5"])) {
   test(`accepts one exact launcher-owned DeepSeek Harness ${version} package set`, () => {
     assert.equal(
       assertSupportedDeepSeekHarness(fakeHarnessResolver({ launcherVersion: version })),
@@ -146,12 +146,12 @@ test("rejects an unsupported launcher before inspecting runtime packages", () =>
 
 test("rejects a split launcher-owned DeepSeek Harness runtime package set", () => {
   const resolver = fakeHarnessResolver({
-    launcherVersion: "0.1.2-alpha.1",
-    versions: { "@deepseek-ai/dsh-tools": "0.1.1-rc.2" },
+    launcherVersion: "0.2.2-rc.5",
+    versions: { "@deepseek-ai/dsh-tools": "0.2.2-rc.3" },
   });
   assert.throws(
     () => assertSupportedDeepSeekHarness(resolver),
-    /coherent DeepSeek Harness 0\.1\.2-alpha\.1 package set; @deepseek-ai\/dsh-tools is 0\.1\.1-rc\.2/u,
+    /coherent DeepSeek Harness 0\.2\.2-rc\.5 package set; @deepseek-ai\/dsh-tools is 0\.2\.2-rc\.3/u,
   );
 });
 

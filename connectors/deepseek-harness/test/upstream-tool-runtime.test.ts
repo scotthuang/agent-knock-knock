@@ -58,7 +58,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
   try {
     cleanup = await applyWithDependencies(ctx, { pluginConfig: { storeDir: "/private/explicit-dsh-store" } }, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.5", createUserMessage, assertSupportedJsonSchema };
       },
       createHostAdapter(options) {
         assert.equal(options.pluginConfig?.storeDir, "/private/explicit-dsh-store");
@@ -197,7 +197,7 @@ process.stdout.write(JSON.stringify(process.argv[2] === "list" ? { conversations
   try {
     cleanup = await applyWithDependencies(ctx, { pluginConfig: { storeDir: storeDirectory } }, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.5", createUserMessage, assertSupportedJsonSchema };
       },
       createDshRecoveryHostPorts() {
         return {

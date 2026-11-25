@@ -15,7 +15,7 @@ const manifestPath = requireRoot.resolve("@scotthuang/agent-knock-knock-deepseek
 const packageRoot = path.dirname(fs.realpathSync(manifestPath));
 assert.ok(packageRoot.startsWith(root + path.sep), "connector must be inside the isolated install");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-assert.equal(manifest.version, "0.1.0-rc.35");
+assert.equal(manifest.version, "0.1.0-rc.36");
 assert.equal(manifest.dependencies["@scotthuang/agent-knock-knock"], "0.16.22");
 const requireConnector = createRequire(manifestPath);
 const coreManifestPath = requireConnector.resolve("@scotthuang/agent-knock-knock/package.json");
@@ -26,7 +26,7 @@ const hostAdapterEntry = coreManifest.exports["./host-adapter"].import;
 assert.equal(typeof hostAdapterEntry, "string");
 const launcherManifestPath = requireRoot.resolve("@deepseek-ai/dsh/package.json");
 const launcher = JSON.parse(fs.readFileSync(launcherManifestPath, "utf8"));
-assert.equal(launcher.version, "0.2.2-rc.3");
+assert.equal(launcher.version, "0.2.2-rc.5");
 const requireLauncher = createRequire(launcherManifestPath);
 const anchor = requireLauncher.resolve("@deepseek-ai/dsh-base/package.json");
 const requireHost = createRequire(anchor);
@@ -45,7 +45,7 @@ const launcherBin = path.resolve(path.dirname(launcherManifestPath),
   typeof launcher.bin === "string" ? launcher.bin : launcher.bin.dsh);
 const runtime = await connector.loadSupportedDeepSeekHarnessRuntime(
   connector.createDeepSeekHarnessManifestResolver(launcherBin));
-assert.equal(runtime.version, "0.2.2-rc.3");
+assert.equal(runtime.version, "0.2.2-rc.5");
 assert.equal(runtime.supportsCallbackRecovery, true);
 const [{ Context }, { AgentRegistry }, { CommandRuntime }, llm, { SkillRegistry },
   { default: SystemPrompt }, { ToolRuntime }, { NativeToolExecutor }, coreExports] = await Promise.all([
@@ -121,7 +121,7 @@ try {
     list_projection: list.projection.version, exact_status: true,
     limits: ["synthetic CLI discovery and progress", "SDK registration, not a running Web server",
       "no lifecycle worker or callback transport", "no model, paid task or external channel",
-      "six older accepted Hosts not retested"] }, null, 2));
+      "seven older accepted Hosts not retested"] }, null, 2));
 } finally {
   detach?.(); await dispose?.(); await adapter.lifecycle.stop(); await ctx.fiber.dispose();
   fs.rmSync(sandbox, { recursive: true, force: true });
