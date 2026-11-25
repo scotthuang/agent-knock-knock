@@ -26,7 +26,7 @@ const hostAdapterEntry = coreManifest.exports["./host-adapter"].import;
 assert.equal(typeof hostAdapterEntry, "string");
 const launcherManifestPath = requireRoot.resolve("@deepseek-ai/dsh/package.json");
 const launcher = JSON.parse(fs.readFileSync(launcherManifestPath, "utf8"));
-assert.equal(launcher.version, "0.2.2-rc.3");
+assert.equal(launcher.version, "0.2.2-rc.5");
 const requireLauncher = createRequire(launcherManifestPath);
 const anchor = requireLauncher.resolve("@deepseek-ai/dsh-base/package.json");
 const requireHost = createRequire(anchor);
@@ -45,7 +45,7 @@ const launcherBin = path.resolve(path.dirname(launcherManifestPath),
   typeof launcher.bin === "string" ? launcher.bin : launcher.bin.dsh);
 const runtime = await connector.loadSupportedDeepSeekHarnessRuntime(
   connector.createDeepSeekHarnessManifestResolver(launcherBin));
-assert.equal(runtime.version, "0.2.2-rc.3");
+assert.equal(runtime.version, "0.2.2-rc.5");
 assert.equal(runtime.supportsCallbackRecovery, true);
 const [{ Context }, { AgentRegistry }, { CommandRuntime }, llm, { SkillRegistry },
   { default: SystemPrompt }, { ToolRuntime }, { NativeToolExecutor }, coreExports] = await Promise.all([

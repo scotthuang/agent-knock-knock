@@ -44,20 +44,22 @@ snapshot-stream 13 compatibility. Dedicated-thread Send, exact completion and
 a local callback passed; approvals and question answers were not newly live-tested
 on that build. See the [Desktop evidence](https://github.com/scotthuang/agent-knock-knock/blob/v0.16.17/docs/evidence/desktop-28661.md).
 
-This release retains **DeepSeek Harness Web 0.2.2-rc.3 / Cordis 4.1.0**
-compatibility. Its development SDK and runtime tests use that exact Host set,
+This local adaptation adds **DeepSeek Harness Web 0.2.2-rc.5 / Cordis 4.1.0**
+to the exact supported set. Its development SDK and runtime tests use rc.5,
 including the separately mounted native tool executor and raw JSON batch calls.
-Connector rc.35 is the coordinated `next` publication pinned to core 0.16.22.
-It includes #518: detailed Claude admission uses the exact bound PID, and
-preflight/submission share the native Composer proof. It retains #508 and
-rc.26's #512 Host adaptation; rc.26/core 0.16.13 does not contain #518.
-The private development core is unnecessary; `latest` remains rc.24.
-Earlier reviewed package sets remain explicitly listed; unlisted releases,
-including `0.2.2-rc.1`, remain rejected.
+The rc.3 entry and six older entries remain allowed; this change does not claim
+that those older Hosts were retested. rc.4 and other unlisted versions remain
+rejected, as do mixed runtime package sets.
+
+The base connector rc.35 pins core 0.16.22, retaining the Claude managed Send
+and resume fixes. The rc.5 adaptation is a local build, not a registry release;
+identify its artifact by source revision and SHA256, not the unchanged package
+version alone. See the [compatibility record](../../docs/pi-dsh-compatibility.md#dsh-022-rc5-local-adaptation--2026-11-25).
 
 | Scope | Declared / validated boundary |
 | --- | --- |
-| New release Web baseline | DSH `0.2.2-rc.3`, Cordis `4.1.0` |
+| Local Web baseline | DSH `0.2.2-rc.5`, Cordis `4.1.0` |
+| Previous Web baseline (retained) | DSH `0.2.2-rc.3` |
 | Previously reviewed DSH RCs | `0.1.1-rc.2`, `0.1.5-rc.2`, `0.2.0-rc.2`, `0.2.1-rc.2` |
 | Separate preview coverage | `0.1.2-alpha.1`, `0.2.1-alpha.2` |
 | Accepted Cordis peers | `4.0.1`, `4.0.2`, `4.0.4`, `4.0.5-alpha.1`, `4.0.5`, `4.1.0` (not a continuous range) |

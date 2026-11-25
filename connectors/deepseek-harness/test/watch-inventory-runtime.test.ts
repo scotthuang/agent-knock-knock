@@ -57,7 +57,7 @@ test("published DSH and core separate current List from retained Watches", async
   try {
     cleanup = await applyWithDependencies(ctx, {}, {
       async loadSupportedDeepSeekHarnessRuntime() {
-        return { version: "0.2.2-rc.3", createUserMessage, assertSupportedJsonSchema };
+        return { version: "0.2.2-rc.5", createUserMessage, assertSupportedJsonSchema };
       },
       createHostAdapter(options) {
         assert.equal(options.listProjectionVersion, 5);
