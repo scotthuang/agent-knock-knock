@@ -6,25 +6,24 @@ import type { DesktopTurn, DesktopTurnItem } from "../src/desktop-types.js";
 
 const final: DesktopTurnItem = { type: "agentMessage", id: "final", phase: "final_answer", text: "fixture reply" };
 const target = { hostId: "local", codexHome: "/fixture", threadId: "01234567-abcd-4321-9876-0123456789ab" };
-function project(moderation: unknown, originalRequester = true) {
+function project(moderation: unknown) {
   const turn: DesktopTurn = { status: "completed", turnId: "exact", itemsComplete: true, items: [
     { ...final, id: "progress", phase: "commentary", text: "progress only" },
     { ...final, id: "draft", phase: null, text: "older unphased message" },
     projectDesktopAnswerItem(final, moderation)
   ] };
-  return desktopFinalAnswer(turn, originalRequester, target);
+  return desktopFinalAnswer(turn, target);
 }
 
-test("Desktop final results keep ordinary messages, and honor the native show audience and contact instruction", () => {
+test("Desktop final results keep ordinary messages, and honor the native show and contact instructions on explicit local reads", () => {
   for (const moderation of [undefined, null, { moderated: false, display: null }]) {
-    assert.deepEqual(project(moderation, false), { final_text: "fixture reply" });
+    assert.deepEqual(project(moderation), { final_text: "fixture reply" });
   }
   const skip = { version: 1, mode: "show", trustedContacts: "skip" } as const;
   assert.deepEqual(project({ moderated: true, display: skip }), { final_text: "fixture reply", final_text_display: [skip] });
-  assert.equal(project({ moderated: true, display: skip }, false).final_text, "");
 });
 
-test("a checked Desktop answer returns visible parts and the contact notice to the exact requester", () => {
+test("a checked Desktop answer returns visible parts and the contact notice on a completed native turn", () => {
   const display = { version: 1, mode: "show", trustedContacts: "check" } as const;
   const result = project({ moderated: true, display });
   assert.equal(result.final_text, "fixture reply");
@@ -37,18 +36,16 @@ test("a checked Desktop answer returns visible parts and the contact notice to t
     { ...final, answerDisplay: display }, { ...final, id: "sibling", text: "sibling fragment" },
     { ...final, id: "hidden", text: "PRIVATE segment", answerDisplay: { version: 1, mode: "block", reason: "protection" } }
   ] };
-  const mixed = desktopFinalAnswer(turn, true, target);
+  const mixed = desktopFinalAnswer(turn, target);
   assert.equal(mixed.final_text, "fixture reply\n\nsibling fragment");
   assert.doesNotMatch(JSON.stringify(mixed), /PRIVATE/);
-  const other = desktopFinalAnswer(turn, false, target);
-  assert.doesNotMatch(JSON.stringify(other), /fixture reply|sibling fragment|codex:\/\/|hasAnswer|trustedContacts/);
   for (const partial of [{ ...turn, itemsComplete: false }, { ...turn, status: "inProgress" as const }]) {
-    assert.deepEqual(desktopFinalAnswer(partial, true, target), other);
+    assert.deepEqual(desktopFinalAnswer(partial, target), { final_text: "" });
   }
   for (const invalidTarget of [{ ...target, hostId: "remote" }, { ...target, threadId: target.threadId + "?override=1" }]) {
-    assert.doesNotMatch(JSON.stringify(desktopFinalAnswer(turn, true, invalidTarget)), /codex:\/\//);
+    assert.doesNotMatch(JSON.stringify(desktopFinalAnswer(turn, invalidTarget)), /codex:\/\//);
   }
-  const empty = desktopFinalAnswer({ ...turn, items: [{ ...final, text: " ", answerDisplay: display }] }, true, target);
+  const empty = desktopFinalAnswer({ ...turn, items: [{ ...final, text: " ", answerDisplay: display }] }, target);
   assert.equal(empty.desktop_url, result.desktop_url);
   assert.equal(empty.final_text.trim(), "");
   assert.deepEqual(empty.final_text_display, [display]);

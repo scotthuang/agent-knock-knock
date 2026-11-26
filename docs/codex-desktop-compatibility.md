@@ -13,36 +13,28 @@ connection that supports them.
 
 ### Reading a Desktop answer
 
-Codex app-server 0.172.0 can attach a versioned display directive to an
-`agentMessage` with phase `final_answer`. For an unannotated version 1
-`show` with `trustedContacts: "skip"`, the original Send's controller receives
-the text and `final_text_display` on exact Watch Status and in its completion
-callback. Conversation Status can show it when the same controller's accepted
-Send matches the displayed thread and turn.
-Keep the Watch ID to read a particular task after the conversation moves on.
-Standalone observers and inventory queries cannot retrieve a directed answer.
-The Host is responsible for returning it to the initiating user in that
-session. AKK's binding identifies a controller session, not an individual
-reader in a shared chat.
+Use conversation Status to read the latest turn of the selected local thread,
+including one started directly in Desktop. The answer goes to the caller.
+When live activity is unknown, a verified shared-backend read can still return
+the last saved turn under `persisted_history.latest_turn`. Its completion
+describes that turn only. To read a particular task after the thread has moved
+on, query its exact Watch ID.
 
-For an unannotated version 1 `show` with `trustedContacts: "check"`, the
-original controller receives the visible answer in `final_text` and a notice
-that Codex requested a trusted-contact check which AKK has neither performed
-nor verified. The completion callback includes both, so the Host can relay
-the answer and notice together. Status and callback metadata also include
-`final_text_notice`, `trusted_contacts_check_status: "not_performed_by_akk"`,
-and, for a local thread with a valid UUID, the original `desktop_url`.
-An older Watch whose cache lacks individually verified text can still return a
-notice and link. An exact Status read can retrieve the answer from Codex if
-the original complete turn is available.
+Codex app-server 0.172.0 can attach a display directive to a `final_answer`.
+AKK returns plain final text and text marked with an unannotated version 1
+`show`. With `trustedContacts: "check"`, relay the answer together with
+`final_text_notice`: Codex requested a trusted-contact check and AKK has
+neither performed nor verified it. The result includes
+`trusted_contacts_check_status: "not_performed_by_akk"` and, for a local
+thread with a valid UUID, its `desktop_url`. Codex Desktop handles required
+wellbeing annotations and replacements. AKK withholds the original text of
+`hide`, `block`, malformed or unfamiliar directives. Commentary stays in progress.
 
-Codex Desktop handles the account feature. A required
-wellbeing annotation or replacement is rendered in Desktop. For `hide`,
-`block`, malformed or unfamiliar directives, AKK withholds the original text
-and reports the display outcome. Commentary remains progress. On an explicit
-Watch Status read, the sender can retrieve an older directed answer if Codex
-still returns the exact complete turn. This read does not change the stored
-completion or replay the notification.
+An explicit read requires no originating AKK Send. Automatic completion
+notifications use their recorded controller route. Directed answers are
+included in an automatic notification only for the original accepted Send.
+An older Watch without an item-verified cached answer may require an exact
+read from Codex. Reading the answer does not replay its completion callback.
 
 ### Sending to a thread with a queue
 

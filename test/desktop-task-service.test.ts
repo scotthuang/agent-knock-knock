@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
 import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
-import { desktopTaskProjection } from "../src/desktop-public-projection.js";
+import { desktopStoredAnswerForLookup, desktopTaskProjection } from "../src/desktop-public-projection.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn } from "../src/desktop-types.js";
 import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
@@ -147,6 +147,10 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   assert.equal(offline.final_text_notice, callback.event.metadata?.final_text_notice);
   assert.equal(offline.desktop_url, threadUrl);
   assert.equal(desktopTaskProjection(done, false, "some-other-controller").final_text, "");
+  const lookup = desktopStoredAnswerForLookup(h.repository.load(one.id)!);
+  assert.equal(lookup.final_text, "DONE");
+  assert.equal(lookup.final_text_notice, callback.event.metadata?.final_text_notice);
+  assert.doesNotMatch(JSON.stringify(lookup), /RESTRICTED-SIBLING|Progress only/);
   assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");
@@ -177,6 +181,10 @@ test("pending legacy callbacks keep their delivery identity and replace cached c
     assert.equal(cached.desktop_url, `codex://threads/${target.threadId}`);
     assert.ok(!JSON.stringify(cached).includes(marker));
     assert.equal(desktopTaskProjection(done).desktop_url, undefined);
+    const lookup = desktopStoredAnswerForLookup(done);
+    assert.equal(lookup.final_text, "");
+    assert.equal(lookup.trusted_contacts_check_status, "not_performed_by_akk");
+    assert.ok(!JSON.stringify(lookup).includes(marker));
     h.deps.canDeliver = () => true;
     const restarted = createDesktopTaskService(h.deps);
     await restarted.reconcile(done.id);
@@ -561,7 +569,7 @@ test("commentary and analysis never become final output or stale manual-action c
   assert.equal(h.state.notifications[0].envelope.event.type, "desktop_watch.settled");
 });
 
-test("a passive Desktop Watch on the same turn cannot collect the original requester's directed answer", async t => {
+test("explicit Watch reads share a native-visible answer while directed callbacks stay with the original Send", async t => {
   const h = harness(t);
   const sent = await h.service.send({ ...input, callbackRoute: route });
   const controllerSession = "passive-controller";
@@ -574,7 +582,8 @@ test("a passive Desktop Watch on the same turn cannot collect the original reque
   h.state.snapshot = snapshot([complete]);
   const observer = await h.service.reconcile(watched.id);
   assert.equal(observer.status, "completed");
-  assert.doesNotMatch(JSON.stringify(observer), /REQUESTER-ONLY/);
+  assert.equal(desktopStoredAnswerForLookup(h.repository.load(watched.id)!).final_text, "REQUESTER-ONLY");
+  assert.doesNotMatch(JSON.stringify(desktopTaskProjection(observer)), /REQUESTER-ONLY/);
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].route.controller_session_id, controllerSession);
   assert.doesNotMatch(JSON.stringify(h.state.notifications[0].envelope), /REQUESTER-ONLY/);

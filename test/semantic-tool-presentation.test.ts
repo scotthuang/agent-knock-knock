@@ -4,10 +4,22 @@ import test from "node:test";
 
 import {
   bindHostBridgeToolPresentation,
+  formatStatusCommandResult,
   modelFacingToolError,
   toolResult,
   usesHostBridgeToolPresentation
 } from "../src/semantic-tool-presentation.js";
+
+test("Desktop Status prints the latest plain answer and identifies a saved turn when live activity is unknown", () => {
+  const turn = { id: "manual-turn", status: "completed", items_complete: true, final_text: "Answer from Desktop." };
+  const base = { source: "codex_desktop", conversation_id: "fixture" };
+  const live = formatStatusCommandResult({ ...base, activity_state: "idle", latest_turn: turn });
+  const saved = formatStatusCommandResult({ ...base, activity_state: "unknown", persisted_history: { latest_turn: turn } });
+  for (const output of [live, saved]) assert.match(output, /result: Answer from Desktop\./u);
+  assert.match(saved, /status: unknown/u);
+  assert.match(saved, /latest saved turn: completed/u);
+  assert.doesNotMatch(live, /latest saved turn/u);
+});
 
 test("semantic presentation keeps Host mode owner-local", () => {
   const hostOwner = {};

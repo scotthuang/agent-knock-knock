@@ -79,15 +79,15 @@ export function desktopDisplayFields(displays?: DesktopFinalDisplay[], target?: 
     final_text_notice: desktopDisplayNotice(displays, target), ...(url ? { desktop_url: url } : {}) };
 }
 
-export function desktopFinalAnswer(turn: DesktopTurn, originalRequester: boolean, target?: DesktopThreadIdentity) {
+/** Render the exact turn for local lookup and storage; callback routing is decided separately. */
+export function desktopFinalAnswer(turn: DesktopTurn, target?: DesktopThreadIdentity) {
   const messages = turn.items.filter(item => item.type === "agentMessage" && item.delivery !== "async" && !item.questions?.length);
   const finals = messages.filter(item => item.phase === "final_answer");
   // A directed or hidden final still takes precedence over older, unphased messages.
   const items = finals.length ? finals : messages.filter(item => item.phase == null && !item.answerDisplay);
-  const bound = originalRequester && turn.itemsComplete &&
-    (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted");
-  if (!bound && items.some(item => item.answerDisplay)) {
-    return { final_text: "", ...desktopDisplayFields([{ mode: "desktop_only", reason: "original_requester_required" }]) };
+  const complete = turn.itemsComplete && ["completed", "failed", "interrupted"].includes(turn.status);
+  if (!complete && items.some(item => item.answerDisplay)) {
+    return { final_text: "" };
   }
   const text: string[] = [], displays: DesktopFinalDisplay[] = [];
   for (const item of items) {

@@ -40,7 +40,7 @@ moderated or unknown presentation metadata does not expose raw message text in
 progress, final results or callbacks. Regression includes known and unknown
 versions. A biometric metadata addition does not authorize person-only approval.
 The subsequent [Desktop recovered-answer policy](codex-desktop-compatibility.md#reading-a-desktop-answer)
-applies versioned `show` instructions to final answers for the original requester.
+applies versioned `show` instructions to explicit Desktop reads and the original Send's completion callback.
 
 Official TUI review covered status, permission, model, question and composer
 renderers. Status cards, permission menus and question layouts retain their

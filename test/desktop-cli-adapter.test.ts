@@ -202,16 +202,17 @@ test("Desktop Status may display exact persisted history without authorizing inp
   assert.equal(status.activity_state, "unknown");
   assert.equal(status.pending_interaction_count, null);
   assert.equal(status.capabilities.send || status.capabilities.watch || status.capabilities.approve, false);
-  assert.equal(status.progress.state, "read_error");
+  assert.equal(status.progress.state, "available");
   assert.equal(status.persisted_history.scope, "latest_persisted_turn");
   assert.deepEqual(status.persisted_history.latest_turn, { id: "disk-turn", status: "completed", items_complete: true, final_text: "Final answer" });
   assert.equal(status.persisted_history.progress.native_turn_id, "disk-turn");
   assert.equal(status.persisted_history.progress.text, "Public progress");
+  assert.deepEqual(status.progress, status.persisted_history.progress);
   assert.doesNotMatch(JSON.stringify(status), /private reasoning|private question|writer-a|socket-a/u);
   assert.equal(f.sends, 0);
 });
 
-test("Desktop Status scopes a directed final to the sending controller, exact turn and original Watch", async t => {
+test("Explicit Desktop reads return native-visible finals from the selected turn without an originating Send", async t => {
   const cwd = "/fixture/requester-project";
   const threadId = "00000000-0000-7000-8000-000000000042";
   const link = `codex://threads/${threadId}`;
@@ -233,23 +234,28 @@ test("Desktop Status scopes a directed final to the sending controller, exact tu
   assert.ok(rendered.includes(link));
   assert.match(rendered, /AKK 未执行或核实/);
   assert.match(rendered, /EXACT_DONE/);
-  for (const params of [{ watch: sent.watch_id }, { ...observer, watch: watched.watch_id }, { ...observer, ...entry }, entry]) {
-    assert.doesNotMatch(JSON.stringify(await f.run("status", params)), /EXACT_DONE|codex:\/\/threads\//);
+  for (const params of [{ watch: sent.watch_id }, { ...observer, watch: sent.watch_id }, { ...observer, watch: watched.watch_id }]) {
+    const result = await f.run("status", params);
+    assert.equal(result.final_text, "EXACT_DONE");
+    assert.equal(result.trusted_contacts_check_status, "not_performed_by_akk");
   }
-  const live = await f.run("native-inspect", { ...sender, ...entry, inspection: "status" });
-  assert.equal(live.latest_turn.final_text, owner.final_text);
+  const manual = { turnId: "manual-turn", status: "completed" as const, itemsComplete: true, items: [
+    { ...answer, id: "visible", text: "MANUAL_DONE" },
+    { ...answer, id: "restricted", text: "HIDDEN_BODY", answerDisplay: { version: 1, mode: "hide", replacement: "wellbeingPromptHelpline" } as const }
+  ] };
+  f.snapshot.latestTurnId = manual.turnId;
+  f.snapshot.turns.unshift(manual);
+  const live = await f.run("native-inspect", { ...observer, ...entry, inspection: "status" });
+  assert.equal(live.latest_turn.id, manual.turnId);
+  assert.equal(live.latest_turn.final_text, "MANUAL_DONE");
   assert.equal(live.latest_turn.desktop_url, link);
-  assert.deepEqual(live.latest_turn.final_text_display, owner.final_text_display);
+  assert.equal(live.latest_turn.trusted_contacts_check_status, "not_performed_by_akk");
+  assert.doesNotMatch(JSON.stringify(live), /HIDDEN_BODY/);
   f.transport.readPersistedTurn = async () => f.snapshot.turns[0];
   f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
-  const history = async (context: Record<string, string>) => (await f.run("status", { ...entry, ...context })).persisted_history.latest_turn;
-  const persisted = await history(sender);
-  assert.equal(persisted.desktop_url, link);
-  assert.equal(persisted.final_text, owner.final_text);
-  assert.equal(persisted.final_text_notice, owner.final_text_notice);
-  assert.doesNotMatch(JSON.stringify(await history(observer)), /EXACT_DONE|codex:\/\/threads\//);
-  f.snapshot.turns[0].turnId = "different-turn";
-  assert.doesNotMatch(JSON.stringify(await history(sender)), /EXACT_DONE|codex:\/\/threads\//);
+  const history = await f.run("status", entry);
+  assert.deepEqual(history.persisted_history.latest_turn, live.latest_turn);
+  assert.doesNotMatch(JSON.stringify(history), /HIDDEN_BODY/);
 });
 
 test("Status re-renders a settled historical Watch without rewriting it or repeating its callback", async t => {
@@ -273,7 +279,7 @@ test("Status re-renders a settled historical Watch without rewriting it or repea
     assert.equal(refreshed.final_text, "exact original turn");
     assert.match(refreshed.final_text_notice, /AKK 未执行或核实/);
     assert.doesNotMatch(JSON.stringify(refreshed), /previously visible/);
-    assert.equal((await f.run("watch-status", { watch: watch.watch })).final_text, "");
+    assert.equal((await f.run("watch-status", { watch: watch.watch })).final_text, "exact original turn");
     final.answerDisplay = { version: 1, mode: "block", reason: "cyber" };
     const blocked = await f.run("watch-status", watch);
     assert.equal(blocked.final_text, "");

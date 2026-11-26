@@ -13,12 +13,14 @@ export function formatDesktopCommandResult(result: Record<string, unknown>, acti
     ...answerLines(result)].join("\n");
 }
 function answerLines(result: Record<string, unknown>): string[] {
-  const latest = result.latest_turn ?? (isRecord(result.persisted_history) ? result.persisted_history.latest_turn : undefined);
-  const answer = isRecord(latest) && Array.isArray(latest.final_text_display) ? latest : result;
+  const persisted = isRecord(result.persisted_history) ? result.persisted_history.latest_turn : undefined;
+  const latest = result.latest_turn ?? persisted;
+  const answer = isRecord(latest) ? latest : result;
   const displays = answer.final_text_display;
   const known = Array.isArray(displays) && !displays.some(item => !isRecord(item)) ? displays : [];
   const notice = nonBlankString(answer.final_text_notice) ?? desktopDisplayNotice(known);
-  return [...optionalLine(answer, "final_text", "result"), ...(notice ? [notice] : [])];
+  return [...(isRecord(persisted) && latest === persisted ? optionalLine(persisted, "status", "latest saved turn") : []),
+    ...optionalLine(answer, "final_text", "result"), ...(notice ? [notice] : [])];
 }
 function queueLines(result: Record<string, unknown>): string[] {
   if (result.delivery_path !== "native_thread_queue") {

@@ -161,7 +161,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       return this.repo.save(task, task.revision);
     });
   }
-  private notify(task: DesktopTaskRecord, key: string, body: string): void {
+  private notify(task: DesktopTaskRecord, key: string, body: string, displays?: DesktopFinalDisplay[]): void {
     if (!task.callback_route || desktopObservationStopped(task)) return;
     const id = `${task.id}:${key}`;
     if (task.notifications.some(n => n.id === id)) return;
@@ -171,7 +171,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       event: { id, type: `desktop_watch.${key.split(":")[0]}`, body, requires_response: false,
         metadata: { watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId,
           ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}),
-          ...(key === "settled" ? desktopDisplayFields(task.final_text_display, task.target) : {}) } }
+          ...desktopDisplayFields(displays, task.target) } }
     }) });
   }
   private make(input: DesktopTaskInput, id: string, kind: "send" | "watch"): DesktopTaskRecord {
@@ -316,15 +316,15 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     if (!turn.itemsComplete) { task.observation_error = "desktop_exact_turn_items_incomplete"; return; }
     task.status = turn.status;
     suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
-    const originalRequester = task.kind === "send" && task.send_intent?.state === "accepted" && task.native_turn_id === turn.turnId;
-    const answer = desktopFinalAnswer(turn, originalRequester, task.target);
+    const answer = desktopFinalAnswer(turn, task.target);
     task.final_text = answer.final_text;
     if (answer.final_text_display) task.final_text_display = answer.final_text_display;
-    if (originalRequester && answer.final_text && answer.final_text_display?.some(d => d.mode === "show" && d.trustedContacts === "check")) {
+    if (answer.final_text && answer.final_text_display?.length) {
       task.final_text_projection = "native_items_v1";
     }
     task.pending_manual_count = 0;
-    this.notify(task, "settled", settledBody(task, answer.final_text, answer.final_text_display));
+    const pushed = desktopStoredAnswer(task, task.callback_route?.controller_session_id);
+    this.notify(task, "settled", settledBody(task, pushed.final_text ?? "", pushed.final_text_display), pushed.final_text_display);
   }
   private async observeQueue(task: DesktopTaskRecord, historyScan?: "recover"): Promise<DesktopQueueObservation> {
     if (!this.deps.queue) throw new DesktopTaskError("desktop_queue_unavailable", "Native Desktop thread queue observation is unavailable");

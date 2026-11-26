@@ -2,7 +2,7 @@ import { desktopAttemptCapabilities, desktopCompatibilityProjection, desktopInte
   desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
-import { desktopCachedCheckDisplays, desktopDisplayFields, type desktopFinalAnswer } from "./desktop-final-answer.js";
+import { desktopAnswerDisplay, desktopCachedCheckDisplays, desktopDisplayFields, desktopRequiresContactCheck } from "./desktop-final-answer.js";
 import { desktopObservationStopped, desktopVerifiedQueueWait } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
@@ -72,9 +72,35 @@ export function desktopStoredAnswer(task: DesktopTaskRecord, controller?: string
   return { final_text: cachedCheck && !projected ? "" : task.final_text, ...desktopDisplayFields(displays, task.target) };
 }
 
+/** A caller explicitly requested this Watch. Render only evidence from its exact stored answer. */
+export function desktopStoredAnswerForLookup(task: DesktopTaskRecord): ReturnType<typeof desktopStoredAnswer> {
+  const cachedCheck = desktopCachedCheckDisplays(task);
+  const displays = cachedCheck ?? task.final_text_display;
+  const envelopeDisplays = task.notifications.find(n => n.id === `${task.id}:settled`)?.envelope.event.metadata?.final_text_display;
+  if (!displays?.length) {
+    // Some old records kept a directive only in the envelope, alongside undifferentiated text.
+    if (envelopeDisplays != null && (!Array.isArray(envelopeDisplays) || envelopeDisplays.length)) {
+      return { final_text: "", final_text_display: [{ mode: "unsupported" }] };
+    }
+    return { final_text: task.final_text };
+  }
+  const itemized = task.final_text_projection === "native_items_v1" && task.final_text_display?.length &&
+    (!cachedCheck || desktopRequiresContactCheck(task.final_text_display));
+  const allShow = onlyUnannotatedShow(displays) && (envelopeDisplays == null || onlyUnannotatedShow(envelopeDisplays));
+  const settled = task.native_turn_id && ["completed", "failed", "interrupted"].includes(task.status);
+  return { final_text: settled && (itemized || allShow) ? task.final_text : "", ...desktopDisplayFields(displays, task.target) };
+}
+
+function onlyUnannotatedShow(displays: unknown): boolean {
+  return Array.isArray(displays) && displays.every(raw => {
+    const display = desktopAnswerDisplay({ moderated: true, display: raw });
+    return display?.mode === "show" && display.trustedContacts === "skip";
+  });
+}
+
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
 export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = false,
-  controller?: string, freshAnswer?: ReturnType<typeof desktopFinalAnswer>): Record<string, unknown> {
+  controller?: string, freshAnswer?: ReturnType<typeof desktopStoredAnswer>): Record<string, unknown> {
   const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = !terminal ? actionableTaskInteractions(task) : [];

@@ -14,7 +14,7 @@ import { createDesktopRuntime, type DesktopRuntime, type DesktopRuntimeOptions }
 import { createTerminalWatchOpenClawCallbackRoute, parseCallbackRoute } from "./callback-transport.js";
 import { desktopResponseId, type DesktopResponseRecord } from "./desktop-response-store.js";
 import { desktopInteractionFingerprint, desktopInteractionIsApproval, desktopQuestionAnswer, desktopQuestionResponse } from "./desktop-interaction-projection.js";
-import { desktopSendBelongsToRequester, desktopSessionProjection, desktopTaskProjection } from "./desktop-public-projection.js";
+import { desktopSessionProjection, desktopStoredAnswerForLookup, desktopTaskProjection } from "./desktop-public-projection.js";
 import { desktopFinalAnswer } from "./desktop-final-answer.js";
 import { desktopTaskNeedsReconciliation } from "./desktop-task-service.js";
 import { listDesktopSessions, projectDesktopQueueAvailability } from "./desktop-list.js";
@@ -83,6 +83,14 @@ async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: strin
   if (target || options.turn && (options.watch !== undefined || options.turn !== watch)) throw new Error("Desktop Watch accepts exactly one target");
   const task = runtime.tasks.status(watch);
   const controller = str(options.openclawSession);
+  if (command === "watch-status" || command === "status") {
+    const current = await runtime.tasks.reconcile(watch);
+    const { progress, answer } = await desktopWatchObservation(runtime, current);
+    output({ ...desktopTaskProjection(current, desktopCapabilityProfile(runtime.compatibility), controller,
+      answer ?? desktopStoredAnswerForLookup(current)), progress,
+      response_state: await desktopResponseStates(runtime, current.desktop_id, current.native_turn_id, controller) });
+    return;
+  }
   if (controller && controller !== task.controller_session) throw new Error("Desktop Watch belongs to a different controller");
   if (command === "cancel") {
     if (task.send_intent?.delivery_path === "native_thread_queue") throw new Error("This thread-queue Watch cannot interrupt the executing client");
@@ -95,15 +103,10 @@ async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: strin
   } else if (command === "unwatch-terminal") {
     output(desktopTaskProjection(runtime.tasks.unwatch(watch,
       { controllerSession: required(controller, "controller session") }), desktopCapabilityProfile(runtime.compatibility), controller));
-  } else if (command === "watch-status" || command === "status") {
-    const current = await runtime.tasks.reconcile(watch);
-    const { progress, answer } = await desktopWatchObservation(runtime, current, controller);
-    output({ ...desktopTaskProjection(current, desktopCapabilityProfile(runtime.compatibility), controller, answer), progress,
-      response_state: await desktopResponseStates(runtime, current.desktop_id, current.native_turn_id, controller) });
   } else throw new Error("Desktop Watch ID is only valid for status or unwatch");
 }
 
-async function desktopWatchObservation(runtime: DesktopRuntime, task: ReturnType<DesktopRuntime["tasks"]["status"]>, controller?: string) {
+async function desktopWatchObservation(runtime: DesktopRuntime, task: ReturnType<DesktopRuntime["tasks"]["status"]>) {
   if (!task.native_turn_id) return { progress: backendPublicProgressReadError(null, cliNow().toISOString(), "missing_exact_turn") };
   try {
     let turn: DesktopTurn | undefined;
@@ -121,8 +124,9 @@ async function desktopWatchObservation(runtime: DesktopRuntime, task: ReturnType
     const progress = backendPublicProgress({ nativeTurnId: task.native_turn_id, turn, readAt: cliNow().toISOString() });
     // Re-render an exact settled answer for this read only, including Watches settled by older versions.
     if (turn?.itemsComplete && turn.status === task.status && ["completed", "failed", "interrupted"].includes(turn.status)) {
-      const answer = desktopFinalAnswer(turn, desktopSendBelongsToRequester(task, controller), task.target);
-      if (answer.final_text_display) return { progress, answer };
+      const answer = desktopFinalAnswer(turn, task.target);
+      // A legacy reader may omit a previously recorded display directive.
+      if (answer.final_text_display || !desktopStoredAnswerForLookup(task).final_text_display?.length) return { progress, answer };
     }
     return { progress };
   } catch { return { progress: backendPublicProgressReadError(task.native_turn_id, cliNow().toISOString()) }; }
@@ -140,19 +144,11 @@ async function getDesktopConversation(runtime: DesktopRuntime, options: Options,
   return { id, identity, entry };
 }
 
-function originalDesktopRequester(runtime: DesktopRuntime, id: string, turn: DesktopTurn | null | undefined, controller?: string): boolean {
-  if (!controller || !turn?.itemsComplete || !turn.items.some(item => item.answerDisplay)) return false;
-  try {
-    return runtime.tasks.list().some(task => task.desktop_id === id && task.native_turn_id === turn.turnId
-      && desktopSendBelongsToRequester(task, controller));
-  } catch { return false; } // Missing or unreadable request records cannot establish the recipient.
-}
-
-function latestTurnProjection(turn: DesktopTurn | undefined, originalRequester: boolean, target: DesktopThreadIdentity) {
+function latestTurnProjection(turn: DesktopTurn | undefined, target: DesktopThreadIdentity) {
   if (!turn) return null;
   const isFinal = turn.itemsComplete && ["completed", "failed", "interrupted"].includes(turn.status);
   return { id: turn.turnId, status: turn.status, items_complete: turn.itemsComplete,
-    ...(isFinal ? desktopFinalAnswer(turn, originalRequester, target) : { response_text: desktopFinalAnswer(turn, false).final_text }) };
+    ...(isFinal ? desktopFinalAnswer(turn, target) : { response_text: desktopFinalAnswer(turn).final_text }) };
 }
 
 async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, entry }: DesktopConversation, options: Options): Promise<void> {
@@ -162,7 +158,7 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
     if (snapshot.threadId !== identity.threadId) throw new Error("Desktop snapshot identity mismatch");
     const current = snapshot.turns.find(turn => turn.turnId === snapshot.latestTurnId);
     output({ ...desktopSessionProjection(entry, snapshot, desktopCapabilityProfile(runtime.compatibility)),
-      source: "codex_desktop", latest_turn: latestTurnProjection(current, originalDesktopRequester(runtime, entry.conversationId, current, controller), identity),
+      source: "codex_desktop", latest_turn: latestTurnProjection(current, identity),
       progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId, turn: current, readAt: cliNow().toISOString() }),
       response_state: await desktopResponseStates(runtime, entry.conversationId, snapshot.latestTurnId ?? undefined, controller) });
   } catch (error) {
@@ -174,11 +170,11 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
       if (runtime.transport.readPersistedTurn) {
         try {
           const turn = await runtime.transport.readPersistedTurn(identity, entry.cwd);
-          history = desktopPersistedHistoryProjection(turn, cliNow().toISOString(), originalDesktopRequester(runtime, entry.conversationId, turn, controller), identity);
+          history = desktopPersistedHistoryProjection(turn, cliNow().toISOString(), identity);
         } catch { /* The shared reader cannot substitute an unverified writer's history. */ }
       }
     }
-    output({ ...session, progress: backendPublicProgressReadError(null, cliNow().toISOString()), ...history });
+    output({ ...session, progress: history?.persisted_history.progress ?? backendPublicProgressReadError(null, cliNow().toISOString()), ...history });
   }
 }
 

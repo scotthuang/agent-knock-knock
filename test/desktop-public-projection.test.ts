@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop-compatibility.js";
 import { validateDesktopInteractionProjections } from "../src/desktop-interaction-projection.js";
-import { desktopSessionProjection, desktopTaskProjection } from "../src/desktop-public-projection.js";
+import { desktopSessionProjection, desktopStoredAnswerForLookup, desktopTaskProjection } from "../src/desktop-public-projection.js";
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute } from "../src/callback-transport.js";
 import type { DesktopCatalogEntry } from "../src/desktop-session-catalog.js";
@@ -83,6 +83,25 @@ test("uncertain Desktop receipts never claim acceptance or disclose internal sen
   for (const privateText of ["private prompt", "client-private", "owner-private", "controller-private", route.profile_revision]) {
     assert.equal(text.includes(privateText), false);
   }
+});
+
+test("exact Watch lookups can read an older show-only answer but cannot split a mixed legacy cache", () => {
+  const show = { version: 1, mode: "show", trustedContacts: "skip" } as const;
+  const hidden = { version: 1, mode: "hide", replacement: "wellbeingPromptHelpline" } as const;
+  const saved = task({ kind: "watch", send_intent: undefined, status: "completed", native_turn_id: "native-turn",
+    final_text: "Cached text", final_text_display: [show] });
+  assert.equal(desktopStoredAnswerForLookup(saved).final_text, "Cached text");
+  assert.equal(desktopTaskProjection(saved).final_text, "");
+  saved.final_text_display = [show, hidden];
+  assert.equal(desktopStoredAnswerForLookup(saved).final_text, "");
+  const id = `${saved.id}:settled`;
+  saved.notifications.push({ id, status: "ready", attempts: 0, envelope: createCallbackEnvelope({ route,
+    source: { kind: "desktop_watch", watch_id: saved.id, desktop_id: conversationId },
+    event: { id, type: "desktop_watch.settled", requires_response: false, body: "Old envelope", metadata: { final_text_display: [hidden] } } }) });
+  saved.final_text_display = [show];
+  assert.equal(desktopStoredAnswerForLookup(saved).final_text, "");
+  delete saved.final_text_display;
+  assert.equal(desktopStoredAnswerForLookup(saved).final_text, "");
 });
 
 test("completion callback expectation follows its outbox and manual interaction remains notification-only", () => {
