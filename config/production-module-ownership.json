@@ -1143,6 +1143,10 @@
       "owner": "codex-desktop"
     },
     {
+      "path": "src/desktop-lsof.ts",
+      "owner": "codex-desktop"
+    },
+    {
       "path": "src/desktop-metadata-reader.ts",
       "owner": "codex-desktop"
     },

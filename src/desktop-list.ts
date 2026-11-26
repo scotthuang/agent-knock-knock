@@ -10,6 +10,7 @@ import { DesktopIpcError } from "./desktop-types.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
 import { canInspectDesktopHistory } from "./desktop-queue-inspection.js";
 import { DesktopQueueAdmissionError } from "./desktop-queue-submit.js";
+import { desktopLsofCommand } from "./desktop-lsof.js";
 import { desktopQueueNotices } from "./desktop-task-queue.js";
 
 const MAX_QUEUE_PROBES = 4;
@@ -63,7 +64,7 @@ async function openQueueLocks(entries: DesktopCatalogEntry[]) {
   const paths = entries.map(entry => path.join(entry.codexHome, "thread-writer-locks", entry.threadId + ".lock"))
     .filter(file => fs.lstatSync(file, { throwIfNoEntry: false })?.isFile());
   if (!paths.length || process.platform !== "darwin") return result;
-  const { stdout } = await execFileAsync("/usr/sbin/lsof", ["-nP", "-Fn", "--", ...paths], {
+  const { stdout } = await execFileAsync(...desktopLsofCommand(["-nP", "-Fn", "--", ...paths]), {
     encoding: "utf8", timeout: 1500, maxBuffer: 128 * 1024, env: { PATH: "/usr/bin:/bin:/usr/sbin", LC_ALL: "C" }
   }).catch((error: NodeJS.ErrnoException & { stdout?: string; stderr?: string; signal?: string }) => {
     // lsof may return 1 when only some selected files are open. Other failures do not
