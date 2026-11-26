@@ -28,13 +28,13 @@ export function canInspectDesktopHistory(identity: DesktopThreadIdentity, entry:
 }
 
 /** History gives no evidence of current composer contents, pending interactions, or idleness. */
-export function desktopPersistedHistoryProjection(turn: DesktopTurn | null, readAt: string, originalRequester = false) {
+export function desktopPersistedHistoryProjection(turn: DesktopTurn | null, readAt: string, originalRequester: boolean, target: DesktopThreadIdentity) {
   return {
     pending_interaction_count: null, pending_async_count: null,
     persisted_history: {
       source: "codex_app_server", scope: "latest_persisted_turn",
       latest_turn: turn ? { id: turn.turnId, status: turn.status, items_complete: turn.itemsComplete,
-        ...(turn.status === "completed" && turn.itemsComplete ? desktopFinalAnswer(turn, originalRequester) : {}) } : null,
+        ...(turn.status === "completed" && turn.itemsComplete ? desktopFinalAnswer(turn, originalRequester, target) : {}) } : null,
       progress: backendPublicProgress({ nativeTurnId: turn?.turnId ?? null, turn: turn ?? undefined, readAt })
     }
   };

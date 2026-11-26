@@ -2,7 +2,7 @@ import { desktopAttemptCapabilities, desktopCompatibilityProjection, desktopInte
   desktopProjectionCapabilities, type DesktopCapabilityProfile } from "./desktop-compatibility.js";
 import { backendTaskRecoveryProjection } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
-import { desktopDisplayFields } from "./desktop-final-answer.js";
+import { desktopCachedCheckDisplays, desktopDisplayFields, type desktopFinalAnswer } from "./desktop-final-answer.js";
 import { desktopObservationStopped, desktopVerifiedQueueWait } from "./desktop-task-recovery.js";
 import { desktopInteractionIsApproval, desktopInteractionProjection } from "./desktop-interaction-projection.js";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
@@ -60,15 +60,18 @@ export function desktopSendBelongsToRequester(task: DesktopTaskRecord, controlle
 }
 
 function storedAnswerProjection(task: DesktopTaskRecord, controller?: string) {
-  if (task.final_text_display?.length && !desktopSendBelongsToRequester(task, controller)) {
+  const cachedCheck = desktopCachedCheckDisplays(task);
+  const displays = cachedCheck ?? task.final_text_display;
+  if (displays?.length && !desktopSendBelongsToRequester(task, controller)) {
     return { final_text: "", final_text_display: [{ mode: "desktop_only", reason: "original_requester_required" }] };
   }
-  return { final_text: task.final_text, ...desktopDisplayFields(task.final_text_display) };
+  // Older records may still contain a flat copy of the answer alongside the native directive.
+  return { final_text: cachedCheck ? "" : task.final_text, ...desktopDisplayFields(displays, task.target) };
 }
 
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
 export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: DesktopCapabilityProfile | boolean = false,
-  controller?: string): Record<string, unknown> {
+  controller?: string, freshAnswer?: ReturnType<typeof desktopFinalAnswer>): Record<string, unknown> {
   const profile = desktopProjectionCapabilities(writesVerified);
   const terminal = desktopObservationStopped(task) || ["completed", "failed", "interrupted", "timed_out", "cancelled"].includes(task.status);
   const interactions = !terminal ? actionableTaskInteractions(task) : [];
@@ -88,7 +91,7 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    ...storedAnswerProjection(task, controller),
+    ...(freshAnswer ?? storedAnswerProjection(task, controller)),
     ...taskInteractionCounts(task, interactions, manualCount, queued && !terminal),
     interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile)),
     callback_expected: callbackExpected(task, terminal),

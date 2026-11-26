@@ -9,9 +9,10 @@ import {
   type CallbackTransportContextV1, type CallbackTransportDeliverInput
 } from "./callback-transport.js";
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
-import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
+import type { DesktopFinalDisplay, DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
-import { desktopDisplayFields, desktopDisplayNotice, desktopFinalAnswer } from "./desktop-final-answer.js";
+import { desktopCachedCheckDisplays, desktopDisplayFields, desktopDisplayNotice, desktopFinalAnswer } from "./desktop-final-answer.js";
+import { desktopSendBelongsToRequester } from "./desktop-public-projection.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
 import { desktopQueueWitness, desktopRequestKeyDigest, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
@@ -95,6 +96,27 @@ function idle(snapshot: DesktopSnapshot): boolean {
     !snapshot.turns.some(turn => turn.status === "inProgress");
 }
 
+function settledBody(task: DesktopTaskRecord, text: string, displays?: DesktopFinalDisplay[]): string {
+  const notice = displays ? desktopDisplayNotice(displays, task.target) : "";
+  const body = [`Desktop task ${task.id} ${task.status}.`, notice, text].filter(Boolean);
+  if (!notice && !text) body.push("No assistant text was returned for this exact turn.");
+  return body.join("\n");
+}
+
+/** Outstanding envelopes can predate the Desktop handoff. Render at delivery without changing the original receipt or lease. */
+function desktopDeliveryEnvelope(task: DesktopTaskRecord, notification: DesktopNotification) {
+  const { envelope } = notification;
+  const event = envelope.event;
+  if (event.type !== "desktop_watch.settled") return envelope;
+  const displays = desktopCachedCheckDisplays(task);
+  if (!displays) return envelope;
+  const scoped: DesktopFinalDisplay[] = desktopSendBelongsToRequester(task, envelope.route.controller_session_id)
+    ? displays : [{ mode: "desktop_only", reason: "original_requester_required" }];
+  return { ...envelope, event: { ...event, body: settledBody(task, "", scoped), metadata: {
+    watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId, turn_id: task.native_turn_id,
+    ...desktopDisplayFields(scoped, task.target) } } };
+}
+
 export function createDesktopTaskService(deps: DesktopTaskServiceDependencies): DesktopTaskService {
   const service = new DesktopTaskServiceRuntime(deps);
   return {
@@ -151,7 +173,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       event: { id, type: `desktop_watch.${key.split(":")[0]}`, body, requires_response: false,
         metadata: { watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId,
           ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}),
-          ...(key === "settled" ? desktopDisplayFields(task.final_text_display) : {}) } }
+          ...(key === "settled" ? desktopDisplayFields(task.final_text_display, task.target) : {}) } }
     }) });
   }
   private make(input: DesktopTaskInput, id: string, kind: "send" | "watch"): DesktopTaskRecord {
@@ -242,7 +264,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       if (desktopObservationStopped(current) || desktopNotificationObsolete(current, notification)) {
         this.settleDelivery(id, notification.id, notification.attempt_id!, { disposition: "permanent_failure", error_code: "desktop_watch_stopped" }); return;
       }
-      outcome = parseCallbackAttemptOutcome(await this.deps.deliver({ route: task.callback_route!, envelope: notification.envelope,
+      outcome = parseCallbackAttemptOutcome(await this.deps.deliver({ route: task.callback_route!, envelope: desktopDeliveryEnvelope(current, notification),
         attempt: { number: notification.attempts, id: notification.attempt_id! }, context,
         reportCheckpoint: checkpoint => {
           const parsed = parseCallbackAttemptOutcome(checkpoint);
@@ -297,14 +319,11 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     task.status = turn.status;
     suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
     const originalRequester = task.kind === "send" && task.send_intent?.state === "accepted" && task.native_turn_id === turn.turnId;
-    const answer = desktopFinalAnswer(turn, originalRequester);
+    const answer = desktopFinalAnswer(turn, originalRequester, task.target);
     task.final_text = answer.final_text;
     if (answer.final_text_display) task.final_text_display = answer.final_text_display;
     task.pending_manual_count = 0;
-    const notice = answer.final_text_display ? desktopDisplayNotice(answer.final_text_display) : "";
-    const body = [`Desktop task ${task.id} ${task.status}.`, notice, answer.final_text].filter(Boolean);
-    if (!notice && !answer.final_text) body.push("No assistant text was returned for this exact turn.");
-    this.notify(task, "settled", body.join("\n"));
+    this.notify(task, "settled", settledBody(task, answer.final_text, answer.final_text_display));
   }
   private async observeQueue(task: DesktopTaskRecord, historyScan?: "recover"): Promise<DesktopQueueObservation> {
     if (!this.deps.queue) throw new DesktopTaskError("desktop_queue_unavailable", "Native Desktop thread queue observation is unavailable");

@@ -56,10 +56,10 @@ test("Desktop overlays retain display instructions on the same final and cannot 
   const hidden = { ...answer, text: "WITHHELD", moderation: { moderated: true,
     display: { version: 1, mode: "hide", replacement: { kind: "wellbeingPromptHelpline" } } } };
   const unmarked = { ...answer, text: "WITHHELD in unmarked overlay" };
-  for (const [history, live, expectedMode, expectedText] of [
-    [shown, unmarked, "show", answer.text], [unmarked, shown, "show", answer.text],
-    [hidden, unmarked, "hide", undefined], [unmarked, hidden, "hide", undefined],
-    [shown, hidden, "unsupported", undefined], [hidden, shown, "unsupported", undefined]
+  for (const [history, live, expectedMode] of [
+    [shown, unmarked, "show"], [unmarked, shown, "show"],
+    [hidden, unmarked, "hide"], [unmarked, hidden, "hide"],
+    [shown, hidden, "unsupported"], [hidden, shown, "unsupported"]
   ] as const) {
     const snapshot = reduceDesktopSnapshot(state({
       turnHistory: canonical([turn("t", { items: [history] })]),
@@ -67,8 +67,9 @@ test("Desktop overlays retain display instructions on the same final and cannot 
     }), identity);
     const result = snapshot.turns[0].items[0];
     assert.equal(result.answerDisplay?.mode, expectedMode);
-    assert.equal(result.text, expectedText);
-    assert.doesNotMatch(JSON.stringify(snapshot), /WITHHELD/);
+    assert.equal(result.text, undefined);
+    assert.equal(!!result.hasDesktopAnswer, expectedMode === "show");
+    assert.doesNotMatch(JSON.stringify(snapshot), /WITHHELD|requester's answer/);
   }
   const question = { ...shown, delivery: "async", text: "WITHHELD question",
     questions: [{ title: "WITHHELD title", options: ["WITHHELD option"] }] };

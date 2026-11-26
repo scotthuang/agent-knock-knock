@@ -14,21 +14,29 @@ connection that supports them.
 ### Reading a Desktop answer
 
 Codex app-server 0.172.0 can attach a versioned display directive to an
-`agentMessage` with phase `final_answer`. For version 1 `show`, the original
-Send's controller receives the text and `final_text_display` on exact Watch
-Status and in its completion callback. Conversation Status can show it when
-the same controller's accepted Send matches the displayed thread and turn.
+`agentMessage` with phase `final_answer`. For an unannotated version 1
+`show` with `trustedContacts: "skip"`, the original Send's controller receives
+the text and `final_text_display` on exact Watch Status and in its completion
+callback. Conversation Status can show it when the same controller's accepted
+Send matches the displayed thread and turn.
 Keep the Watch ID to read a particular task after the conversation moves on.
 Standalone observers and inventory queries cannot retrieve a directed answer.
 The Host is responsible for returning it to the initiating user in that
 session. AKK's binding identifies a controller session, not an individual
 reader in a shared chat.
 
-`trustedContacts: "check"` accompanies the answer. AKK passes the requirement
-to the original controller and includes its limitation in text callbacks.
-Structured results report `trusted_contacts_check_status: "not_performed_by_akk"`.
-The first-party client handles the account feature; AKK has no
-contact-check receipt and does not look up or notify anyone. A required
+`show` with `trustedContacts: "check"` directs the reader to Codex Desktop.
+When Codex returns a final answer with text, the original controller receives
+a notice that an answer is available. For a local thread with a valid UUID,
+the notice includes `codex://threads/<thread-uuid>` to open the original
+conversation on a device with Codex Desktop. Status and callback metadata
+expose the notice as `final_text_notice` and the link as `desktop_url`.
+The body stays out of `final_text` and the callback. In a WeChat conversation
+the Host can pass the notice and link back to the user. Opening the link is
+subject to the device and chat application's support for the Codex URL scheme.
+
+AKK reports `trusted_contacts_check_status: "not_performed_by_akk"`.
+Codex Desktop handles the account feature. A required
 wellbeing annotation or replacement is rendered in Desktop. For `hide`,
 `block`, malformed or unfamiliar directives, AKK withholds the original text
 and reports the display outcome. Commentary remains progress. On an explicit

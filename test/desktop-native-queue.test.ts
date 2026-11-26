@@ -251,11 +251,12 @@ test("correlation spans pages, ignores equal human text, and does not settle tra
   if (result.state === "matched") {
     assert.equal(result.turn.status, "completed");
     const shown = result.turn.items.find(item => item.id === "shown");
-    assert.equal(shown?.text, "for requester");
+    assert.equal(shown?.text, undefined);
+    assert.equal(shown?.hasDesktopAnswer, true);
     assert.equal(shown?.answerDisplay?.mode === "show" && shown.answerDisplay.trustedContacts, "check");
     assert.equal(result.turn.items.find(item => item.id === "hidden")?.answerDisplay?.mode, "hide");
   }
-  assert.doesNotMatch(JSON.stringify(result), /private reasoning|private answer|queue proof|controller-message|userMessage/);
+  assert.doesNotMatch(JSON.stringify(result), /private reasoning|private answer|for requester|queue proof|controller-message|userMessage/);
   assert.match(JSON.stringify(result), /ready/);
   s.threadStatus = "idle"; // A different owner has since manually loaded the already-observed exact native thread.
   assert.equal((await readDesktopQueueSubmission(s.target,{...input, expectedCwd:s.home})).state,"matched");

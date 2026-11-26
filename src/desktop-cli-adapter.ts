@@ -98,7 +98,7 @@ async function inspectOrStopDesktopWatch(runtime: DesktopRuntime, command: strin
   } else if (command === "watch-status" || command === "status") {
     const current = await runtime.tasks.reconcile(watch);
     const { progress, answer } = await desktopWatchObservation(runtime, current, controller);
-    output({ ...desktopTaskProjection({ ...current, ...answer }, desktopCapabilityProfile(runtime.compatibility), controller), progress,
+    output({ ...desktopTaskProjection(current, desktopCapabilityProfile(runtime.compatibility), controller, answer), progress,
       response_state: await desktopResponseStates(runtime, current.desktop_id, current.native_turn_id, controller) });
   } else throw new Error("Desktop Watch ID is only valid for status or unwatch");
 }
@@ -121,7 +121,7 @@ async function desktopWatchObservation(runtime: DesktopRuntime, task: ReturnType
     const progress = backendPublicProgress({ nativeTurnId: task.native_turn_id, turn, readAt: cliNow().toISOString() });
     // Re-render an exact settled answer for this read only, including Watches settled by older versions.
     if (turn?.itemsComplete && turn.status === task.status && ["completed", "failed", "interrupted"].includes(turn.status)) {
-      const answer = desktopFinalAnswer(turn, desktopSendBelongsToRequester(task, controller));
+      const answer = desktopFinalAnswer(turn, desktopSendBelongsToRequester(task, controller), task.target);
       if (answer.final_text_display) return { progress, answer };
     }
     return { progress };
@@ -148,11 +148,11 @@ function originalDesktopRequester(runtime: DesktopRuntime, id: string, turn: Des
   } catch { return false; } // Missing or unreadable request records cannot establish the recipient.
 }
 
-function latestTurnProjection(turn: DesktopTurn | undefined, originalRequester: boolean) {
+function latestTurnProjection(turn: DesktopTurn | undefined, originalRequester: boolean, target: DesktopThreadIdentity) {
   if (!turn) return null;
   const isFinal = turn.itemsComplete && ["completed", "failed", "interrupted"].includes(turn.status);
   return { id: turn.turnId, status: turn.status, items_complete: turn.itemsComplete,
-    ...(isFinal ? desktopFinalAnswer(turn, originalRequester) : { response_text: desktopFinalAnswer(turn, false).final_text }) };
+    ...(isFinal ? desktopFinalAnswer(turn, originalRequester, target) : { response_text: desktopFinalAnswer(turn, false).final_text }) };
 }
 
 async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, entry }: DesktopConversation, options: Options): Promise<void> {
@@ -162,7 +162,7 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
     if (snapshot.threadId !== identity.threadId) throw new Error("Desktop snapshot identity mismatch");
     const current = snapshot.turns.find(turn => turn.turnId === snapshot.latestTurnId);
     output({ ...desktopSessionProjection(entry, snapshot, desktopCapabilityProfile(runtime.compatibility)),
-      source: "codex_desktop", latest_turn: latestTurnProjection(current, originalDesktopRequester(runtime, entry.conversationId, current, controller)),
+      source: "codex_desktop", latest_turn: latestTurnProjection(current, originalDesktopRequester(runtime, entry.conversationId, current, controller), identity),
       progress: backendPublicProgress({ nativeTurnId: snapshot.latestTurnId, turn: current, readAt: cliNow().toISOString() }),
       response_state: await desktopResponseStates(runtime, entry.conversationId, snapshot.latestTurnId ?? undefined, controller) });
   } catch (error) {
@@ -174,7 +174,7 @@ async function inspectDesktopConversation(runtime: DesktopRuntime, { identity, e
       if (runtime.transport.readPersistedTurn) {
         try {
           const turn = await runtime.transport.readPersistedTurn(identity, entry.cwd);
-          history = desktopPersistedHistoryProjection(turn, cliNow().toISOString(), originalDesktopRequester(runtime, entry.conversationId, turn, controller));
+          history = desktopPersistedHistoryProjection(turn, cliNow().toISOString(), originalDesktopRequester(runtime, entry.conversationId, turn, controller), identity);
         } catch { /* The shared reader cannot substitute an unverified writer's history. */ }
       }
     }

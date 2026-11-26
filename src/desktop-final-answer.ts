@@ -1,4 +1,5 @@
-import type { DesktopFinalDisplay, DesktopTurn } from "./desktop-types.js";
+import type { DesktopTaskRecord } from "./desktop-state-store.js";
+import type { DesktopFinalDisplay, DesktopThreadIdentity, DesktopTurn } from "./desktop-types.js";
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -51,41 +52,70 @@ export function desktopAnswerDisplay(moderation: unknown): DesktopFinalDisplay |
   return { mode: "unsupported" };
 }
 
-export function desktopDisplayFields(displays?: DesktopFinalDisplay[]): {
-  final_text_display?: DesktopFinalDisplay[]; trusted_contacts_check_status?: "not_performed_by_akk";
-} {
-  if (!displays?.length) return {};
-  return { final_text_display: displays, ...(displays.some(display => "trustedContacts" in display && display.trustedContacts === "check")
-    ? { trusted_contacts_check_status: "not_performed_by_akk" } : {}) };
+function requiresContactCheck(display: DesktopFinalDisplay): boolean {
+  return "trustedContacts" in display && display.trustedContacts === "check";
 }
 
-export function desktopFinalAnswer(turn: DesktopTurn, originalRequester: boolean) {
+export function desktopRequiresContactCheck(displays?: readonly DesktopFinalDisplay[]): boolean {
+  return displays?.some(requiresContactCheck) ?? false;
+}
+
+function desktopThreadUrl(target?: DesktopThreadIdentity): string | undefined {
+  // The deep-link scheme takes only a local native thread UUID, not a host, path or turn selector.
+  if (target?.hostId === "local" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(target.threadId)) {
+    return `codex://threads/${target.threadId}`;
+  }
+  return undefined;
+}
+
+export function desktopDisplayFields(displays?: DesktopFinalDisplay[], target?: DesktopThreadIdentity): {
+  final_text_display?: DesktopFinalDisplay[]; trusted_contacts_check_status?: "not_performed_by_akk";
+  final_text_notice?: string; desktop_url?: string;
+} {
+  if (!displays?.length) return {};
+  if (!desktopRequiresContactCheck(displays)) return { final_text_display: displays };
+  const url = desktopThreadUrl(target);
+  return { final_text_display: displays, trusted_contacts_check_status: "not_performed_by_akk",
+    final_text_notice: desktopDisplayNotice(displays, target), ...(url ? { desktop_url: url } : {}) };
+}
+
+export function desktopFinalAnswer(turn: DesktopTurn, originalRequester: boolean, target?: DesktopThreadIdentity) {
   const messages = turn.items.filter(item => item.type === "agentMessage" && item.delivery !== "async" && !item.questions?.length);
   const finals = messages.filter(item => item.phase === "final_answer");
   // A directed or hidden final still takes precedence over older, unphased messages.
   const items = finals.length ? finals : messages.filter(item => item.phase == null && !item.answerDisplay);
   const text: string[] = [], displays: DesktopFinalDisplay[] = [];
+  let nativeOnlyAnswer = false;
   for (const item of items) {
     const display = item.answerDisplay;
     if (display) {
+      if (requiresContactCheck(display)) nativeOnlyAnswer = true;
       const bound = originalRequester && turn.itemsComplete &&
         (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted");
       const visible: DesktopFinalDisplay = bound ? display : { mode: "desktop_only", reason: "original_requester_required" };
-      displays.push(visible);
-      if (visible.mode !== "show") continue;
+      if (visible.mode === "show" && visible.trustedContacts === "check" && (item.hasDesktopAnswer || item.text?.trim())) {
+        displays.push({ ...visible, hasAnswer: true });
+      } else {
+        displays.push(visible);
+      }
+      if (visible.mode !== "show" || visible.trustedContacts !== "skip") continue;
     }
     if (item.text) text.push(item.text);
   }
-  return { final_text: text.join("\n\n"), ...desktopDisplayFields(displays) };
+  // The callback carries one flat answer. A partial sibling must not stand in for the native answer.
+  return { final_text: nativeOnlyAnswer ? "" : text.join("\n\n"), ...desktopDisplayFields(displays, target) };
 }
 
-/** Plain-text callbacks cannot run Chat's account features. Keep the native requirement visible with the result. */
-export function desktopDisplayNotice(displays: readonly DesktopFinalDisplay[]): string {
+/** Point the original requester back to the native presentation when a contact check is requested. */
+export function desktopDisplayNotice(displays: readonly DesktopFinalDisplay[], target?: DesktopThreadIdentity): string {
   const notes = new Set<string>();
+  if (desktopRequiresContactCheck(displays)) {
+    const hasAnswer = displays.some(display => display.mode === "show" && display.trustedContacts === "check" && display.hasAnswer);
+    if (hasAnswer) notes.add("The final answer is available in Codex Desktop.");
+    const url = desktopThreadUrl(target);
+    notes.add(`Open the original conversation in Codex Desktop${url ? `: ${url}` : "."}`);
+  }
   for (const display of displays) {
-    if ("trustedContacts" in display && display.trustedContacts === "check") {
-      notes.add("Codex requested a trusted-contact check. AKK cannot perform or verify it; this reply is for the original requester.");
-    }
     switch (display.mode) {
       case "hide": notes.add("Open Codex Desktop to view the native replacement and support resources."); break;
       case "block": notes.add("Codex blocked display of this answer."); break;
@@ -97,4 +127,18 @@ export function desktopDisplayNotice(displays: readonly DesktopFinalDisplay[]): 
     }
   }
   return [...notes].join("\n");
+}
+
+/** Legacy outboxes may be the only copy of the directive. Their preformatted body cannot safely be split. */
+export function desktopCachedCheckDisplays(task: DesktopTaskRecord): DesktopFinalDisplay[] | undefined {
+  const recorded = task.final_text_display;
+  if (desktopRequiresContactCheck(recorded)) return recorded;
+  const settled = task.notifications.find(note => note.id === `${task.id}:settled` && note.envelope.event.type === "desktop_watch.settled");
+  const metadata = settled?.envelope.event.metadata;
+  const cached = metadata?.final_text_display;
+  if (metadata?.trusted_contacts_check_status !== "not_performed_by_akk" &&
+      !(Array.isArray(cached) && cached.some(display => display?.trustedContacts === "check"))) return undefined;
+  // A later exact read may give a stronger native restriction. Retain it without falling back to cached text.
+  if (recorded?.some(display => display.mode !== "show")) return recorded;
+  return [{ version: 1, mode: "show", trustedContacts: "check" }];
 }

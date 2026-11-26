@@ -1,6 +1,7 @@
 /** Safe presentation metadata. Native text, free-form reasons and contact data never belong here. */
 export type DesktopFinalDisplay =
-  | { version: 1; mode: "show"; trustedContacts: "check" | "skip" }
+  | { version: 1; mode: "show"; trustedContacts: "skip" }
+  | { version: 1; mode: "show"; trustedContacts: "check"; hasAnswer?: true }
   | { version: 1; mode: "hide"; replacement: "wellbeingPromptHelpline" }
   | { version: 1; mode: "block"; reason: "protection" | "cyber" }
   | { version: 1; mode: "desktop_only"; reason: "wellbeingHelpline"; subject: "answer" | "prompt"; trustedContacts: "check" | "skip" }
@@ -15,6 +16,8 @@ export interface DesktopTurnItem {
   type: string;
   text?: string;
   answerDisplay?: DesktopFinalDisplay;
+  /** Nonempty final text observed but left in the native client for presentation. */
+  hasDesktopAnswer?: true;
   clientId?: string | null;
   content?: { type: string; text?: string }[];
   phase?: string | null;

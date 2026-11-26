@@ -1,6 +1,6 @@
 import { isRecord, nonBlankString } from "./value-guards.js";
 import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
-import { desktopDisplayNotice } from "./desktop-final-answer.js";
+import { desktopDisplayNotice, desktopRequiresContactCheck } from "./desktop-final-answer.js";
 
 /** Desktop commands have native task identities, never fabricated managed Session or Turn ids. */
 export function formatDesktopCommandResult(result: Record<string, unknown>, action: string): string {
@@ -16,8 +16,10 @@ function answerLines(result: Record<string, unknown>): string[] {
   const latest = result.latest_turn ?? (isRecord(result.persisted_history) ? result.persisted_history.latest_turn : undefined);
   const answer = isRecord(latest) && Array.isArray(latest.final_text_display) ? latest : result;
   const displays = answer.final_text_display;
-  const notice = Array.isArray(displays) && !displays.some(item => !isRecord(item)) ? desktopDisplayNotice(displays) : "";
-  return [...optionalLine(answer, "final_text", "result"), ...(notice ? [notice] : [])];
+  const known = Array.isArray(displays) && !displays.some(item => !isRecord(item)) ? displays : [];
+  const notice = nonBlankString(answer.final_text_notice) ?? desktopDisplayNotice(known);
+  const resultLines = desktopRequiresContactCheck(known) ? [] : optionalLine(answer, "final_text", "result");
+  return [...resultLines, ...(notice ? [notice] : [])];
 }
 function queueLines(result: Record<string, unknown>): string[] {
   if (result.delivery_path !== "native_thread_queue") {

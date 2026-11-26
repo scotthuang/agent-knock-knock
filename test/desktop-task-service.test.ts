@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
-import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
+import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
 import { desktopTaskProjection } from "../src/desktop-public-projection.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
@@ -15,7 +15,7 @@ import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 
-const target = { codexHome: "/test/codex", hostId: "local", threadId: "thread-exact" };
+const target = { codexHome: "/test/codex", hostId: "local", threadId: "00000000-0000-4000-8000-000000000001" };
 const input = { target, desktopId: createDesktopConversationId(target), controllerSession: "controller-one", messageId: "message-one", text: "Do the exact task" };
 const route = createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: input.controllerSession });
 function turn(id: string, status: DesktopTurn["status"] = "inProgress", clientId?: string, text = input.text): DesktopTurn {
@@ -123,23 +123,66 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   ] } };
   await Promise.all([restarted.reconcile(one.id), h.service.reconcile(one.id)]);
   const done = await restarted.reconcile(one.id);
-  assert.equal(done.status, "completed"); assert.equal(done.final_text, "DONE");
+  assert.equal(done.status, "completed"); assert.equal(done.final_text, "");
   assert.equal(done.notifications.length, 1); assert.equal(done.notifications[0].status, "accepted");
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.metadata?.turn_id, "execution-turn");
-  assert.deepEqual(done.final_text_display, [display]);
+  assert.deepEqual(done.final_text_display, [{ ...display, hasAnswer: true }]);
   const callback = h.state.notifications[0].envelope;
   assert.equal(callback.route.controller_session_id, input.controllerSession);
-  assert.deepEqual(callback.event.metadata?.final_text_display, [display]);
+  assert.deepEqual(callback.event.metadata?.final_text_display, done.final_text_display);
   assert.equal(callback.event.metadata?.trusted_contacts_check_status, "not_performed_by_akk");
-  assert.match(callback.event.body, /trusted.?contact/i);
-  assert.match(callback.event.body, /DONE/);
-  assert.doesNotMatch(callback.event.body, /Progress only/);
+  const threadUrl = `codex://threads/${target.threadId}`;
+  assert.equal(callback.event.metadata?.desktop_url, threadUrl);
+  assert.match(callback.event.body, /completed/);
+  assert.match(callback.event.body, /answer is available/i);
+  assert.ok(callback.event.body.includes(threadUrl));
+  assert.doesNotMatch(JSON.stringify(h.state.notifications[0]), /DONE|Progress only/);
+  assert.deepEqual(done.notifications[0].envelope, callback);
   assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");
   assert.equal((await restarted.reconcile(one.id)).status, "completed");
   assert.equal(h.state.notifications.length, 1);
+});
+
+test("pending legacy callbacks keep their delivery identity and replace cached checked text at dispatch", async t => {
+  for (const savedDirective of ["task", "envelope"] as const) {
+    const h = harness(t);
+    h.deps.canDeliver = () => false;
+    const sent = await h.service.send({ ...input, callbackRoute: route });
+    const final = turn("native-one", "completed", h.state.clientId);
+    h.state.snapshot = snapshot([final]);
+    const done = await h.service.reconcile(sent.id);
+    const pending = done.notifications[0];
+    assert.equal(pending.status, "ready");
+    const displays = [{ version: 1, mode: "show", trustedContacts: "check" }] as const;
+    const marker = "SYNTHETIC-CACHED-FINAL";
+    done.final_text = marker;
+    if (savedDirective === "task") done.final_text_display = [...displays];
+    pending.envelope = createCallbackEnvelope({ route, source: pending.envelope.source, event: {
+      ...pending.envelope.event, body: `Legacy completion with ${marker}`, metadata: {
+        ...pending.envelope.event.metadata, ...(savedDirective === "envelope" ? { final_text_display: displays } : {}) } } });
+    h.repository.save(done, done.revision);
+    const cached = desktopTaskProjection(done, false, input.controllerSession);
+    assert.equal(cached.final_text, "");
+    assert.equal(cached.desktop_url, `codex://threads/${target.threadId}`);
+    assert.ok(!JSON.stringify(cached).includes(marker));
+    assert.equal(desktopTaskProjection(done).desktop_url, undefined);
+    h.deps.canDeliver = () => true;
+    const restarted = createDesktopTaskService(h.deps);
+    await restarted.reconcile(done.id);
+    await restarted.reconcile(done.id);
+    assert.equal(h.state.notifications.length, 1);
+    const delivered = h.state.notifications[0].envelope;
+    assert.equal(delivered.delivery_id, pending.envelope.delivery_id);
+    assert.equal(delivered.idempotency_key, pending.envelope.idempotency_key);
+    assert.equal(delivered.event.id, `${done.id}:settled`);
+    assert.equal(delivered.route.controller_session_id, input.controllerSession);
+    assert.ok(delivered.event.body.includes(`codex://threads/${target.threadId}`));
+    assert.ok(!JSON.stringify(delivered).includes(marker));
+    assert.equal(restarted.status(done.id).notifications[0].status, "accepted");
+  }
 });
 
 test("independent queue requests survive an older ACK loss; changing just the message ID cannot replay it", async t => {
