@@ -122,6 +122,8 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
             { required: ["session_id"] },
             { required: ["terminal_id"] },
             { required: ["type"] },
+            { required: ["desktopQueueOnlyIfEmpty"] },
+            { required: ["desktopRequestId"] },
             { required: ["idleTimeoutMinutes"] },
             { required: ["agentTimeoutMinutes"] },
             { required: ["agentHardTimeoutMinutes"] }
@@ -211,6 +213,14 @@ test("OpenClaw routing and reconciliation omit a global workspace argument", asy
         ? String(terminalIdSchema.description ?? "")
         : "",
       /New ordinary Claude sends use managed terminal delivery[\s\S]*Store or ownership failure cannot silently become unmanaged work/u
+    );
+    await assert.rejects(
+      () => sendTool!.execute!("tool-call-strict-queue", {
+        conversation_id: "desktop:v1:exact_thread",
+        request: "Only when the queue is empty",
+        desktopQueueOnlyIfEmpty: true
+      }),
+      /cannot atomically append only if the queue is empty/u
     );
     await assert.rejects(
       () => sendTool!.execute!("tool-call-invalid-answer", {
