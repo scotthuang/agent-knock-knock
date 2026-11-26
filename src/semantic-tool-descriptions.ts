@@ -80,9 +80,10 @@ export const semanticToolDescriptions = {
     "an exact native-task Watch for completion and interaction callbacks; no " +
     "terminal input or replacement process is used. Preserve uncertain receipts " +
     "and never repeat a send blindly. For Desktop, pass request and the exact conversation_id from List. AKK " +
-    "requires a reachable idle original owner, inherits thread settings, sends " +
-    "once and monitors the exact accepted task. It never automatically opens a " +
-    "thread, approves, answers blocking questions or retries an uncertain Desktop send. " +
+    "uses the original owner or, when advertised, appends once to the original thread's native queue. " +
+    "New requests need only the target and message. Optionally supply desktopRequestId on the first call to correlate the same request across tool calls. " +
+    "If the result is lost, inspect the original Watch; keep any original key unchanged. Queueing may wait behind other work. " +
+    "Set desktopQueueOnlyIfEmpty when that is a strict user condition. Keep uncertain receipts; never retry or answer a pending interaction with Send. " +
     "For other advertised terminal actions, start a new AKK Turn, use one advertised terminal_user_explicit " +
     "user-priority send, or explicitly recover one current uncertain submission " +
     "only through its advertised retry_submission action. Ordinary send requires " +

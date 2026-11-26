@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.23 / Pi 0.1.0-poc.31 / DeepSeek Harness 0.1.0-rc.37 — 2026-11-26
+
+- Send can append one message to the exact Codex Desktop thread while another turn runs or other messages wait. Older sub-agent records do not prevent queuing. Watch follows the original message through execution and supports a deeper history scan during recovery. An uncertain submission is never automatically repeated.
+- Explicit Desktop Status and Inspect can return the latest persisted answer, including turns started in Desktop, after verifying the thread and writer. Completion notifications keep their original destination. Visible answers retain native presentation notices, including whether AKK performed a requested trusted-contact check. Hidden or blocked text stays out of tool responses and callbacks.
+- Fix false “live owner not confirmed” results on macOS. AKK bounds the file-descriptor limit of its own `lsof` probe and verifies all four process-to-executable mappings in one pass. Read-only checks through a real Gateway and standalone CLI both recovered the completed turn and visible answer.
+- Pi poc.31 and DSH rc.37 pin core 0.16.23 and ship the updated Skill on `next`. Their declared Host support stays the same.
+
 ## DeepSeek Harness 0.1.0-rc.36 — 2026-11-25
 
 - Support DSH Web 0.2.2-rc.5 with Cordis 4.1.0. The launcher and its SDK packages must match. A mixed rc.3/rc.5 runtime or an unlisted Host version still fails before tool registration.

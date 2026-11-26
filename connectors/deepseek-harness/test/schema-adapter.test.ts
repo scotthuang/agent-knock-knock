@@ -36,13 +36,12 @@ test("all pinned AKK schemas pass the shared supported DSH validator", async () 
       () => adapter.verifyCapabilityHandshake(`${document}drift`, registeredNames),
       /capability handshake/u,
     );
-    // Contract for the candidate core's first-party v5 List default.
-    // List guidance and Claude physical-input descriptions evolve with this core;
-    // the catalog retains 27 tool names.
+    // Compared with 0.16.22, only Send changes: original-thread queue guidance,
+    // an optional request identity and an optional strict empty-queue condition.
     assert.equal(adapter.tools.length, 27);
     assert.equal(
       catalogDigest(adapter),
-      "7d675b3c8b808262ea03c8a690719d76c8cbd7a6be551764308ef7ecbf36d2e4"
+      "fd7b48a382f0983b513fec0eae48f40fb48cc762a8a0a4c5af17988d7a649438"
     );
     for (const tool of adapter.tools) {
       const discovery = adaptHostToolInputSchema(

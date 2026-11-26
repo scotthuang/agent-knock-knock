@@ -11,6 +11,90 @@ message runs, the new client may execute it. The Watch follows the original
 message. AKK keeps interactive controls available only through a verified owner
 connection that supports them.
 
+### Reading a Desktop answer
+
+Use conversation Status to read the latest turn of the selected local thread,
+including one started directly in Desktop. The answer goes to the caller.
+When live activity is unknown, a verified shared-backend read can still return
+the last saved turn under `persisted_history.latest_turn`. Its completion
+describes that turn only. To read a particular task after the thread has moved
+on, query its exact Watch ID.
+
+Codex app-server 0.172.0 can attach a display directive to a `final_answer`.
+AKK returns plain final text and text marked with an unannotated version 1
+`show`. With `trustedContacts: "check"`, relay the answer together with
+`final_text_notice`: Codex requested a trusted-contact check and AKK has
+neither performed nor verified it. The result includes
+`trusted_contacts_check_status: "not_performed_by_akk"` and, for a local
+thread with a valid UUID, its `desktop_url`. Codex Desktop handles required
+wellbeing annotations and replacements. AKK withholds the original text of
+`hide`, `block`, malformed or unfamiliar directives. Commentary stays in progress.
+
+An explicit read requires no originating AKK Send. Automatic completion
+notifications use their recorded controller route. Directed answers are
+included in an automatic notification only for the original accepted Send.
+An older Watch without an item-verified cached answer may require an exact
+read from Codex. Reading the answer does not replay its completion callback.
+
+### Sending to a thread with a queue
+
+For an ordinary new task, pass the exact Desktop conversation and request
+text. A separate user instruction can use the same words in a new tool call.
+The original controller can look up its receipt by Watch ID or reuse the
+same invocation identity (CLI `--message-id`) with the original input.
+
+If a Host needs to recognize the same instruction across different tool
+calls, supply an optional `desktopRequestId` (CLI `--desktop-request-id`) on
+the first call. Retain that key and use the same controller, target, callback
+route and text to retrieve the original receipt. Use a fresh key or omit it
+for a separately requested task. The key works across owner IPC and the shared
+queue. A queue ACK confirms only the native append. If the outer result is
+lost and the original key and invocation identity are unavailable, inspect
+the controller's Watches and their Status. Starting a fresh call could submit
+the message twice. After history cleanup, a retained tombstone still prevents
+replay of the original operation.
+
+When List or Status offers `native_queue_available`, an ordinary Send appends one
+independent message to the selected thread. A running parent turn, an old
+sub-agent activity record or messages already in the queue can leave the new
+task waiting. AKK leaves existing entries and command approvals in place. The
+send-time check verifies the thread, project, Desktop writer, shared endpoint
+and pre-send turn again. The owner IPC retains its own requirements for starting
+a turn and handling interactions.
+
+If Status reports a saved draft or a retained editor, AKK leaves it in place.
+Desktop has not been verified to preserve the draft's order relative to a
+queued message. Unsaved typing may be invisible to the queue reader.
+
+An unanswered question on the current turn produces the Status notice
+`desktop_queue_question_pending`. An independent Send can still append
+one message at the tail. The person handling the question can answer it in
+Desktop. AKK sends no answer, keystroke or forced start. The same notice
+applies if the shared reader reports `interrupted` with no completion time.
+Answered questions and durably ended turns do not produce this notice.
+
+A supported queue can also have temporarily unknown depth. If the user requires
+an empty queue **at the instant of submission**, pass `desktopQueueOnlyIfEmpty: true`
+(CLI `--desktop-queue-only-if-empty`). AKK stops before dispatch because
+Codex offers no atomic empty-queue condition.
+
+Keep the Watch returned by Send. A queue acknowledgement confirms admission.
+Execution requires the unchanged original client message in a unique subsequent
+turn. If its entry disappears, it may have been consumed or removed; use that
+Watch to look for the matching turn. An edited or conflicting entry, a missing
+acknowledgement or a partial history read never justifies resending.
+
+For a long queue, ordinary observation examines up to 13 pages of eight turns
+(including the pre-send boundary) within 15 seconds. This covers one full
+[100-entry queue](https://github.com/openai/codex/blob/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex-rs/app-server/tests/suite/v2/thread_queue.rs#L391-L425).
+If more history intervenes, use Recover on the same Watch for up to 128 pages
+(1,024 turns including the boundary) within 25 seconds. Both budgets include
+time for the extra head recheck after a multi-page result and any queue read. A partial
+scan, changed head or conflicting client ID cannot prove a match. If the deeper
+budget is exhausted, attribution remains uncertain; keep the original receipt.
+After a unique match is recorded, subsequent reads verify the original user
+item in that exact bound turn and check newer turns for conflicts.
+
 AKK 0.14.0 introduces these Desktop controls. See the [README](../README.md)
 for the first-task workflow and [OpenClaw installation](openclaw-operations.md#choose-one-installation-path)
 for packaged and optional source installation.
@@ -31,6 +115,7 @@ possibly submitted operation.
 | `26.1007.71326` / `20398` | Send, public progress, exact completion, approvals, both answer forms, effective model/permission settings and cancellation | Projectless creation and original-owner first task |
 | `26.1111.71025` / `28661` (AKK 0.16.17) | List/Status, semantic-tool Send, exact native completion, failed-task observation and local callbacks; protocol regressions. Approvals and other interaction effects not newly live-verified; see below. | Not retested |
 | `26.1117.31558` / `29513` | AKK 0.16.21 lists sidebar conversations. AKK 0.16.22 supports thread-scoped queued Send after verifying the local Desktop writer. Exact task settlement and one local callback were exercised on a dedicated conversation. A manual client switch can change the executor. Approvals, questions and settings require the separate owner IPC. [Evidence and owner boundary](evidence/desktop-29513.md) | Not retested |
+| `26.1117.41037` / `29803` | Read-only verification with local backend `0.172.0` confirmed the Desktop writer, original thread, persisted turn and queue. Queue admission and receipt handling for running and queued work have isolated regression coverage. | Not retested |
 | Other builds | Attempt the implemented contracts; not claimed as live-verified | Attempt with verified bundle identity and a compatible real backend handshake; not claimed as live-verified |
 
 `compatibility_policy: "attempt_native_contract"` describes this policy.

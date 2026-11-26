@@ -1,6 +1,20 @@
 import { DesktopIpcError, type DesktopCurrentPermissions, type DesktopCollaborationMode,
   type DesktopThreadSettings, type DesktopTurnItem, type DesktopFileChange, type DesktopSnapshot } from "./desktop-types.js";
 import { desktopObject, desktopNativeRequestId } from "./desktop-request-interactions.js";
+import { desktopAnswerDisplay } from "./desktop-final-answer.js";
+
+/** Retain only the exact final text permitted by the native show directive. */
+export function projectDesktopAnswerItem(item: DesktopTurnItem, moderation: unknown): DesktopTurnItem {
+  if (item.type !== "agentMessage") return item;
+  const answerDisplay = desktopAnswerDisplay(moderation);
+  if (!answerDisplay) return item;
+  const scoped: DesktopTurnItem = { id: item.id, type: item.type, answerDisplay };
+  if (item.phase === "final_answer" && item.delivery == null && !item.questions?.length) {
+    scoped.phase = item.phase;
+    if (answerDisplay.mode === "show") scoped.text = item.text;
+  }
+  return scoped;
+}
 
 function invalid(): never { throw new DesktopIpcError("invalid_response", "Invalid Desktop native detail"); }
 function optionalString(value: unknown): string | undefined {

@@ -9,6 +9,7 @@ import { DESKTOP_CREATION_BUILD } from "../src/desktop-compatibility.js";
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { compactAkkListModelProjection } from "../src/semantic-tool-list-projection.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
+import { DesktopQueueAdmissionError } from "../src/desktop-queue-submit.js";
 import type { DesktopRuntime } from "../src/desktop-runtime.js";
 import type { DesktopCatalogEntry, DesktopCatalogListOptions } from "../src/desktop-session-catalog.js";
 
@@ -164,9 +165,10 @@ test("Desktop List checks only held lock hints on this page, caps queue probes a
     transport: { async observe() { throw new DesktopIpcError("unsafe_socket", "Identity failure"); }, queue: {
       async prepare(entry: DesktopCatalogEntry) {
         checked.push(entry.conversationId);
-        if (entry === rows[2]) throw new DesktopIpcError("thread_not_idle", "private draft");
+        if (entry === rows[2]) throw new DesktopQueueAdmissionError("desktop_queue_saved_draft");
         if (entry === rows[3]) throw new Error("private owner/endpoint information");
-        return { ownerId: "private owner", endpointId: "private endpoint", baselineTurnId: "private baseline", cwd: entry.cwd };
+        return { ownerId: "private owner", endpointId: "private endpoint", baselineTurnId: "private baseline", cwd: entry.cwd,
+          notices: ["desktop_queue_appends_behind_existing", "private draft"] };
       }
     } } } as unknown as DesktopRuntime;
   const result = await listDesktopSessions(runtime, {}, async candidates => {
@@ -187,8 +189,14 @@ test("Desktop List checks only held lock hints on this page, caps queue probes a
     assert.equal(ready.capabilities.send, true); assert.equal(ready.capabilities.watch, false);
     assert.equal(ready.capabilities.approve, false); assert.equal(ready.available_actions.native_inspect, undefined);
     assert.equal(ready.can_send_reason, "native_queue_available");
+    assert.deepEqual(ready.queue_notices, ["desktop_queue_appends_behind_existing"]);
+    assert.equal(ready.owner_ipc_state, "unavailable");
     assert.equal(exactHostRow(host, rows[0]!.conversationId).capabilities.send, false);
-    assert.equal(exactHostRow(host, rows[2]!.conversationId).can_send_reason, "desktop_queue_admission_blocked");
+    const draft = exactHostRow(host, rows[2]!.conversationId);
+    assert.equal(draft.can_send_reason, "desktop_queue_saved_draft");
+    assert.equal(draft.observation_error, "desktop_queue_saved_draft");
+    assert.equal(draft.available_actions.send, undefined);
+    if (version === 4) assert.doesNotMatch(draft.usage.next_steps.join(" "), /open this conversation/i);
     assert.equal(exactHostRow(host, rows[3]!.conversationId).capabilities.send, false);
     assert.equal(exactHostRow(host, rows[5]!.conversationId).can_send_reason, "desktop_queue_probe_deferred");
     assert.equal(host.desktop_scan.queue_ready_count, 2);

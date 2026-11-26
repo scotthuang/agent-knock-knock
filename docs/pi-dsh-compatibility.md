@@ -1,5 +1,11 @@
 # Pi and DeepSeek Harness connector compatibility
 
+## Desktop queue and explicit Status reads — core 0.16.23
+
+Pi 0.1.0-poc.31 and DeepSeek Harness 0.1.0-rc.37 pin core 0.16.23 on `next`.
+They include the updated Desktop queue and answer-display Skill. The Host
+versions documented below retain their prior verification status.
+
 ## DSH 0.2.2-rc.5 / connector rc.36
 
 Connector 0.1.0-rc.36 pins core 0.16.22 and adds exactly

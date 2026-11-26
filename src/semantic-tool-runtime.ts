@@ -5,6 +5,7 @@ import { resolveHostListProjectionVersion, type HostListProjectionVersion } from
 import { createDesktopCreationSemanticTool } from "./desktop-creation-semantic.js";
 import { isClaudeNativeConversationId } from "./claude-native-identity.js";
 import { isDesktopConversationId } from "./desktop-identity.js";
+import { assertDesktopQueueCondition, assertDesktopRequestOptions } from "./desktop-task-queue.js";
 import { backendRecoveryToolArgs, formatBackendRecoveryCommandResult, normalizeBackendStatusTarget } from "./backend-recovery-semantic.js";
 import { desktopControlToolArgs, desktopCancelToolArgs } from "./desktop-control-semantic.js";
 import { semanticCommandGuidance, semanticToolDescriptions } from
@@ -1439,6 +1440,8 @@ async function runSendRequest(
   toolContext,
   messageId?: string
 ): Promise<Record<string, any>> {
+  assertDesktopQueueCondition(params.desktopQueueOnlyIfEmpty);
+  assertDesktopRequestOptions(params.conversation_id, params);
   params = normalizeTerminalConversationTarget(params);
   const nativeArgs = nativeSendToolArgs(params, isRecord(api.pluginConfig) ? api.pluginConfig : {}, toolContext ?? {}, messageId);
   if (nativeArgs) return normalizeConversationSendResult(await runHostAwareCli(api, nativeArgs));

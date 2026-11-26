@@ -221,7 +221,8 @@ export function unifiedConversationList(result: Row, terminals: readonly Row[], 
     if (linked.has(String(terminal.id))) continue;
     conversations.push(standaloneConversation(terminal, claudeSendTargets.find(row => row.id === terminal.id)));
   }
-  conversations.push(...rows(result.desktop_sessions).map(row => ({ ...row, route_preference: "desktop_ipc" })));
+  conversations.push(...rows(result.desktop_sessions).map(row => ({ ...row,
+    route_preference: row.owner_ipc_state === "unavailable" ? "native_thread_queue" : "desktop_ipc" })));
   const presentation = presentConversationList(conversations.map(withExactTerminalActions), terminals, presentationOptions);
   return { ...result, ...presentation, conversations: presentation.conversations.map(row => withConversationUsage(row)),
     conversation_routing: { policy: "agent_specific", codex: "backend_first", claude: "managed_terminal_first",

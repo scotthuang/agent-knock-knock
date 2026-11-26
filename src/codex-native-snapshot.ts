@@ -88,8 +88,7 @@ export function nativePage<T>(value: unknown, parse: (entry: unknown) => T): { d
 export function nativeInteractionId(identity: unknown): string {
   return "codex-native-interaction:" + createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 }
-export function nativeAsyncInteractions(threadId: string, turn: CodexNativeTurn): NativeInteraction[] {
-  if (!turn.itemsComplete || turn.status !== "inProgress") return [];
+export function answeredNativeQuestionIds(turn: CodexNativeTurn): Set<string> {
   const answered = new Set<string>();
   for (const item of turn.items) {
     let text = nativeUserMessageText(item)?.trim();
@@ -108,6 +107,12 @@ export function nativeAsyncInteractions(threadId: string, turn: CodexNativeTurn)
       }
     } catch { /* A normal user message is not an answer receipt. */ }
   }
+  return answered;
+}
+
+export function nativeAsyncInteractions(threadId: string, turn: CodexNativeTurn): NativeInteraction[] {
+  if (!turn.itemsComplete || turn.status !== "inProgress") return [];
+  const answered = answeredNativeQuestionIds(turn);
   return turn.items.flatMap(item => isPublicAgentMessage(item) && item.delivery === "async"
     ? (item.questions ?? []).flatMap((q, index) => {
       const questionId = JSON.stringify(["request_user_input_async", item.id, index]);

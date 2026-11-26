@@ -35,10 +35,12 @@ experimental TypeScript files: **4 changed, 6 added, none removed**. Existing
 initialization, loaded discovery, read/items, subscription, task submission,
 ordinary approvals/questions and settings contracts used by AKK remained
 compatible. Agent-message display metadata changed to a versioned show/hide/
-block union. AKK deliberately preserves its conservative rule: display-directed,
+block union. The CLI compatibility review preserved its conservative rule: display-directed,
 moderated or unknown presentation metadata does not expose raw message text in
 progress, final results or callbacks. Regression includes known and unknown
 versions. A biometric metadata addition does not authorize person-only approval.
+The subsequent [Desktop recovered-answer policy](codex-desktop-compatibility.md#reading-a-desktop-answer)
+applies versioned `show` instructions to explicit Desktop reads and the original Send's completion callback.
 
 Official TUI review covered status, permission, model, question and composer
 renderers. Status cards, permission menus and question layouts retain their

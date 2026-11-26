@@ -116,6 +116,16 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
     assert.equal(ambiguous.isError, true);
     assert.equal(acceptedCalls.length, 1);
 
+    const queueArgs = { conversation_id: "desktop:v1:exact_thread", request: "fixture",
+      desktopRequestId: "dsh:queue-42", desktopQueueOnlyIfEmpty: true };
+    const send = (request: Record<string, unknown>, id: string) => executeNativeTool(ctx, {
+      name: "agent_knock_knock_send", callId: ToolCallId(id), arguments: request, agent, signal,
+    });
+    assert.equal((await send(queueArgs, "new-send")).isError, false);
+    assert.deepEqual(acceptedCalls.at(-1)?.args, queueArgs);
+    assert.equal((await send({ ...queueArgs, conversation_id: "terminal:v2:other" }, "wrong-surface")).isError, true);
+    assert.equal(acceptedCalls.length, 2);
+
     detach();
     const stale = await executeNativeTool(ctx, {
       name: "agent_knock_knock_approve",
@@ -129,7 +139,7 @@ test("published DSH ToolRuntime preserves exact targets, typed answers and canon
       signal,
     });
     assert.equal(stale.isError, true);
-    assert.equal(acceptedCalls.length, 1);
+    assert.equal(acceptedCalls.length, 2);
   } finally {
     await cleanup?.();
     await core.lifecycle.stop();
