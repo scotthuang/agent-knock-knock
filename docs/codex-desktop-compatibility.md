@@ -25,17 +25,17 @@ The Host is responsible for returning it to the initiating user in that
 session. AKK's binding identifies a controller session, not an individual
 reader in a shared chat.
 
-`show` with `trustedContacts: "check"` directs the reader to Codex Desktop.
-When Codex returns a final answer with text, the original controller receives
-a notice that an answer is available. For a local thread with a valid UUID,
-the notice includes `codex://threads/<thread-uuid>` to open the original
-conversation on a device with Codex Desktop. Status and callback metadata
-expose the notice as `final_text_notice` and the link as `desktop_url`.
-The body stays out of `final_text` and the callback. In a WeChat conversation
-the Host can pass the notice and link back to the user. Opening the link is
-subject to the device and chat application's support for the Codex URL scheme.
+For an unannotated version 1 `show` with `trustedContacts: "check"`, the
+original controller receives the visible answer in `final_text` and a notice
+that Codex requested a trusted-contact check which AKK has neither performed
+nor verified. The completion callback includes both, so the Host can relay
+the answer and notice together. Status and callback metadata also include
+`final_text_notice`, `trusted_contacts_check_status: "not_performed_by_akk"`,
+and, for a local thread with a valid UUID, the original `desktop_url`.
+An older Watch whose cache lacks individually verified text can still return a
+notice and link. An exact Status read can retrieve the answer from Codex if
+the original complete turn is available.
 
-AKK reports `trusted_contacts_check_status: "not_performed_by_akk"`.
 Codex Desktop handles the account feature. A required
 wellbeing annotation or replacement is rendered in Desktop. For `hide`,
 `block`, malformed or unfamiliar directives, AKK withholds the original text

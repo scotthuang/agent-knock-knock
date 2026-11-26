@@ -59,14 +59,17 @@ export function desktopSendBelongsToRequester(task: DesktopTaskRecord, controlle
     && !!controller && task.controller_session === controller;
 }
 
-function storedAnswerProjection(task: DesktopTaskRecord, controller?: string) {
+export function desktopStoredAnswer(task: DesktopTaskRecord, controller?: string):
+  { final_text: string | undefined } & ReturnType<typeof desktopDisplayFields> {
   const cachedCheck = desktopCachedCheckDisplays(task);
   const displays = cachedCheck ?? task.final_text_display;
   if (displays?.length && !desktopSendBelongsToRequester(task, controller)) {
     return { final_text: "", final_text_display: [{ mode: "desktop_only", reason: "original_requester_required" }] };
   }
-  // Older records may still contain a flat copy of the answer alongside the native directive.
-  return { final_text: cachedCheck ? "" : task.final_text, ...desktopDisplayFields(displays, task.target) };
+  // Legacy records can contain a flat copy of several parts; only a native item projection identifies the visible ones.
+  const projected = task.final_text_projection === "native_items_v1" &&
+    task.final_text_display?.some(display => display.mode === "show" && display.trustedContacts === "check");
+  return { final_text: cachedCheck && !projected ? "" : task.final_text, ...desktopDisplayFields(displays, task.target) };
 }
 
 /** Do not export prompts, internal owner IDs, callback configuration or raw native state. */
@@ -91,7 +94,7 @@ export function desktopTaskProjection(task: DesktopTaskRecord, writesVerified: D
     anchor_state: task.native_turn_id ? "verified" : "pending", native_thread_id: task.target.threadId,
     native_turn_id: task.native_turn_id ?? null, created_at: task.created_at, updated_at: task.updated_at,
     observed_at: task.observed_at, observation_error: task.observation_error,
-    ...(freshAnswer ?? storedAnswerProjection(task, controller)),
+    ...(freshAnswer ?? desktopStoredAnswer(task, controller)),
     ...taskInteractionCounts(task, interactions, manualCount, queued && !terminal),
     interaction_state: interactions.map(item => desktopInteractionProjection(item, task.desktop_id, task.watch_id, profile)),
     callback_expected: callbackExpected(task, terminal),

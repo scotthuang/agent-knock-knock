@@ -16,7 +16,7 @@ export interface DesktopTurnItem {
   type: string;
   text?: string;
   answerDisplay?: DesktopFinalDisplay;
-  /** Nonempty final text observed but left in the native client for presentation. */
+  /** Older projections retained only the presence of a checked final answer. */
   hasDesktopAnswer?: true;
   clientId?: string | null;
   content?: { type: string; text?: string }[];

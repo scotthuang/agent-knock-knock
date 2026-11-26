@@ -1,6 +1,6 @@
 import { isRecord, nonBlankString } from "./value-guards.js";
 import { backendCallbackSummaryLines } from "./backend-callback-public-projection.js";
-import { desktopDisplayNotice, desktopRequiresContactCheck } from "./desktop-final-answer.js";
+import { desktopDisplayNotice } from "./desktop-final-answer.js";
 
 /** Desktop commands have native task identities, never fabricated managed Session or Turn ids. */
 export function formatDesktopCommandResult(result: Record<string, unknown>, action: string): string {
@@ -18,8 +18,7 @@ function answerLines(result: Record<string, unknown>): string[] {
   const displays = answer.final_text_display;
   const known = Array.isArray(displays) && !displays.some(item => !isRecord(item)) ? displays : [];
   const notice = nonBlankString(answer.final_text_notice) ?? desktopDisplayNotice(known);
-  const resultLines = desktopRequiresContactCheck(known) ? [] : optionalLine(answer, "final_text", "result");
-  return [...resultLines, ...(notice ? [notice] : [])];
+  return [...optionalLine(answer, "final_text", "result"), ...(notice ? [notice] : [])];
 }
 function queueLines(result: Record<string, unknown>): string[] {
   if (result.delivery_path !== "native_thread_queue") {

@@ -24,27 +24,34 @@ test("Desktop final results keep ordinary messages, and honor the native show au
   assert.equal(project({ moderated: true, display: skip }, false).final_text, "");
 });
 
-test("a checked Desktop answer links the original requester to the thread and keeps even cached multipart text out of the result", () => {
+test("a checked Desktop answer returns visible parts and the contact notice to the exact requester", () => {
   const display = { version: 1, mode: "show", trustedContacts: "check" } as const;
   const result = project({ moderated: true, display });
-  assert.equal(result.final_text, "");
+  assert.equal(result.final_text, "fixture reply");
   assert.equal(result.desktop_url, `codex://threads/${target.threadId}`);
-  assert.match(result.final_text_notice!, /final answer is available/);
+  assert.match(result.final_text_notice!, /Codex 要求检查可信联系人，AKK 未执行或核实这项检查。/u);
   assert.ok(result.final_text_notice!.includes(result.desktop_url!));
   assert.deepEqual(result.final_text_display, [{ ...display, hasAnswer: true }]);
   assert.equal(result.trusted_contacts_check_status, "not_performed_by_akk");
   const turn: DesktopTurn = { status: "completed", turnId: "turn", itemsComplete: true, items: [
-    { ...final, answerDisplay: display }, { ...final, id: "sibling", text: "sibling fragment" }
+    { ...final, answerDisplay: display }, { ...final, id: "sibling", text: "sibling fragment" },
+    { ...final, id: "hidden", text: "PRIVATE segment", answerDisplay: { version: 1, mode: "block", reason: "protection" } }
   ] };
-  assert.deepEqual(desktopFinalAnswer(turn, true, target), result);
+  const mixed = desktopFinalAnswer(turn, true, target);
+  assert.equal(mixed.final_text, "fixture reply\n\nsibling fragment");
+  assert.doesNotMatch(JSON.stringify(mixed), /PRIVATE/);
   const other = desktopFinalAnswer(turn, false, target);
   assert.doesNotMatch(JSON.stringify(other), /fixture reply|sibling fragment|codex:\/\/|hasAnswer|trustedContacts/);
+  for (const partial of [{ ...turn, itemsComplete: false }, { ...turn, status: "inProgress" as const }]) {
+    assert.deepEqual(desktopFinalAnswer(partial, true, target), other);
+  }
   for (const invalidTarget of [{ ...target, hostId: "remote" }, { ...target, threadId: target.threadId + "?override=1" }]) {
     assert.doesNotMatch(JSON.stringify(desktopFinalAnswer(turn, true, invalidTarget)), /codex:\/\//);
   }
   const empty = desktopFinalAnswer({ ...turn, items: [{ ...final, text: " ", answerDisplay: display }] }, true, target);
   assert.equal(empty.desktop_url, result.desktop_url);
-  assert.doesNotMatch(empty.final_text_notice!, /final answer is available/);
+  assert.equal(empty.final_text.trim(), "");
+  assert.deepEqual(empty.final_text_display, [display]);
 });
 
 test("Desktop hides the original and earlier unphased text when presentation requires the native client", () => {

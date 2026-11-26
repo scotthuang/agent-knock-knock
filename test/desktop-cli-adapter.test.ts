@@ -224,15 +224,15 @@ test("Desktop Status scopes a directed final to the sending controller, exact tu
   const answer = f.snapshot.turns[0].items.at(-1)!;
   answer.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
   const owner = await f.run("status", { ...sender, watch: sent.watch_id });
-  assert.equal(owner.final_text, "");
+  assert.equal(owner.final_text, "EXACT_DONE");
   assert.equal(owner.desktop_url, link);
   assert.ok(owner.final_text_notice.includes(link));
-  assert.doesNotMatch(JSON.stringify(owner), /EXACT_DONE/);
+  assert.match(owner.final_text_notice, /AKK 未执行或核实/);
   assert.equal(owner.trusted_contacts_check_status, "not_performed_by_akk");
   const rendered = formatDesktopCommandResult(owner, "status");
   assert.ok(rendered.includes(link));
-  assert.match(rendered, /answer is available/i);
-  assert.doesNotMatch(rendered, /EXACT_DONE/);
+  assert.match(rendered, /AKK 未执行或核实/);
+  assert.match(rendered, /EXACT_DONE/);
   for (const params of [{ watch: sent.watch_id }, { ...observer, watch: watched.watch_id }, { ...observer, ...entry }, entry]) {
     assert.doesNotMatch(JSON.stringify(await f.run("status", params)), /EXACT_DONE|codex:\/\/threads\//);
   }
@@ -245,7 +245,8 @@ test("Desktop Status scopes a directed final to the sending controller, exact tu
   const history = async (context: Record<string, string>) => (await f.run("status", { ...entry, ...context })).persisted_history.latest_turn;
   const persisted = await history(sender);
   assert.equal(persisted.desktop_url, link);
-  assert.doesNotMatch(JSON.stringify(persisted), /EXACT_DONE/);
+  assert.equal(persisted.final_text, owner.final_text);
+  assert.equal(persisted.final_text_notice, owner.final_text_notice);
   assert.doesNotMatch(JSON.stringify(await history(observer)), /EXACT_DONE|codex:\/\/threads\//);
   f.snapshot.turns[0].turnId = "different-turn";
   assert.doesNotMatch(JSON.stringify(await history(sender)), /EXACT_DONE|codex:\/\/threads\//);
@@ -269,9 +270,9 @@ test("Status re-renders a settled historical Watch without rewriting it or repea
     final.text = "exact original turn";
     final.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
     const refreshed = await f.run("watch-status", watch);
-    assert.equal(refreshed.final_text, "");
-    assert.ok(refreshed.final_text_notice);
-    assert.doesNotMatch(JSON.stringify(refreshed), /exact original turn|previously visible/);
+    assert.equal(refreshed.final_text, "exact original turn");
+    assert.match(refreshed.final_text_notice, /AKK 未执行或核实/);
+    assert.doesNotMatch(JSON.stringify(refreshed), /previously visible/);
     assert.equal((await f.run("watch-status", { watch: watch.watch })).final_text, "");
     final.answerDisplay = { version: 1, mode: "block", reason: "cyber" };
     const blocked = await f.run("watch-status", watch);

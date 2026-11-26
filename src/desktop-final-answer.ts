@@ -84,34 +84,29 @@ export function desktopFinalAnswer(turn: DesktopTurn, originalRequester: boolean
   const finals = messages.filter(item => item.phase === "final_answer");
   // A directed or hidden final still takes precedence over older, unphased messages.
   const items = finals.length ? finals : messages.filter(item => item.phase == null && !item.answerDisplay);
+  const bound = originalRequester && turn.itemsComplete &&
+    (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted");
+  if (!bound && items.some(item => item.answerDisplay)) {
+    return { final_text: "", ...desktopDisplayFields([{ mode: "desktop_only", reason: "original_requester_required" }]) };
+  }
   const text: string[] = [], displays: DesktopFinalDisplay[] = [];
-  let nativeOnlyAnswer = false;
   for (const item of items) {
     const display = item.answerDisplay;
     if (display) {
-      if (requiresContactCheck(display)) nativeOnlyAnswer = true;
-      const bound = originalRequester && turn.itemsComplete &&
-        (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted");
-      const visible: DesktopFinalDisplay = bound ? display : { mode: "desktop_only", reason: "original_requester_required" };
-      if (visible.mode === "show" && visible.trustedContacts === "check" && (item.hasDesktopAnswer || item.text?.trim())) {
-        displays.push({ ...visible, hasAnswer: true });
-      } else {
-        displays.push(visible);
-      }
-      if (visible.mode !== "show" || visible.trustedContacts !== "skip") continue;
+      displays.push(display.mode === "show" && display.trustedContacts === "check" && (item.hasDesktopAnswer || item.text?.trim())
+        ? { ...display, hasAnswer: true } : display);
+      if (display.mode !== "show") continue;
     }
     if (item.text) text.push(item.text);
   }
-  // The callback carries one flat answer. A partial sibling must not stand in for the native answer.
-  return { final_text: nativeOnlyAnswer ? "" : text.join("\n\n"), ...desktopDisplayFields(displays, target) };
+  return { final_text: text.join("\n\n"), ...desktopDisplayFields(displays, target) };
 }
 
-/** Point the original requester back to the native presentation when a contact check is requested. */
+/** Preserve the native contact instruction in plain text as well as structured receipts. */
 export function desktopDisplayNotice(displays: readonly DesktopFinalDisplay[], target?: DesktopThreadIdentity): string {
   const notes = new Set<string>();
   if (desktopRequiresContactCheck(displays)) {
-    const hasAnswer = displays.some(display => display.mode === "show" && display.trustedContacts === "check" && display.hasAnswer);
-    if (hasAnswer) notes.add("The final answer is available in Codex Desktop.");
+    notes.add("Codex 要求检查可信联系人，AKK 未执行或核实这项检查。");
     const url = desktopThreadUrl(target);
     notes.add(`Open the original conversation in Codex Desktop${url ? `: ${url}` : "."}`);
   }

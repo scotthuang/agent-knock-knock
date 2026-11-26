@@ -119,15 +119,17 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   const display = { version: 1, mode: "show", trustedContacts: "check" } as const;
   h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"), items: [
     { id: "progress", type: "agentMessage", phase: "commentary", text: "Progress only" },
+    { id: "blocked", type: "agentMessage", phase: "final_answer", text: "RESTRICTED-SIBLING",
+      answerDisplay: { version: 1, mode: "block", reason: "protection" } },
     { id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE", answerDisplay: display }
   ] } };
   await Promise.all([restarted.reconcile(one.id), h.service.reconcile(one.id)]);
   const done = await restarted.reconcile(one.id);
-  assert.equal(done.status, "completed"); assert.equal(done.final_text, "");
+  assert.equal(done.status, "completed"); assert.equal(done.final_text, "DONE");
   assert.equal(done.notifications.length, 1); assert.equal(done.notifications[0].status, "accepted");
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.metadata?.turn_id, "execution-turn");
-  assert.deepEqual(done.final_text_display, [{ ...display, hasAnswer: true }]);
+  assert.ok(done.final_text_display?.some(d => d.mode === "show" && d.trustedContacts === "check"));
   const callback = h.state.notifications[0].envelope;
   assert.equal(callback.route.controller_session_id, input.controllerSession);
   assert.deepEqual(callback.event.metadata?.final_text_display, done.final_text_display);
@@ -135,10 +137,16 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   const threadUrl = `codex://threads/${target.threadId}`;
   assert.equal(callback.event.metadata?.desktop_url, threadUrl);
   assert.match(callback.event.body, /completed/);
-  assert.match(callback.event.body, /answer is available/i);
+  assert.ok(callback.event.body.includes("Codex 要求检查可信联系人，AKK 未执行或核实这项检查。"));
   assert.ok(callback.event.body.includes(threadUrl));
-  assert.doesNotMatch(JSON.stringify(h.state.notifications[0]), /DONE|Progress only/);
+  assert.match(callback.event.body, /^DONE$/m);
+  assert.doesNotMatch(JSON.stringify(h.state.notifications[0]), /RESTRICTED-SIBLING|Progress only/);
   assert.deepEqual(done.notifications[0].envelope, callback);
+  const offline = desktopTaskProjection(h.repository.load(one.id)!, false, input.controllerSession);
+  assert.equal(offline.final_text, "DONE");
+  assert.equal(offline.final_text_notice, callback.event.metadata?.final_text_notice);
+  assert.equal(offline.desktop_url, threadUrl);
+  assert.equal(desktopTaskProjection(done, false, "some-other-controller").final_text, "");
   assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");

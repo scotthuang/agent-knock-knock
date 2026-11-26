@@ -72,6 +72,8 @@ export interface DesktopTaskRecord extends BackendRecoveryFields {
   pending_interactions?: DesktopInteraction[];
   final_text?: string;
   final_text_display?: DesktopFinalDisplay[];
+  /** The stored text was selected item by item from the original requester's exact native turn. */
+  final_text_projection?: "native_items_v1";
   notifications: DesktopNotification[];
 }
 export interface DesktopStateScan {

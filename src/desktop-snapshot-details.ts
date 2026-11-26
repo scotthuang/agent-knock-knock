@@ -3,7 +3,7 @@ import { DesktopIpcError, type DesktopCurrentPermissions, type DesktopCollaborat
 import { desktopObject, desktopNativeRequestId } from "./desktop-request-interactions.js";
 import { desktopAnswerDisplay } from "./desktop-final-answer.js";
 
-/** Keep a native-only final's presence without retaining its body or alternate text fields. */
+/** Retain only the exact final text permitted by the native show directive. */
 export function projectDesktopAnswerItem(item: DesktopTurnItem, moderation: unknown): DesktopTurnItem {
   if (item.type !== "agentMessage") return item;
   const answerDisplay = desktopAnswerDisplay(moderation);
@@ -11,10 +11,7 @@ export function projectDesktopAnswerItem(item: DesktopTurnItem, moderation: unkn
   const scoped: DesktopTurnItem = { id: item.id, type: item.type, answerDisplay };
   if (item.phase === "final_answer" && item.delivery == null && !item.questions?.length) {
     scoped.phase = item.phase;
-    if (answerDisplay.mode === "show") {
-      if (answerDisplay.trustedContacts === "skip") scoped.text = item.text;
-      else if (item.text?.trim()) scoped.hasDesktopAnswer = true;
-    }
+    if (answerDisplay.mode === "show") scoped.text = item.text;
   }
   return scoped;
 }

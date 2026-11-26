@@ -12,7 +12,7 @@ import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, de
 import type { DesktopFinalDisplay, DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
 import { desktopCachedCheckDisplays, desktopDisplayFields, desktopDisplayNotice, desktopFinalAnswer } from "./desktop-final-answer.js";
-import { desktopSendBelongsToRequester } from "./desktop-public-projection.js";
+import { desktopStoredAnswer } from "./desktop-public-projection.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
 import { desktopQueueWitness, desktopRequestKeyDigest, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
@@ -108,13 +108,11 @@ function desktopDeliveryEnvelope(task: DesktopTaskRecord, notification: DesktopN
   const { envelope } = notification;
   const event = envelope.event;
   if (event.type !== "desktop_watch.settled") return envelope;
-  const displays = desktopCachedCheckDisplays(task);
-  if (!displays) return envelope;
-  const scoped: DesktopFinalDisplay[] = desktopSendBelongsToRequester(task, envelope.route.controller_session_id)
-    ? displays : [{ mode: "desktop_only", reason: "original_requester_required" }];
-  return { ...envelope, event: { ...event, body: settledBody(task, "", scoped), metadata: {
+  if (!desktopCachedCheckDisplays(task)) return envelope;
+  const { final_text, ...fields } = desktopStoredAnswer(task, envelope.route.controller_session_id);
+  return { ...envelope, event: { ...event, body: settledBody(task, final_text ?? "", fields.final_text_display), metadata: {
     watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId, turn_id: task.native_turn_id,
-    ...desktopDisplayFields(scoped, task.target) } } };
+    ...fields } } };
 }
 
 export function createDesktopTaskService(deps: DesktopTaskServiceDependencies): DesktopTaskService {
@@ -322,6 +320,9 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     const answer = desktopFinalAnswer(turn, originalRequester, task.target);
     task.final_text = answer.final_text;
     if (answer.final_text_display) task.final_text_display = answer.final_text_display;
+    if (originalRequester && answer.final_text && answer.final_text_display?.some(d => d.mode === "show" && d.trustedContacts === "check")) {
+      task.final_text_projection = "native_items_v1";
+    }
     task.pending_manual_count = 0;
     this.notify(task, "settled", settledBody(task, answer.final_text, answer.final_text_display));
   }
