@@ -1,5 +1,11 @@
 # Pi and DeepSeek Harness connector compatibility
 
+## Watching tasks entered directly in Claude Code — core 0.16.24
+
+Pi 0.1.0-poc.32 and DeepSeek Harness 0.1.0-rc.38 pin core 0.16.24 on `next`.
+This core release tracks the original user task across Claude's background task notifications.
+Both connectors retain their existing Host version ranges.
+
 ## Desktop queue and explicit Status reads — core 0.16.23
 
 Pi 0.1.0-poc.31 and DeepSeek Harness 0.1.0-rc.37 pin core 0.16.23 on `next`.

@@ -1,3 +1,5 @@
+import { selectClaudeWatchRoute } from "./claude-watch-routing.js";
+import { claudeWatchActivity, markClaudeWatchActivity } from "./claude-native-watch-admission.js";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { cliDependencies, cliEnv, cliNow, cliNowMs, cliPid, cliSleepSync, writeCliStdout } from "./cli-runtime-context.js";
@@ -47,6 +49,8 @@ export async function dispatchClaudeConversationCli(command: string | undefined,
       select: () => selectClaudeRoute({ command, target, native, options, ports, runtime, input, terminalRuntimeDir }),
       prepare: async (choice: ConversationRouteChoice) => {
         selected = conversationRoutedOptions(command, options, choice.route, choice.targetId);
+        const activityWatch = claudeWatchActivity(choice);
+        if (activityWatch) markClaudeWatchActivity(selected, activityWatch);
         if (choice.route === "terminal") {
           const rows = await ports.terminals(options, choice.targetId);
           if (rows.length !== 1 || rows[0].id !== choice.targetId || native && !exactClaudeTerminal(target, rows[0])) throw new Error("Claude terminal identity changed; no input was sent");
@@ -111,6 +115,7 @@ async function selectClaudeRoute(context: ClaudeRouteContext): Promise<Conversat
   const legacy = input ? legacyClaudeTerminalRoute(input, options, terminalRuntimeDir) : undefined;
   if (legacy) return legacy;
   if (command === "send") return selectClaudeSendRoute(context);
+  if (command === "watch-terminal") return selectClaudeWatchRoute(context);
   if (native && isCore(command, options)) {
     try { await runtime.inspect(parseClaudeNativeConversationId(target)); return { route: "native", targetId: target }; }
     catch (error) { if (!unavailable.has(code(error))) throw error; }

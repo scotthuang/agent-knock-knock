@@ -1,3 +1,4 @@
+import { claudeNativeWatchAdmission } from "./claude-native-watch-admission.js";
 import path from "node:path";
 import fs from "node:fs";
 import { createClaudeNativeClient, type ClaudeNativeClient } from "./claude-native-client.js";
@@ -63,6 +64,10 @@ export function createClaudeNativeRuntime(options: ClaudeNativeRuntimeOptions) {
     resolveCallbackContext: task => ({ legacyOptions: { gatewayMethod: "chat.send", openclawSession: task.controller_session,
       gatewaySession: task.controller_session, openclawBin: options.openclawBin } }) });
   return { catalog: { discover: () => client.discover() }, tasks, inspect,
+    async watchReadiness(identity: ClaudeNativeIdentity) {
+      const entry = await inspect(identity);
+      return claudeNativeWatchAdmission(entry, await readClaudeNativeSnapshot(entry, { processAlive: true }));
+    },
     async read(identity: ClaudeNativeIdentity, exactInputUuid?: string, messageId?: string) {
       const entry = await inspect(identity); return readClaudeNativeSnapshot(entry, { exactInputUuid, messageId, processAlive: true });
     },

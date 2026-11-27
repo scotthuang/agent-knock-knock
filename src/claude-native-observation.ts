@@ -43,6 +43,8 @@ export interface ClaudeNativeSnapshot {
   latestInputUuid: string | null;
   inputs: ClaudeNativeInputObservation[];
   selectedInput?: ClaudeNativeInputObservation;
+  /** Watch task ownership is separate from the receipt for the latest input. */
+  currentTask?: { input: ClaudeNativeInputObservation; progress: ClaudeNativePublicProgress } | null;
   progress: ClaudeNativePublicProgress;
   readError?: "missing_transcript" | "read_failed" | "missing_exact_input" | "identity_mismatch" | "incomplete_chain";
 }
@@ -62,7 +64,7 @@ export async function readClaudeNativeSnapshot(entry: ClaudeNativeCatalogEntry,
   options: ClaudeNativeObservationOptions = {}): Promise<ClaudeNativeSnapshot> {
   const identity = validateClaudeNativeIdentity(entry);
   const readAt = (options.now ?? new Date()).toISOString();
-  const base: ClaudeNativeSnapshot = { identity, readAt, latestInputUuid: null, inputs: [],
+  const base: ClaudeNativeSnapshot = { identity, readAt, latestInputUuid: null, inputs: [], currentTask: null,
     progress: progressFor(null, [], readAt) };
   if (!validOptions(options)) return failed(base, "identity_mismatch");
   let loaded: Awaited<ReturnType<typeof loadRecords>>;
@@ -73,22 +75,26 @@ export async function readClaudeNativeSnapshot(entry: ClaudeNativeCatalogEntry,
   const { records, roots, conflicts, byParent } = transcriptGraph(loaded.records, entry.sessionId);
   if (!roots.length && records.length && !records.some(record => sessionOf(record) === entry.sessionId)) return failed(base, "identity_mismatch");
   const last = roots.at(-1);
+  const owner = currentTaskRoot(records, byParent, conflicts, entry.sessionId);
   base.latestInputUuid = last ? inputId(last) : null;
   const selected = options.exactInputUuid
     ? roots.find(record => inputId(record) === options.exactInputUuid) : last;
   if (options.exactInputUuid && !selected) return failed(base, "missing_exact_input");
   if (selected && !exactInputMatches(selected, roots, conflicts, options)) return failed(base, "identity_mismatch");
-  const chosen = roots.slice(-MAX_INPUTS);
-  if (selected && !chosen.includes(selected)) chosen.unshift(selected);
+  const chosen = observationRoots(roots, selected, owner);
   for (const root of chosen) {
     const chain = claudeNativeCausalChain(root, byParent, conflicts, entry.sessionId, isInput);
-    const projected = observeInput(root, chain, entry, options.processAlive !== false, readAt, inputId(root) === base.latestInputUuid);
+    const projected = observeInput(root, chain, entry, options.processAlive !== false, readAt, root === owner);
+    if (root === owner && chain) base.currentTask = { input: projected.observation, progress: projected.progress };
     base.inputs.push(projected.observation);
     if (root === selected) { base.selectedInput = projected.observation; base.progress = projected.progress; }
   }
   return base;
 }
 
+function observationRoots(roots: RecordValue[], selected?: RecordValue, owner?: RecordValue): RecordValue[] {
+  return [...new Set([...roots.slice(-MAX_INPUTS), ...[selected, owner].filter((value): value is RecordValue => !!value)])];
+}
 function validOptions(options: ClaudeNativeObservationOptions): boolean {
   if (options.exactInputUuid !== undefined && !isClaudeNativeUuid(options.exactInputUuid)) return false;
   if (options.messageId !== undefined && !isClaudeNativeUuid(options.messageId)) return false;
@@ -142,7 +148,7 @@ function interrupted(record: RecordValue): boolean {
     && (block.text === "[Request interrupted by user]" || block.text === "[Request interrupted by user for tool use]"));
 }
 function isInput(record: RecordValue): boolean {
-  if (!isClaudeNativeUuid(record.uuid)) return false;
+  if (!isClaudeNativeUuid(record.uuid) || isTaskNotification(record)) return false;
   if (record.type === "attachment" && isRecord(record.attachment)) return record.attachment.type === "queued_command"
     && isClaudeNativeUuid(record.attachment.source_uuid);
   if (record.type !== "user" || record.isCompactSummary === true || record.isVisibleInTranscriptOnly === true
@@ -150,6 +156,33 @@ function isInput(record: RecordValue): boolean {
     || interrupted(record) || content(record).some(block => block.type === "tool_result")) return false;
   const message = isRecord(record.message) ? record.message : undefined;
   return message?.role === "user" && (typeof message.content === "string" || content(record).some(block => block.type === "text"));
+}
+function isTaskNotification(record: RecordValue): boolean {
+  return originOf(record)?.kind === "task-notification";
+}
+function currentTaskRoot(records: RecordValue[], byParent: Map<string, RecordValue[]>,
+  conflicts: Set<string>, sessionId: string): RecordValue | undefined {
+  const byUuid = new Map(records.map(record => [String(record.uuid), record]));
+  const events = records.filter(record => (isInput(record) || isTaskNotification(record))
+    && sessionOf(record) === sessionId && record.isSidechain !== true);
+  const latest = events.at(-1);
+  const latestRoot = events.filter(record => record.type === "user" && !isTaskNotification(record)).at(-1);
+  let current = latest;
+  const seen = new Set<string>();
+  while (current) {
+    const id = String(current.uuid);
+    if (seen.has(id) || conflicts.has(id) || sessionOf(current) !== sessionId || current.isSidechain === true
+      || current.subtype === "turn_duration") return undefined;
+    seen.add(id);
+    if (current.type === "user" && isInput(current)) {
+      // A late background notification may refer to a previous foreground task.
+      if (current !== latestRoot) return undefined;
+      const chain = claudeNativeCausalChain(current, byParent, conflicts, sessionId, isInput);
+      return chain?.includes(latest!) ? current : undefined;
+    }
+    current = byUuid.get(String(current.parentUuid));
+  }
+  return undefined;
 }
 function nativeTime(record: RecordValue): string | null {
   if (typeof record.timestamp !== "string") return null;
@@ -178,7 +211,7 @@ function initialInputObservation(root: RecordValue): ClaudeNativeInputObservatio
     ...(typeof origin?.msg_id === "string" ? { messageId: origin.msg_id } : {}),
     ...(Number.isSafeInteger(origin?.verifiedPeerPid) ? { verifiedPeerPid: origin!.verifiedPeerPid as number } : {}),
     kind: root.type === "attachment" ? "absorbed_mid_turn" : "root_user",
-    origin: origin?.kind === "peer" ? "peer" : origin ? "unknown" : "human",
+    origin: origin?.kind === "peer" ? "peer" : !origin || origin.kind === "human" ? "human" : "unknown",
     acceptedAt: nativeTime(root), state: "unknown", responseText: "", responseTruncated: false,
     completedAt: null, pendingTools: [], toolResults: [] };
 }

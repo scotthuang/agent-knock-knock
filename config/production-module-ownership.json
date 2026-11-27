@@ -687,6 +687,10 @@
       "owner": "agent-session-core"
     },
     {
+      "path": "src/claude-native-watch-admission.ts",
+      "owner": "agent-session-core"
+    },
+    {
       "path": "src/claude-reader-configuration.ts",
       "owner": "agent-session-core"
     },
@@ -725,6 +729,10 @@
     {
       "path": "src/claude-user-explicit-input-proof.ts",
       "owner": "terminal-dispatch-core"
+    },
+    {
+      "path": "src/claude-watch-routing.ts",
+      "owner": "agent-session-core"
     },
     {
       "path": "src/cli-command-runtime.ts",
