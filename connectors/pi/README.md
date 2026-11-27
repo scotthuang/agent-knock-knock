@@ -14,12 +14,13 @@ socket.
 
 This release includes [managed Claude result-delivery fixes](../../docs/managed-task-result-delivery.md): exact-PID observation, verified foreground completion despite returned background shell work, and durable diagnostics/recovery. Accepted Claude terminal tasks keep observing past configured timeout thresholds; foreground completion does not prove a background build succeeded. Pi does not gain a durable idempotent-delivery guarantee merely from this core update.
 
-Connector **0.1.0-poc.31** pins AKK **0.16.23**, including CLI direct
+Connector **0.1.0-poc.32** pins AKK **0.16.24**, including CLI direct
 connections, Codex Desktop, Recovery and compact List v5. On a verified local Desktop thread,
 Send appends to the native queue even while an earlier turn is running. The
 Watch follows the submitted message ID to its execution turn. Explicit Status
 can read a visible final answer from the verified thread even if Pi did not
 start the turn. Automatic callbacks still use the initiating session.
+Claude Watch can follow a task entered directly in Claude Code across background task notifications.
 The generated Skill and registered tools
 are verified against that exact core package at startup. See the [root compatibility
 summary](../../README.md#compatibility) for the coding-agent versions and
@@ -51,7 +52,7 @@ The current compatibility contract is intentionally exact:
   supported older runtime, installed from the official
   `@earendil-works/pi-coding-agent` package.
 - Node.js `22.19.0` or newer.
-- AKK `0.16.23`, pinned by this connector's package and lockfile. A different
+- AKK `0.16.24`, pinned by this connector's package and lockfile. A different
   version at the repository root is not substituted automatically. Before core
   publication, test its candidate tarball in isolation under the
   [coordinated release policy](../../CONTRIBUTING.md#coordinated-package-releases).
@@ -103,8 +104,8 @@ pi list
 ```
 
 Using `next` follows compatible Pi connector prereleases. To pin this exact
-core `0.16.23` connector, install
-`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.31`; exact versions are pinned
+core `0.16.24` connector, install
+`npm:@scotthuang/agent-knock-knock-pi@0.1.0-poc.32`; exact versions are pinned
 and are not advanced by Pi's bulk update command.
 
 ### 4. Start Pi
@@ -469,7 +470,7 @@ Harness independently; it does not require their package versions to match.
 Publishing Pi additionally requires explicit version confirmation:
 
 ```sh
-npm run release:check -- --publish --confirm-version 0.1.0-poc.31
+npm run release:check -- --publish --confirm-version 0.1.0-poc.32
 ```
 
 Prereleases use npm tag `next`; stable versions use `latest`. Tags and GitHub
@@ -639,8 +640,8 @@ or external-channel delivery run.
 
 These are POC acceptance results, not a promise of compatibility with every
 future Pi, Codex, Claude Code, tmux, or Herdr release. Version
-`0.1.0-poc.31` is an npm prerelease distributed through the `next` dist-tag;
-its publication is coordinated with core `0.16.23` and the DSH connector.
+`0.1.0-poc.32` is an npm prerelease distributed through the `next` dist-tag;
+its publication is coordinated with core `0.16.24` and the DSH connector.
 ClawHub publication remains a separate channel.
 
 ## Deliberate POC limits

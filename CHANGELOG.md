@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.24 / Pi 0.1.0-poc.32 / DeepSeek Harness 0.1.0-rc.38 — 2026-11-28
+
+- Watch can follow a task entered directly in Claude Code. Background task notifications no longer replace the original user task as its anchor. A proven native Watch tracks that task to completion and sends its result to the initiating controller.
+- When native task ownership cannot be established, Watch can follow activity on a single verified matching terminal. The receipt identifies this as terminal activity. Ambiguous identities still stop the operation, and an uncertain native Watch is never retried on a second route.
+- Pi `0.1.0-poc.32` and DeepSeek Harness `0.1.0-rc.38` pin core `0.16.24` on `next`.
+
 ## 0.16.23 / Pi 0.1.0-poc.31 / DeepSeek Harness 0.1.0-rc.37 — 2026-11-26
 
 - Send can append one message to the exact Codex Desktop thread while another turn runs or other messages wait. Older sub-agent records do not prevent queuing. Watch follows the original message through execution and supports a deeper history scan during recovery. An uncertain submission is never automatically repeated.
