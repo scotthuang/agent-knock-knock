@@ -15,16 +15,19 @@ import { parseDesktopRequestInteraction } from "../src/desktop-request-interacti
 import { VERIFIED_DESKTOP_BUILD } from "../src/desktop-ipc-client.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 import { createDesktopSessionControls } from "../src/desktop-session-controls.js";
+import { formatDesktopCommandResult } from "../src/desktop-command-presentation.js";
 import { DesktopIpcError } from "../src/desktop-types.js";
 import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
 import { createDesktopPersistedTurnReader } from "../src/desktop-queue-inspection.js";
+import { DesktopQueueAdmissionError } from "../src/desktop-queue-submit.js";
 import type { DesktopCompatibility, DesktopSnapshot, DesktopTransportPort, DesktopTurnItem } from "../src/desktop-types.js";
 import type { CliCommandDependencies } from "../src/cli-runtime-context.js";
 
-function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD, catalogCwd?: string) {
+function fixture(t: { after(fn: () => void): void }, compatibility: DesktopCompatibility = VERIFIED_DESKTOP_BUILD,
+  catalogCwd?: string, threadId = "desktop-thread") {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "akk-desktop-cli-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId: "desktop-thread" };
+  const target = { codexHome: path.join(root, ".codex"), hostId: "local", threadId };
   fs.mkdirSync(target.codexHome);
   fs.writeFileSync(path.join(target.codexHome, ".codex-global-state.json"), JSON.stringify({
     "pinned-thread-ids": [target.threadId], "electron-persisted-atom-state": {
@@ -199,12 +202,120 @@ test("Desktop Status may display exact persisted history without authorizing inp
   assert.equal(status.activity_state, "unknown");
   assert.equal(status.pending_interaction_count, null);
   assert.equal(status.capabilities.send || status.capabilities.watch || status.capabilities.approve, false);
-  assert.equal(status.progress.state, "read_error");
+  assert.equal(status.progress.state, "available");
   assert.equal(status.persisted_history.scope, "latest_persisted_turn");
   assert.deepEqual(status.persisted_history.latest_turn, { id: "disk-turn", status: "completed", items_complete: true, final_text: "Final answer" });
   assert.equal(status.persisted_history.progress.native_turn_id, "disk-turn");
   assert.equal(status.persisted_history.progress.text, "Public progress");
+  assert.deepEqual(status.progress, status.persisted_history.progress);
   assert.doesNotMatch(JSON.stringify(status), /private reasoning|private question|writer-a|socket-a/u);
+  assert.equal(f.sends, 0);
+});
+
+test("Explicit Desktop reads return native-visible finals from the selected turn without an originating Send", async t => {
+  const cwd = "/fixture/requester-project";
+  const threadId = "00000000-0000-7000-8000-000000000042";
+  const link = `codex://threads/${threadId}`;
+  const f = fixture(t, { ...VERIFIED_DESKTOP_BUILD, applicationIdentityVerified: true }, cwd, threadId);
+  const sender = { openclawSession: "sender" }, observer = { openclawSession: "observer" };
+  const entry = { conversation: f.id };
+  const sent = await f.run("send", { ...sender, ...entry, messageId: "request-1", message: "fixture question" });
+  const watched = await f.run("watch-terminal", { ...observer, ...entry });
+  f.finish();
+  const answer = f.snapshot.turns[0].items.at(-1)!;
+  answer.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
+  const owner = await f.run("status", { ...sender, watch: sent.watch_id });
+  assert.equal(owner.final_text, "EXACT_DONE");
+  assert.equal(owner.desktop_url, link);
+  assert.ok(owner.final_text_notice.includes(link));
+  assert.match(owner.final_text_notice, /AKK 未执行或核实/);
+  assert.equal(owner.trusted_contacts_check_status, "not_performed_by_akk");
+  const rendered = formatDesktopCommandResult(owner, "status");
+  assert.ok(rendered.includes(link));
+  assert.match(rendered, /AKK 未执行或核实/);
+  assert.match(rendered, /EXACT_DONE/);
+  for (const params of [{ watch: sent.watch_id }, { ...observer, watch: sent.watch_id }, { ...observer, watch: watched.watch_id }]) {
+    const result = await f.run("status", params);
+    assert.equal(result.final_text, "EXACT_DONE");
+    assert.equal(result.trusted_contacts_check_status, "not_performed_by_akk");
+  }
+  const manual = { turnId: "manual-turn", status: "completed" as const, itemsComplete: true, items: [
+    { ...answer, id: "visible", text: "MANUAL_DONE" },
+    { ...answer, id: "restricted", text: "HIDDEN_BODY", answerDisplay: { version: 1, mode: "hide", replacement: "wellbeingPromptHelpline" } as const }
+  ] };
+  f.snapshot.latestTurnId = manual.turnId;
+  f.snapshot.turns.unshift(manual);
+  const live = await f.run("native-inspect", { ...observer, ...entry, inspection: "status" });
+  assert.equal(live.latest_turn.id, manual.turnId);
+  assert.equal(live.latest_turn.final_text, "MANUAL_DONE");
+  assert.equal(live.latest_turn.desktop_url, link);
+  assert.equal(live.latest_turn.trusted_contacts_check_status, "not_performed_by_akk");
+  assert.doesNotMatch(JSON.stringify(live), /HIDDEN_BODY/);
+  f.transport.readPersistedTurn = async () => f.snapshot.turns[0];
+  f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
+  const history = await f.run("status", entry);
+  assert.deepEqual(history.persisted_history.latest_turn, live.latest_turn);
+  assert.doesNotMatch(JSON.stringify(history), /HIDDEN_BODY/);
+});
+
+test("Status re-renders a settled historical Watch without rewriting it or repeating its callback", async t => {
+  for (const previousText of ["", "previously visible"]) {
+    const f = fixture(t);
+    const requester = { openclawSession: "original" };
+    const receipt = await f.run("send", { ...requester, conversation: f.id, messageId: "historical", message: "fixture question" });
+    const watch = { ...requester, watch: receipt.watch_id };
+    f.finish();
+    const final = f.snapshot.turns[0].items.at(-1)!;
+    final.text = previousText;
+    await f.run("watch-status", watch);
+    const settled = f.tasks.status(watch.watch);
+    assert.equal(settled.final_text, previousText);
+    assert.equal(f.callbacks, 1);
+    f.snapshot.latestTurnId = "successor";
+    f.snapshot.turns.push({ turnId: "successor", status: "completed", itemsComplete: true, items: [] });
+    final.text = "exact original turn";
+    final.answerDisplay = { version: 1, mode: "show", trustedContacts: "check" };
+    const refreshed = await f.run("watch-status", watch);
+    assert.equal(refreshed.final_text, "exact original turn");
+    assert.match(refreshed.final_text_notice, /AKK 未执行或核实/);
+    assert.doesNotMatch(JSON.stringify(refreshed), /previously visible/);
+    assert.equal((await f.run("watch-status", { watch: watch.watch })).final_text, "exact original turn");
+    final.answerDisplay = { version: 1, mode: "block", reason: "cyber" };
+    const blocked = await f.run("watch-status", watch);
+    assert.equal(blocked.final_text, "");
+    assert.deepEqual(blocked.final_text_display, [final.answerDisplay]);
+    assert.deepEqual(f.tasks.status(watch.watch), settled);
+    assert.equal(f.callbacks, 1);
+  }
+});
+
+test("Desktop Status reports native queue availability and the specific reason when independent append becomes blocked", async t => {
+  const cwd = "/fixture/desktop-target";
+  const f = fixture(t, { version: "unreviewed", build: "unreviewed", applicationIdentityVerified: true },
+    cwd, "00000000-0000-7000-8000-000000000042");
+  f.failReads(new DesktopEndpointUnavailable("ECONNREFUSED"));
+  let blocked = false;
+  f.transport.queue = {
+    async prepare() {
+      if (blocked) throw new DesktopQueueAdmissionError("desktop_queue_saved_draft");
+      return { cwd, ownerId: "writer-a", endpointId: "socket-a", baselineTurnId: "parent",
+        notices: ["desktop_queue_parent_running", "desktop_queue_question_pending", "desktop_queue_live_input_unobserved"] };
+    },
+    async submit() { throw new Error("Status must not dispatch"); },
+    async observe() { throw new Error("No queue request has been submitted"); }
+  };
+  const ready = await f.run("status", { conversation: f.id });
+  assert.equal(ready.available_actions.send.input.conversation_id, f.id);
+  assert.ok(ready.queue_notices.includes("desktop_queue_parent_running"));
+  assert.ok(ready.queue_notices.includes("desktop_queue_question_pending"));
+  assert.equal(ready.pending_interaction_count, null);
+  assert.equal(ready.available_actions.approve, undefined);
+  blocked = true;
+  const denied = await f.run("status", { conversation: f.id });
+  assert.equal(denied.capabilities.send, false);
+  assert.equal(denied.available_actions.send, undefined);
+  assert.equal(denied.observation_error, "desktop_queue_saved_draft");
+  assert.equal(denied.can_send_reason, "desktop_queue_saved_draft");
   assert.equal(f.sends, 0);
 });
 
@@ -231,12 +342,12 @@ test("Desktop persisted Status rejects changed owner, endpoint, cwd, unverified 
 
 test("Desktop CLI sends once, launches exact Watch, recovers completion and enforces controller ownership", async t => {
   const f = fixture(t);
-  const input = { conversation: f.id, message: "Only reply READY", messageId: "stable-cli-message", openclawSession: "controller-one" };
+  const input = { conversation: f.id, message: "Only reply READY", messageId: "stable-cli-message", desktopRequestId: "intent-stable-cli-message", openclawSession: "controller-one" };
   const receipt = await f.run("send", input);
   assert.equal(receipt.agent_acceptance, "proven"); assert.equal(receipt.native_turn_id, "turn-one");
   assert.equal(receipt.callback_expected, true); assert.equal(receipt.monitor_pid, 1234);
   assert.equal(f.sends, 1);
-  const same = await f.run("send", input);
+  const same = await f.run("send", { ...input, messageId: "changed-tool-call" });
   assert.equal(same.watch_id, receipt.watch_id); assert.equal(f.sends, 1);
   const explicit = await f.run("watch-terminal", { conversation: f.id, openclawSession: "controller-two" });
   assert.equal(explicit.native_turn_id, "turn-one"); assert.notEqual(explicit.watch_id, receipt.watch_id);

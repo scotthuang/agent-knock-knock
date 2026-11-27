@@ -17,10 +17,12 @@ The reader and install-target behavior were verified with DSH **0.2.1-rc.2**. Th
 For the supported POSIX Web Host setup, `pnpm`, connector capabilities, permissions, and limitations, see the [DSH connector guide](../../connectors/deepseek-harness/README.md). The equivalent manual command is:
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.35
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.37
 ```
 
-The index selects rc.35/core 0.16.22, also published on npm `next`. The bare npm package still selects the separately reviewed rc.24/core 0.16.12 through `latest`; this index update does not promote a new default npm recommendation. An npm tag does not make the RC stable or expand its Host compatibility. For DSH 0.2.2-rc.3, select rc.35 explicitly: the bare npm recommendation rc.24 does not support that Host. The current index was validated with the official 0.2.2-rc.3 parser; this is not a rerun of the six older Host installations. The market is an installation path, not an automatic update service.
+The index selects **rc.37**, which pins AKK core **0.16.23** and is available on npm `next`. A bare npm install selects the separate `latest` recommendation, rc.24 with core 0.16.12. Use this market entry or the exact command above for DSH **0.2.2-rc.5**.
+
+During rc.36 verification in an isolated DSH 0.2.2-rc.5 profile, Discover reported rc.36 as compatible, selected it by default, and returned its exact npm install spec. The connector retains its seven previously declared Host versions. Existing installations require an explicit upgrade.
 
 ## Regenerate after a connector release
 
@@ -31,7 +33,7 @@ Install the pinned official validator in a temporary directory; this does not mo
 ```sh
 validator_dir="$(mktemp -d)"
 npm install --prefix "$validator_dir" --ignore-scripts --no-audit --no-fund \
-  @deepseek-ai/dsh-plugin-market-index@0.2.1-rc.2
+  @deepseek-ai/dsh-plugin-market-index@0.2.2-rc.5
 
 node scripts/build-dsh-market.mjs \
   --version <published-connector-version> \

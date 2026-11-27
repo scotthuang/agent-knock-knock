@@ -9,10 +9,12 @@ import {
   type CallbackTransportContextV1, type CallbackTransportDeliverInput
 } from "./callback-transport.js";
 import { canSettleExpiredNotificationAttempt, createDurableNotificationLease, decideDurableNotificationRetry, reduceDurableNotificationSettlement } from "./durable-notification-kernel.js";
-import type { DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
+import type { DesktopFinalDisplay, DesktopSnapshot, DesktopThreadIdentity, DesktopTransportPort, DesktopTurn } from "./desktop-types.js";
 import { findDesktopSubmission } from "./desktop-snapshot.js";
+import { desktopCachedCheckDisplays, desktopDisplayFields, desktopDisplayNotice, desktopFinalAnswer } from "./desktop-final-answer.js";
+import { desktopStoredAnswer } from "./desktop-public-projection.js";
 import { DesktopEndpointUnavailable } from "./desktop-ipc-transport.js";
-import { desktopQueueWitness, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
+import { desktopQueueWitness, desktopRequestKeyDigest, type DesktopQueueAdmission, type DesktopQueueObservation } from "./desktop-task-queue.js";
 import { parseDesktopConversationId } from "./desktop-identity.js";
 import type { DesktopNotification, DesktopStateRepository, DesktopTaskRecord } from "./desktop-state-store.js";
 import { createDesktopTaskRecovery, DesktopTaskError, desktopLive as live, desktopObservationStopped, desktopUnresolvedSend, desktopNotificationObsolete, suppressDesktopNotifications, type DesktopRecoveryInput } from "./desktop-task-recovery.js";
@@ -26,7 +28,7 @@ export interface DesktopTaskInput {
   callbackRoute?: CallbackRouteV1;
   timeoutMs?: number;
 }
-export interface DesktopSendInput extends DesktopTaskInput { messageId: string; text: string; requireEmptyThread?: boolean }
+export interface DesktopSendInput extends DesktopTaskInput { messageId: string; text: string; requestId?: string; requireEmptyThread?: boolean }
 export interface DesktopTaskServiceDependencies extends DesktopTransportPort {
   repository: DesktopStateRepository;
   /** Notification wording follows the installed build; never authorizes dispatch. */
@@ -45,7 +47,7 @@ export interface DesktopTaskService {
   watch(input: DesktopTaskInput): Promise<DesktopTaskRecord>;
   status(id: string): DesktopTaskRecord;
   list(): DesktopTaskRecord[];
-  reconcile(id: string): Promise<DesktopTaskRecord>;
+  reconcile(id: string, source?: "targeted" | "monitor"): Promise<DesktopTaskRecord>;
   reconcileAll(): Promise<{ tasks: DesktopTaskRecord[]; errors: { id: string; error_code: string }[] }>;
   unwatch(id: string, input: DesktopRecoveryInput): DesktopTaskRecord;
   close(id: string, input: DesktopRecoveryInput & { reason?: string }): DesktopTaskRecord;
@@ -58,9 +60,23 @@ export function desktopTaskNeedsReconciliation(task: DesktopTaskRecord): boolean
   return task.notifications.some(notification => notification.status === "leased") || !desktopObservationStopped(task) &&
     (live(task) || task.notifications.some(notification => ["ready", "retry_wait"].includes(notification.status)));
 }
+function canReadExpiredTask(task: DesktopTaskRecord, source: "targeted" | "monitor"): boolean {
+  if (task.status !== "timed_out") return false;
+  if (task.send_intent?.delivery_path === "native_thread_queue") {
+    // A targeted Status can still find the exact outcome. The deadline stops unattended polling.
+    return source === "targeted" && ["uncertain", "accepted"].includes(task.send_intent.state);
+  }
+  return desktopUnresolvedSend(task);
+}
+/** Owner start has no atomic idle precondition. A reservation without a returned result may still be in flight. */
+function ownerStartHasNoResult(task: DesktopTaskRecord): boolean {
+  const intent = task.send_intent;
+  return desktopUnresolvedSend(task) && !intent?.delivery_path && !intent?.receipt_turn_id && !intent?.error_code;
+}
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-function sendId(controllerSession: string, messageId: string): string {
-  const hash = digest([controllerSession, messageId]);
+function sendId(controllerSession: string, messageId: string, key?: string): string {
+  // A different controller cannot rebind a previously dispatched business request.
+  const hash = digest(key ? ["desktop-request", 1, key] : [controllerSession, messageId]);
   return `desktop-watch:${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 function errorCode(error: unknown): string {
@@ -71,13 +87,6 @@ function errorCode(error: unknown): string {
 function submissionTurn(snapshot: DesktopSnapshot, clientId: string, text: string): DesktopTurn | undefined {
   return findDesktopSubmission(snapshot, clientId, text)?.turn;
 }
-function finalText(turn: DesktopTurn): string {
-  const messages = turn.items.filter(item => item.type === "agentMessage" && item.delivery !== "async" && typeof item.text === "string");
-  const finals = messages.filter(item => item.phase === "final_answer");
-  // Older snapshots can omit phase; explicit commentary/analysis must never
-  // become the task's final result when no final answer exists.
-  return (finals.length ? finals : messages.filter(item => item.phase == null)).map(item => item.text).join("\n\n");
-}
 function assertSnapshot(task: Pick<DesktopTaskRecord, "target">, snapshot: DesktopSnapshot): void {
   if (snapshot.threadId !== task.target.threadId || !snapshot.ownerClientId || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) throw new DesktopTaskError("desktop_identity_mismatch", "Desktop observation did not match the exact thread");
 }
@@ -87,12 +96,31 @@ function idle(snapshot: DesktopSnapshot): boolean {
     !snapshot.turns.some(turn => turn.status === "inProgress");
 }
 
+function settledBody(task: DesktopTaskRecord, text: string, displays?: DesktopFinalDisplay[]): string {
+  const notice = displays ? desktopDisplayNotice(displays, task.target) : "";
+  const body = [`Desktop task ${task.id} ${task.status}.`, notice, text].filter(Boolean);
+  if (!notice && !text) body.push("No assistant text was returned for this exact turn.");
+  return body.join("\n");
+}
+
+/** Outstanding envelopes can predate the Desktop handoff. Render at delivery without changing the original receipt or lease. */
+function desktopDeliveryEnvelope(task: DesktopTaskRecord, notification: DesktopNotification) {
+  const { envelope } = notification;
+  const event = envelope.event;
+  if (event.type !== "desktop_watch.settled") return envelope;
+  if (!desktopCachedCheckDisplays(task)) return envelope;
+  const { final_text, ...fields } = desktopStoredAnswer(task, envelope.route.controller_session_id);
+  return { ...envelope, event: { ...event, body: settledBody(task, final_text ?? "", fields.final_text_display), metadata: {
+    watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId, turn_id: task.native_turn_id,
+    ...fields } } };
+}
+
 export function createDesktopTaskService(deps: DesktopTaskServiceDependencies): DesktopTaskService {
   const service = new DesktopTaskServiceRuntime(deps);
   return {
     send: input => service.send(input), watch: input => service.watch(input),
     status: id => service.status(id), list: () => service.list(),
-    reconcile: id => service.reconcile(id), reconcileAll: () => service.reconcileAll(),
+    reconcile: (id, source) => service.reconcile(id, source), reconcileAll: () => service.reconcileAll(),
     unwatch: (id, input) => service.unwatch(id, input), close: (id, input) => service.close(id, input),
     renew: (id, input) => service.renew(id, input), recover: (id, input) => service.recover(id, input),
     retryCallback: (id, input) => service.retryCallback(id, input)
@@ -119,7 +147,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     this.interactionResponsesVerified = deps.interactionResponsesVerified ?? false;
     this.recovery = createDesktopTaskRecovery({ status: id => this.status(id), update: (id, op) => this.update(id, op),
       observe: target => deps.observe(target), applySnapshot: (task, snapshot, recover) => this.applySnapshot(task, snapshot, recover),
-      observeQueue: task => this.observeQueue(task), applyQueue: (task, observed, recover) => this.applyQueue(task, observed, recover),
+      observeQueue: (task, scan) => this.observeQueue(task, scan), applyQueue: (task, observed, recover) => this.applyQueue(task, observed, recover),
       deliverPending: (id, notificationId) => this.deliverPending(id, notificationId), now: this.now, expire: task => this.expire(task) });
   }
   status(id: string): DesktopTaskRecord {
@@ -133,7 +161,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       return this.repo.save(task, task.revision);
     });
   }
-  private notify(task: DesktopTaskRecord, key: string, body: string): void {
+  private notify(task: DesktopTaskRecord, key: string, body: string, displays?: DesktopFinalDisplay[]): void {
     if (!task.callback_route || desktopObservationStopped(task)) return;
     const id = `${task.id}:${key}`;
     if (task.notifications.some(n => n.id === id)) return;
@@ -142,7 +170,8 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       source: { kind: "desktop_watch", watch_id: task.id, desktop_id: task.desktop_id },
       event: { id, type: `desktop_watch.${key.split(":")[0]}`, body, requires_response: false,
         metadata: { watch_id: task.id, desktop_id: task.desktop_id, thread_id: task.target.threadId,
-          ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}) } }
+          ...(task.native_turn_id ? { turn_id: task.native_turn_id } : {}),
+          ...desktopDisplayFields(displays, task.target) } }
     }) });
   }
   private make(input: DesktopTaskInput, id: string, kind: "send" | "watch"): DesktopTaskRecord {
@@ -162,7 +191,9 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
   private duplicate(task: DesktopTaskRecord, input: DesktopSendInput): DesktopTaskRecord {
     if (task.kind !== "send" || task.controller_session !== input.controllerSession ||
       !isDeepStrictEqual(task.target, input.target) || task.desktop_id !== input.desktopId ||
-      task.send_intent?.message_id !== input.messageId || task.send_intent.text !== input.text ||
+      !task.send_intent || task.send_intent.text !== input.text ||
+      task.send_intent.request_key_sha256 !== desktopRequestKeyDigest(input.requestId) ||
+      (!task.send_intent.request_key_sha256 && task.send_intent.message_id !== input.messageId) ||
       !isDeepStrictEqual(task.callback_route, input.callbackRoute)) {
       throw new DesktopTaskError("desktop_message_id_conflict", "This message ID is already bound to different immutable Desktop send input");
     }
@@ -231,7 +262,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       if (desktopObservationStopped(current) || desktopNotificationObsolete(current, notification)) {
         this.settleDelivery(id, notification.id, notification.attempt_id!, { disposition: "permanent_failure", error_code: "desktop_watch_stopped" }); return;
       }
-      outcome = parseCallbackAttemptOutcome(await this.deps.deliver({ route: task.callback_route!, envelope: notification.envelope,
+      outcome = parseCallbackAttemptOutcome(await this.deps.deliver({ route: task.callback_route!, envelope: desktopDeliveryEnvelope(current, notification),
         attempt: { number: notification.attempts, id: notification.attempt_id! }, context,
         reportCheckpoint: checkpoint => {
           const parsed = parseCallbackAttemptOutcome(checkpoint);
@@ -285,12 +316,19 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     if (!turn.itemsComplete) { task.observation_error = "desktop_exact_turn_items_incomplete"; return; }
     task.status = turn.status;
     suppressDesktopNotifications(task, "desktop_timeout_superseded", notification => notification.envelope.event.type === "desktop_watch.timed_out");
-    task.final_text = finalText(turn); task.pending_manual_count = 0;
-    this.notify(task, "settled", `Desktop task ${task.id} ${task.status}.\n${task.final_text || "No assistant text was returned for this exact turn."}`);
+    const answer = desktopFinalAnswer(turn, task.target);
+    task.final_text = answer.final_text;
+    if (answer.final_text_display) task.final_text_display = answer.final_text_display;
+    if (answer.final_text && answer.final_text_display?.length) {
+      task.final_text_projection = "native_items_v1";
+    }
+    task.pending_manual_count = 0;
+    const pushed = desktopStoredAnswer(task, task.callback_route?.controller_session_id);
+    this.notify(task, "settled", settledBody(task, pushed.final_text ?? "", pushed.final_text_display), pushed.final_text_display);
   }
-  private async observeQueue(task: DesktopTaskRecord): Promise<DesktopQueueObservation> {
+  private async observeQueue(task: DesktopTaskRecord, historyScan?: "recover"): Promise<DesktopQueueObservation> {
     if (!this.deps.queue) throw new DesktopTaskError("desktop_queue_unavailable", "Native Desktop thread queue observation is unavailable");
-    return this.deps.queue.observe(task.target, desktopQueueWitness(task));
+    return this.deps.queue.observe(task.target, desktopQueueWitness(task, historyScan));
   }
   private applyQueue(task: DesktopTaskRecord, observed: DesktopQueueObservation, recover = false): void {
     const intent = task.send_intent!;
@@ -312,14 +350,15 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     if (!desktopObservationStopped(task) && live(task) && this.now().getTime() >= Date.parse(task.deadline_at)) {
       task.status = "timed_out";
       clearDesktopInteractionAttention(task, "desktop_watch_timed_out");
-      this.notify(task, `timed_out${task.renewal_count ? `:${task.renewal_count}` : ""}`, `Desktop Watch ${task.id} reached its deadline. This does not mean the native task stopped or that an uncertain send was rejected. AKK will not resend it.`);
+      const guidance = task.send_intent?.delivery_path === "native_thread_queue"
+        ? " Check this Watch for a later result. Renew this same Watch to continue monitoring its verified queue entry or executing turn." : "";
+      this.notify(task, `timed_out${task.renewal_count ? `:${task.renewal_count}` : ""}`, `Desktop Watch ${task.id} reached its deadline. This does not mean the native task stopped or that an uncertain send was rejected. AKK will not resend it.${guidance}`);
     }
   }
-  async reconcile(id: string): Promise<DesktopTaskRecord> {
+  async reconcile(id: string, source: "targeted" | "monitor" = "targeted"): Promise<DesktopTaskRecord> {
     const initial = this.status(id);
-    const recoverUncertain = initial.status === "timed_out" && !initial.native_turn_id &&
-      initial.send_intent && ["reserved", "uncertain"].includes(initial.send_intent.state);
-    if (!desktopObservationStopped(initial) && (live(initial) || recoverUncertain)) {
+    const readExpired = canReadExpiredTask(initial, source);
+    if (!desktopObservationStopped(initial) && (live(initial) || readExpired)) {
       let snapshot: DesktopSnapshot | undefined; let observationError: string | undefined; let queued: DesktopQueueObservation | undefined;
       try {
         if (initial.send_intent?.delivery_path === "native_thread_queue") queued = await this.observeQueue(initial);
@@ -327,12 +366,12 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       }
       catch (error) { observationError = errorCode(error); }
       this.update(id, task => {
-        if (desktopObservationStopped(task) || !live(task) && !(recoverUncertain && task.status === "timed_out")) return;
+        if (desktopObservationStopped(task) || !live(task) && !(readExpired && task.status === "timed_out")) return;
         // A concurrent monitor may have advanced a receipt/anchor. Apply only against the observed revision.
         if (task.revision !== initial.revision) return;
-        if (queued) this.applyQueue(task, queued, Boolean(recoverUncertain));
+        if (queued) this.applyQueue(task, queued, readExpired);
         else if (snapshot) {
-          this.applySnapshot(task, snapshot, recoverUncertain);
+          this.applySnapshot(task, snapshot, readExpired);
         } else task.observation_error = observationError;
         this.expire(task);
       });
@@ -341,10 +380,32 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     return this.status(id);
   }
   list(): DesktopTaskRecord[] { return this.repo.list(); }
-  async send(input: DesktopSendInput): Promise<DesktopTaskRecord> {
+  /** Resolve before any owner probe: a retry can read its receipt even after the original route disappears. */
+  private locateSend(input: DesktopSendInput): { id: string; previous?: DesktopTaskRecord } {
     if (!input.messageId?.trim() || !input.text?.trim()) throw new DesktopTaskError("invalid_argument", "Desktop send needs a stable message ID and non-empty text");
-    const id = sendId(input.controllerSession, input.messageId);
-    const previous = this.repo.load(id); if (previous) return this.duplicate(previous, input);
+    const key = desktopRequestKeyDigest(input.requestId);
+    const legacyId = sendId(input.controllerSession, input.messageId);
+    if (key) {
+      const id = sendId(input.controllerSession, input.messageId, key);
+      try {
+        // An existing request retains its own receipt even if this invocation ID belonged to a legacy task.
+        const previous = this.repo.load(id);
+        if (previous) return { id, previous };
+      } catch (error) {
+        // A compact tombstone no longer proves ownership; do not disclose the original Watch or receipt.
+        if (errorCode(error) === "watch_history_expired") {
+          throw new DesktopTaskError("watch_history_expired", "This Desktop request's history expired. Do not replay it.", "not_sent");
+        }
+        throw error;
+      }
+      // A new key can never bind itself to a retained legacy invocation.
+      return { id, previous: this.repo.load(legacyId) };
+    }
+    return { id: legacyId, previous: this.repo.load(legacyId) };
+  }
+  async send(input: DesktopSendInput): Promise<DesktopTaskRecord> {
+    const { id, previous } = this.locateSend(input);
+    if (previous) return this.duplicate(previous, input);
     const task = this.make(input, id, "send");
     let snapshot: DesktopSnapshot;
     try { snapshot = await this.deps.observe(input.target); }
@@ -352,6 +413,10 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
       if (!(error instanceof DesktopEndpointUnavailable) || !this.deps.queue || input.requireEmptyThread) throw error;
       return this.sendQueue(task, input, await this.deps.queue.prepare(input.target));
     }
+    return this.startOwnerTask(task, input, snapshot);
+  }
+  private async startOwnerTask(task: DesktopTaskRecord, input: DesktopSendInput, snapshot: DesktopSnapshot): Promise<DesktopTaskRecord> {
+    const id = task.id;
     assertSnapshot(task, snapshot);
     if (!idle(snapshot)) throw new DesktopTaskError("thread_not_idle", "Desktop thread must be confirmed idle before send");
     if (input.requireEmptyThread && (snapshot.latestTurnId !== null || snapshot.turns.length !== 0)) {
@@ -402,11 +467,21 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     return this.reconcile(id);
   }
   private reserveSend(task: DesktopTaskRecord, input: DesktopSendInput): DesktopTaskRecord | undefined {
-    // The global writer lease makes the unresolved-intent scan atomic across distinct message IDs.
+    // The global writer lease serializes reservations across task IDs and controller processes.
     return this.repo.withLock(task.id, () => {
       const existing = this.repo.load(task.id); if (existing) return this.duplicate(existing, input);
-      if (this.repo.list().some(other => desktopUnresolvedSend(other) && isDeepStrictEqual(other.target, input.target))) {
-        throw new DesktopTaskError("desktop_send_pending", "Another Desktop send is awaiting acceptance for this exact conversation");
+      const key = desktopRequestKeyDigest(input.requestId);
+      if (key) task.send_intent!.request_key_sha256 = key;
+      for (const other of this.repo.list()) {
+        if (!other.send_intent) continue;
+        if (other.controller_session === input.controllerSession && other.send_intent.message_id === input.messageId) {
+          // Same tool invocation with rekeyed or altered input cannot cause another effect.
+          return this.duplicate(other, input);
+        }
+        if (!isDeepStrictEqual(other.target, input.target)) continue;
+        if (task.send_intent?.delivery_path !== "native_thread_queue" && ownerStartHasNoResult(other)) {
+          throw new DesktopTaskError("desktop_send_pending", "An owner start has no returned result and may still be in flight. Check its Watch.", "not_sent");
+        }
       }
       this.repo.save(task, null);
       return undefined;
@@ -481,7 +556,7 @@ class DesktopTaskServiceRuntime implements DesktopTaskService {
     const scan = this.repo.scanForReconciliation();
     const result: { tasks: DesktopTaskRecord[]; errors: { id: string; error_code: string }[] } = { tasks: [], errors: [...scan.errors] };
     for (const task of scan.tasks) {
-      try { result.tasks.push(await this.reconcile(task.id)); }
+      try { result.tasks.push(await this.reconcile(task.id, "monitor")); }
       catch (error) { result.errors.push({ id: task.id, error_code: errorCode(error) }); }
     }
     return result;

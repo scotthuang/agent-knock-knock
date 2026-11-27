@@ -70,7 +70,8 @@ export class CodexNativeError extends Error {
   rpcMethod?: string;
   constructor(public readonly code: "invalid_response" | "invalid_argument" | "timeout" | "closed" | "rpc_error"
     | "thread_not_loaded" | "thread_not_idle" | "unsupported_thread" | "stale_interaction"
-    | "unsupported_capability" | "pagination_limit" | "duplicate_submission" | "unmaterialized_thread" | "unmaterialized_subscription",
+    | "unsupported_capability" | "pagination_limit" | "duplicate_submission" | "unmaterialized_thread" | "unmaterialized_subscription"
+    | "queue_full" | "queue_write_denied",
   message: string, public readonly dispatchState: CodexNativeDispatchState = "not_sent",
   public readonly rpcCode?: number, public readonly acceptedTurnId?: string) {
     super(message); this.name = "CodexNativeError";

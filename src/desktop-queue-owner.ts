@@ -4,13 +4,14 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { desktopLsofCommand, verifyDesktopMappedExecutables } from "./desktop-lsof.js";
 import type { DesktopThreadIdentity } from "./desktop-types.js";
 
 export interface DesktopQueueOwner {
   /** Opaque process-incarnation/lock evidence. Never an independent write credential. */
   ownerId: string;
   endpointId: string;
-  draft: "none_persisted" | "present" | "unknown";
+  draft: "none_persisted" | "present" | "retained_editor" | "unknown";
   /** The renderer can hold buffered edits that are not present in the atom file. */
   liveDraft: "unknown";
 }
@@ -89,18 +90,20 @@ export function desktopQueueAccountEvidence(value: unknown, threadId: string) {
 }
 
 function persistedDraft(banks: RecordValue[], threadId: string): DesktopQueueOwner["draft"] {
-  let available = false;
-  for (const key of ["composer-prompt-drafts-v2", "composer-prompt-drafts-v1", "composer-retained-documents-v1"]) {
+  let available = false, malformed = false;
+  for (const key of ["composer-retained-documents-v1", "composer-prompt-drafts-v2", "composer-prompt-drafts-v1"]) {
     // Observe both banks conservatively during save/migration. Never return a draft's contents.
     for (const bank of banks) {
       const entries = bank[key];
       if (entries === undefined) continue;
-      if (!record(entries)) return "unknown";
+      if (!record(entries)) { malformed = true; continue; }
       if (key === "composer-prompt-drafts-v2") available = true;
-      if (entries[`local:${threadId}`] != null || entries[threadId] != null) return "present";
+      if (entries[`local:${threadId}`] != null || entries[threadId] != null) {
+        return key === "composer-retained-documents-v1" ? "retained_editor" : "present";
+      }
     }
   }
-  return available ? "none_persisted" : "unknown";
+  return available && !malformed ? "none_persisted" : "unknown";
 }
 
 async function readDraft(target: DesktopThreadIdentity) {
@@ -149,7 +152,7 @@ async function socketEndpoint(home: string) {
 }
 
 async function soleHolder(file: string): Promise<number> {
-  const output = await run("/usr/sbin/lsof", ["-nP", "-t", "--", file]);
+  const output = await run(...desktopLsofCommand(["-nP", "-t", "--", file]));
   const ids = [...new Set(output.trim().split(/\s+/u))];
   if (ids.length !== 1 || !/^[1-9]\d*$/u.test(ids[0]!)) unverified();
   return Number(ids[0]);
@@ -157,7 +160,7 @@ async function soleHolder(file: string): Promise<number> {
 
 async function soleWriter(lock: string) {
   const st = await fs.lstat(lock);
-  const fields = (await run("/usr/sbin/lsof", ["-nP", "-FpuftaDi", "--", lock])).trim().split("\n");
+  const fields = (await run(...desktopLsofCommand(["-nP", "-FpuftaDi", "--", lock]))).trim().split("\n");
   const expected = ["u" + process.getuid?.(), "au", "tREG", "D0x" + st.dev.toString(16), "i" + st.ino];
   if (!st.isFile() || !expected.every(field => fields.includes(field)) ||
     fields.filter(field => field.startsWith("p")).length !== 1 ||
@@ -189,15 +192,19 @@ export function desktopQueueSigningSubjects(kernel: Omit<Kernel, "lock">): [Proc
   return [[writer, "codex"], [helper, "com.openai.codex.helper"], [main, "com.openai.codex"], [daemon, "codex"]];
 }
 
-async function authenticate(proc: Process, identifier: string) {
+async function authenticate(subjects: [Process, string][]) {
   // Dynamic designated requirement checks authenticate the running code. Matching
   // mapped executable vnodes prevents an on-disk upgrade from attesting an old process.
-  const requirement = `anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2" and identifier "${identifier}"`;
-  await run("/usr/bin/codesign", ["--verify", "-R=" + requirement, String(proc.pid)]);
-  const st = await fs.stat(proc.exe);
-  const mapped = await run("/usr/sbin/lsof", ["-nP", "-a", "-p", String(proc.pid), "-d", "txt", "-FfDi", "--", proc.exe]);
-  const lines = mapped.trim().split("\n");
-  if (!lines.includes("ftxt") || !lines.includes("D0x" + st.dev.toString(16)) || !lines.includes("i" + st.ino)) unverified();
+  const expected = await Promise.all(subjects.map(async ([proc, identifier]) => {
+    const requirement = `anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2" and identifier "${identifier}"`;
+    await run("/usr/bin/codesign", ["--verify", "-R=" + requirement, String(proc.pid)]);
+    const { dev, ino } = await fs.stat(proc.exe, { bigint: true });
+    return { pid: proc.pid, dev, ino };
+  }));
+  const pids = expected.map(proc => proc.pid).join(",");
+  const paths = new Set(subjects.map(([proc]) => proc.exe));
+  const mapped = await run(...desktopLsofCommand(["-nP", "-a", "-p", pids, "-d", "txt", "-FpfDi", "--", ...paths]));
+  verifyDesktopMappedExecutables(mapped, expected);
 }
 
 async function checkHome(home: string) {
@@ -231,7 +238,7 @@ export async function verifyDesktopQueueEndpoint(home: string): Promise<string> 
   try {
     await checkHome(home);
     const before = await sampleSharedEndpoint(home);
-    await authenticate(before.daemon, "codex");
+    await authenticate([[before.daemon, "codex"]]);
     if ((await sampleSharedEndpoint(home)).id !== before.id) unverified();
     return before.id;
   } catch { return unverified(); }
@@ -244,7 +251,7 @@ export async function verifyDesktopQueueOwner(target: DesktopThreadIdentity): Pr
     if (target.hostId !== "local" || !uuid.test(target.threadId)) unverified();
     await checkHome(target.codexHome);
     const before = await sample(target), { writer, helper, main, daemon } = before.kernel;
-    await Promise.all(desktopQueueSigningSubjects(before.kernel).map(([proc, id]) => authenticate(proc, id)));
+    await authenticate(desktopQueueSigningSubjects(before.kernel));
     const after = await sample(target);
     if (digest(before) !== digest(after)) unverified();
     const { draft, ownerScope } = await readDraft(target);

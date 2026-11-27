@@ -1,3 +1,13 @@
+/** Safe presentation metadata. Native text, free-form reasons and contact data never belong here. */
+export type DesktopFinalDisplay =
+  | { version: 1; mode: "show"; trustedContacts: "skip" }
+  | { version: 1; mode: "show"; trustedContacts: "check"; hasAnswer?: true }
+  | { version: 1; mode: "hide"; replacement: "wellbeingPromptHelpline" }
+  | { version: 1; mode: "block"; reason: "protection" | "cyber" }
+  | { version: 1; mode: "desktop_only"; reason: "wellbeingHelpline"; subject: "answer" | "prompt"; trustedContacts: "check" | "skip" }
+  | { mode: "desktop_only"; reason: "original_requester_required" }
+  | { mode: "unsupported" };
+
 /** AKK projections of identity-checked Desktop private IPC. Never expose raw snapshots. */
 export interface DesktopThreadIdentity { codexHome: string; hostId: string; threadId: string }
 export interface DesktopCompatibility { version: string; build: string; applicationIdentityVerified?: boolean }
@@ -5,6 +15,9 @@ export interface DesktopTurnItem {
   id: string;
   type: string;
   text?: string;
+  answerDisplay?: DesktopFinalDisplay;
+  /** Older projections retained only the presence of a checked final answer. */
+  hasDesktopAnswer?: true;
   clientId?: string | null;
   content?: { type: string; text?: string }[];
   phase?: string | null;
@@ -187,7 +200,9 @@ export interface DesktopInterruptReceipt { interruptedTurnId: string; snapshot: 
 export type DesktopDispatchState = "not_sent" | "unknown" | "accepted";
 export type DesktopIpcErrorCode = "invalid_response" | "incompatible_desktop" | "timeout" | "closed"
   | "rpc_error" | "no_live_owner" | "owner_changed" | "snapshot_changed" | "thread_not_idle" | "duplicate_submission"
-  | "unexpected_existing_turn" | "invalid_argument" | "unsafe_socket" | "stale_interaction";
+  | "unexpected_existing_turn" | "invalid_argument" | "unsafe_socket" | "stale_interaction"
+  | "desktop_queue_saved_draft" | "desktop_queue_retained_editor" | "desktop_queue_question_pending"
+  | "desktop_queue_baseline_unavailable" | "desktop_queue_contract_unavailable" | "desktop_queue_write_denied" | "desktop_queue_full";
 export class DesktopIpcError extends Error {
   constructor(public readonly code: DesktopIpcErrorCode, message: string,
     public readonly dispatchState: DesktopDispatchState = "not_sent", public readonly acceptedTurnId?: string) {

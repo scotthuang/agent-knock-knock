@@ -77,6 +77,16 @@ function conversationUsage(row: Row): ConversationUsage {
     : watch ? "You can observe this conversation; task sending is unavailable."
     : "Task sending is unavailable; check the recovery steps below.",
   available: usableOperations(row), limitations: [], next_steps: [] };
+  if (row.connection_state === "desktop_queue_owner_verified" && send) {
+    usage.summary = "Send can append a task to this thread's native queue.";
+    usage.next_steps.push("Use the returned Watch to follow this message through queueing and execution.");
+    return usage;
+  }
+  if (row.connection_state === "desktop_queue_admission_blocked" && !send) {
+    usage.summary = "The native Desktop queue cannot currently accept this task through AKK.";
+    usage.next_steps.push("Read can_send_reason and check Status on this exact conversation for the current restriction.");
+    return usage;
+  }
   if (row.detail_scan === "deferred" && !knownDiscoveryBlocker(row)) {
     usage.summary = send ? "You can request Send; AKK checks this window before submitting input."
       : "Discovery is complete; use Status to check this window's current input actions.";

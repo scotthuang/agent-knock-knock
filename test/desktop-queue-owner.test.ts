@@ -17,12 +17,15 @@ test("queue admission checks the exact local composer scope in both owner banks,
   assert.equal(desktopQueueAccountEvidence({ ...empty, [commonKey]: { [drafts]: { [unrelated]: {} } } }, uuid).draft, "none_persisted");
   for (const bank of [commonKey, scopedKey]) {
     for (const key of [drafts, "composer-prompt-drafts-v1", retained]) {
-      assert.equal(desktopQueueAccountEvidence({ ...empty, [bank]: { [key]: { [scope]: {} } } }, uuid).draft, "present");
+      assert.equal(desktopQueueAccountEvidence({ ...empty, [bank]: { [key]: { [scope]: {} } } }, uuid).draft,
+        key === retained ? "retained_editor" : "present");
     }
   }
   for (const malformed of [{ ...empty, [commonKey]: { [drafts]: [] } }, { ...empty, [commonKey]: {} }]) {
     assert.equal(desktopQueueAccountEvidence(malformed, uuid).draft, "unknown");
   }
+  assert.equal(desktopQueueAccountEvidence({ ...empty, [commonKey]: { [retained]: false },
+    [scopedKey]: { [drafts]: { [scope]: {} } } }, uuid).draft, "present");
 });
 
 test("unidentified renderer banks cannot produce matching owner proofs; changing account changes the opaque scope", () => {

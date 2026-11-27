@@ -48,7 +48,9 @@ At 14:33 local time on November 21 the candidate's semantic Host Bridge accepted
 
 A single fixed-reply, no-tools task was sent. The native presentation directive withheld the final message body from the controller. The callback correctly reported settlement without disclosing the protected text. This real test used the candidate Host Bridge, a separate AKK Store and a local callback receiver. It did not install the candidate in the production Gateway or test a messaging channel.
 
-### Operating limits
+### Operating limits of the 0.16.22 build tested above
+
+See [current queue behavior](../codex-desktop-compatibility.md#sending-to-a-thread-with-a-queue) for the revised admission policy.
 
 * The submit-time checks require a local Desktop writer, a completed previous turn, an empty native queue and an identifiable owner-scoped persisted draft bank without a saved draft or retained editor for this conversation. The native operation appends a message under the thread UUID. It neither types into the composer nor starts or resumes any client. Unpersisted typing and active modal state are not observable through this route. New, empty or unverifiable threads do not qualify.
 * Manually resuming the same thread elsewhere before consumption can change which client executes queued work. AKK re-observes that original thread and attributes a result only to an unchanged, unique original client message in a new turn. A missing acknowledgement leaves the result uncertain until that evidence appears. Steered turns and incomplete history cannot establish attribution. Recovery observes the original submission without sending again.

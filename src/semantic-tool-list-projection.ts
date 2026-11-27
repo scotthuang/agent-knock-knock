@@ -1,6 +1,7 @@
 import { compactCodexRoutingHealth } from "./codex-routing-diagnostics.js";
 import { paginateHostList } from "./semantic-tool-list-budget.js";
 import { compactListV5Row, resolveHostListProjectionVersion } from "./semantic-tool-list-format.js";
+import { desktopQueueNotices } from "./desktop-task-queue.js";
 import { isAkkModelFacingPrivateAuthorityField } from
   "./semantic-tool-model-facing-field-policy.js";
 import { arrayValue, finiteNumber, nonEmptyString, stringArrayValue,
@@ -95,10 +96,12 @@ function compactConversationPresentation(value: unknown): Record<string, unknown
 }
 
 function compactDesktopConversation(row: Record<string, unknown>): Record<string, unknown> {
+  const notices = desktopQueueNotices.filter(notice => Array.isArray(row.queue_notices) && row.queue_notices.includes(notice));
   return withConversationUsage({
     ...compactAkkListScalars(row, ["id", "conversation_id", "title", "cwd", "source", "agent", "native_thread_id",
       "host_id", "updated_at", "catalog_membership", "creator_originator", "connection_state", "activity_state", "native_turn_id", "pending_manual_count", "pending_async_count", "pending_interaction_count",
-      "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "manual_action", "compatibility_policy", "compatibility_warning", "application_identity_verified"]),
+      "sidebar_section", "sidebar_project_id", "sidebar_project_name", "observation_error", "can_send_reason", "owner_ipc_state", "live_draft_state", "manual_action", "compatibility_policy", "compatibility_warning", "application_identity_verified"]),
+    ...(notices.length ? { queue_notices: notices } : {}),
     ...(recordValue(row.capability_verification) ? { capability_verification: compactAkkListScalars(recordValue(row.capability_verification)!,
       ["send", "approvals", "blockingAnswers", "asyncAnswers", "nativeControls"]) } : {}),
     capabilities: compactAkkListScalars(recordValue(row.capabilities) ?? {}, ["send", "watch", "status", "interaction_notify", "interaction_respond", "approve", "set_permissions", "set_model", "cancel"]),

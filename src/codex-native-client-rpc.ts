@@ -90,10 +90,30 @@ export class CodexNativeRpc {
   }
 }
 
+/** These exact authenticated queue/add rejections precede insertion. Native internal
+ * errors may still occur while constructing the response after a successful insert. */
+function queueRejection(message: unknown): CodexNativeError | undefined {
+  if (typeof message !== "string") return;
+  if (/^queue cannot contain more than [1-9]\d{0,8} submissions$/u.test(message)) {
+    return new CodexNativeError("queue_full", "Native thread queue is full", "not_sent", -32600);
+  }
+  if (message === "direct app-server input is not allowed for multi-agent v2 sub-agents" ||
+      message === "direct app-server input is not allowed for unloaded spawned sub-agents") {
+    return new CodexNativeError("queue_write_denied", "Native thread disallows direct input", "not_sent", -32600);
+  }
+  if (message === "user message queue is unavailable") {
+    return new CodexNativeError("unsupported_capability", "Native thread queue is unavailable", "not_sent", -32600);
+  }
+}
+
 function nativeRpcError(error: Record<string, unknown>, pending: Pending): CodexNativeError {
   const code = typeof error.code === "number" ? error.code : undefined;
+  if (pending.method === "thread/queue/add" && code === -32600) {
+    const rejected = queueRejection(error.message);
+    if (rejected) return rpcContextError(rejected, pending);
+  }
   const unsupported = code === -32601;
-  const threadId = pending.params && typeof pending.params === "object" ? (pending.params as Record<string, unknown>).threadId : undefined;
+  const threadId = requestThreadId(pending.params);
   const unmaterialized = pending.method === "thread/turns/list" && code === -32600 && typeof threadId === "string"
     && error.message === `thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`;
   const unmaterializedSubscription = pending.method === "thread/resume" && code === -32600 && typeof threadId === "string"
@@ -106,9 +126,14 @@ function nativeRpcError(error: Record<string, unknown>, pending: Pending): Codex
     pending.mutation && code !== -32601 && code !== -32602 ? "unknown" : "not_sent", code), pending);
 }
 
+function requestThreadId(params: unknown): unknown {
+  if (typeof params === "object" && params !== null) return (params as Record<string, unknown>).threadId;
+  return undefined;
+}
+
 function rpcContextError(error: CodexNativeError, pending: Pick<Pending, "method" | "params" | "mutation">): CodexNativeError {
   error.rpcMethod = pending.method;
-  const threadId = pending.params && typeof pending.params === "object" ? (pending.params as Record<string, unknown>).threadId : undefined;
+  const threadId = requestThreadId(pending.params);
   error.diagnostics = codexDeliveryDiagnostics(error, threadId, pending.mutation ? "rpc_dispatch" : "backend_precheck");
   error.message = codexDeliveryFailureMessage(error.message, error.diagnostics);
   return error;

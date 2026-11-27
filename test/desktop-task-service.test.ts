@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { collectExpiredWatchHistory } from "../src/watch-history-retention.js";
-import { createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
+import { createCallbackEnvelope, createTerminalWatchOpenClawCallbackRoute, type CallbackAttemptOutcome, type CallbackTransportDeliverInput } from "../src/callback-transport.js";
 import { createDesktopStateStore } from "../src/desktop-state-store.js";
+import { desktopStoredAnswerForLookup, desktopTaskProjection } from "../src/desktop-public-projection.js";
 import { createDesktopTaskService, desktopTaskNeedsReconciliation, type DesktopTaskServiceDependencies } from "../src/desktop-task-service.js";
 import { DesktopIpcError, type DesktopSnapshot, type DesktopTurn } from "../src/desktop-types.js";
 import { DesktopEndpointUnavailable } from "../src/desktop-ipc-transport.js";
@@ -14,7 +15,7 @@ import { DESKTOP_CREATION_BUILD, desktopCapabilityProfile } from "../src/desktop
 import { createDesktopConversationId } from "../src/desktop-identity.js";
 import { buildDesktopAsyncReply, desktopAsyncQuestions } from "../src/desktop-async-interactions.js";
 
-const target = { codexHome: "/test/codex", hostId: "local", threadId: "thread-exact" };
+const target = { codexHome: "/test/codex", hostId: "local", threadId: "00000000-0000-4000-8000-000000000001" };
 const input = { target, desktopId: createDesktopConversationId(target), controllerSession: "controller-one", messageId: "message-one", text: "Do the exact task" };
 const route = createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: input.controllerSession });
 function turn(id: string, status: DesktopTurn["status"] = "inProgress", clientId?: string, text = input.text): DesktopTurn {
@@ -55,26 +56,34 @@ function harness(t: TestContext) {
 function queueHarness(t: TestContext) {
   const h = harness(t);
   const admission = { ownerId: "desktop-writer", endpointId: "shared-socket", cwd: "/project", baselineTurnId: "preexisting-turn" };
-  const queue = { writes: 0, reads: 0, ackLost: false, client: "",
+  const queue = { writes: 0, reads: 0, ackLost: false, client: "", submissions: new Map<string, { prompt: string; queueId?: string }>(),
     observation: { state: "pending", reason: "desktop_queue_turn_not_observed" } as DesktopQueueObservation };
   h.deps.observe = async () => { throw new DesktopEndpointUnavailable("ECONNREFUSED"); };
   h.deps.queue = {
     prepare: async () => admission,
     submit: async (identity, original, { watchId, clientUserMessageId, prompt }) => {
-      assert.deepEqual(identity, target); assert.deepEqual(original, admission); assert.equal(prompt, input.text);
+      assert.deepEqual(identity, target); assert.deepEqual(original, admission);
       h.repository.withLock(watchId, () => {
         const task = h.repository.load(watchId)!;
         assert.equal(task.send_intent!.state, "reserved"); assert.equal(task.send_intent!.client_user_message_id, clientUserMessageId);
+        assert.equal(task.send_intent!.text, prompt);
         task.send_intent!.state = "uncertain"; h.repository.save(task, task.revision);
       });
       queue.writes++; queue.client = clientUserMessageId;
+      const queueId = queue.writes === 1 ? "queue-entry" : `queue-entry-${queue.writes}`;
+      queue.submissions.set(clientUserMessageId, { prompt, ...(!queue.ackLost ? { queueId } : {}) });
       if (queue.ackLost) throw new DesktopIpcError("timeout", "Queue add ACK lost", "unknown");
-      return { queueId: "queue-entry", clientUserMessageId };
+      return { queueId, clientUserMessageId };
     },
     observe: async (identity, witness) => {
       queue.reads++;
       assert.deepEqual(identity, target);
-      assert.deepEqual(witness, { clientUserMessageId: queue.client, prompt: input.text, baselineTurnId: "preexisting-turn",
+      const origin = queue.submissions.get(witness.clientUserMessageId)!;
+      const bound = h.repository.list().find(task => task.send_intent?.client_user_message_id === witness.clientUserMessageId)?.native_turn_id;
+      assert.deepEqual(witness, { clientUserMessageId: witness.clientUserMessageId, prompt: origin.prompt, baselineTurnId: "preexisting-turn",
+        ...(witness.historyScan === "recover" ? { historyScan: "recover" } : {}),
+        ...(bound ? { boundTurnId: bound } : {}),
+        ...(origin.queueId ? { acknowledgedQueueId: origin.queueId } : {}),
         expectedCwd: "/project", expectedEndpointId: admission.endpointId });
       return structuredClone(queue.observation);
     }
@@ -107,18 +116,112 @@ test("native Desktop queue persists distinct queue and turn identities and settl
   await assert.rejects(restarted.watch({ ...input, controllerSession: "another-controller" }), { code: "no_active_task" });
   h.state.now += 60000;
   assert.ok(Date.parse((await restarted.renew(one.id, owner)).deadline_at) > Date.parse(deadline));
-  h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"),
-    items: [{ id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE" }] } };
+  const display = { version: 1, mode: "show", trustedContacts: "check" } as const;
+  h.queue.observation = { state: "matched", turn: { ...turn("execution-turn", "completed"), items: [
+    { id: "progress", type: "agentMessage", phase: "commentary", text: "Progress only" },
+    { id: "blocked", type: "agentMessage", phase: "final_answer", text: "RESTRICTED-SIBLING",
+      answerDisplay: { version: 1, mode: "block", reason: "protection" } },
+    { id: "reply", type: "agentMessage", phase: "final_answer", text: "DONE", answerDisplay: display }
+  ] } };
   await Promise.all([restarted.reconcile(one.id), h.service.reconcile(one.id)]);
   const done = await restarted.reconcile(one.id);
   assert.equal(done.status, "completed"); assert.equal(done.final_text, "DONE");
   assert.equal(done.notifications.length, 1); assert.equal(done.notifications[0].status, "accepted");
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.metadata?.turn_id, "execution-turn");
+  assert.ok(done.final_text_display?.some(d => d.mode === "show" && d.trustedContacts === "check"));
+  const callback = h.state.notifications[0].envelope;
+  assert.equal(callback.route.controller_session_id, input.controllerSession);
+  assert.deepEqual(callback.event.metadata?.final_text_display, done.final_text_display);
+  assert.equal(callback.event.metadata?.trusted_contacts_check_status, "not_performed_by_akk");
+  const threadUrl = `codex://threads/${target.threadId}`;
+  assert.equal(callback.event.metadata?.desktop_url, threadUrl);
+  assert.match(callback.event.body, /completed/);
+  assert.ok(callback.event.body.includes("Codex 要求检查可信联系人，AKK 未执行或核实这项检查。"));
+  assert.ok(callback.event.body.includes(threadUrl));
+  assert.match(callback.event.body, /^DONE$/m);
+  assert.doesNotMatch(JSON.stringify(h.state.notifications[0]), /RESTRICTED-SIBLING|Progress only/);
+  assert.deepEqual(done.notifications[0].envelope, callback);
+  const offline = desktopTaskProjection(h.repository.load(one.id)!, false, input.controllerSession);
+  assert.equal(offline.final_text, "DONE");
+  assert.equal(offline.final_text_notice, callback.event.metadata?.final_text_notice);
+  assert.equal(offline.desktop_url, threadUrl);
+  assert.equal(desktopTaskProjection(done, false, "some-other-controller").final_text, "");
+  const lookup = desktopStoredAnswerForLookup(h.repository.load(one.id)!);
+  assert.equal(lookup.final_text, "DONE");
+  assert.equal(lookup.final_text_notice, callback.event.metadata?.final_text_notice);
+  assert.doesNotMatch(JSON.stringify(lookup), /RESTRICTED-SIBLING|Progress only/);
   assert.equal((await restarted.send(dispatched)).id, one.id); assert.equal(h.queue.writes, 1); assert.equal(h.state.starts, 0);
   h.deps.queue!.observe = async () => assert.fail("Already settled tasks retain their evidence offline");
   assert.equal((await restarted.recover(one.id, owner)).status, "completed");
   assert.equal((await restarted.reconcile(one.id)).status, "completed");
+  assert.equal(h.state.notifications.length, 1);
+});
+
+test("pending legacy callbacks keep their delivery identity and replace cached checked text at dispatch", async t => {
+  for (const savedDirective of ["task", "envelope"] as const) {
+    const h = harness(t);
+    h.deps.canDeliver = () => false;
+    const sent = await h.service.send({ ...input, callbackRoute: route });
+    const final = turn("native-one", "completed", h.state.clientId);
+    h.state.snapshot = snapshot([final]);
+    const done = await h.service.reconcile(sent.id);
+    const pending = done.notifications[0];
+    assert.equal(pending.status, "ready");
+    const displays = [{ version: 1, mode: "show", trustedContacts: "check" }] as const;
+    const marker = "SYNTHETIC-CACHED-FINAL";
+    done.final_text = marker;
+    if (savedDirective === "task") done.final_text_display = [...displays];
+    pending.envelope = createCallbackEnvelope({ route, source: pending.envelope.source, event: {
+      ...pending.envelope.event, body: `Legacy completion with ${marker}`, metadata: {
+        ...pending.envelope.event.metadata, ...(savedDirective === "envelope" ? { final_text_display: displays } : {}) } } });
+    h.repository.save(done, done.revision);
+    const cached = desktopTaskProjection(done, false, input.controllerSession);
+    assert.equal(cached.final_text, "");
+    assert.equal(cached.desktop_url, `codex://threads/${target.threadId}`);
+    assert.ok(!JSON.stringify(cached).includes(marker));
+    assert.equal(desktopTaskProjection(done).desktop_url, undefined);
+    const lookup = desktopStoredAnswerForLookup(done);
+    assert.equal(lookup.final_text, "");
+    assert.equal(lookup.trusted_contacts_check_status, "not_performed_by_akk");
+    assert.ok(!JSON.stringify(lookup).includes(marker));
+    h.deps.canDeliver = () => true;
+    const restarted = createDesktopTaskService(h.deps);
+    await restarted.reconcile(done.id);
+    await restarted.reconcile(done.id);
+    assert.equal(h.state.notifications.length, 1);
+    const delivered = h.state.notifications[0].envelope;
+    assert.equal(delivered.delivery_id, pending.envelope.delivery_id);
+    assert.equal(delivered.idempotency_key, pending.envelope.idempotency_key);
+    assert.equal(delivered.event.id, `${done.id}:settled`);
+    assert.equal(delivered.route.controller_session_id, input.controllerSession);
+    assert.ok(delivered.event.body.includes(`codex://threads/${target.threadId}`));
+    assert.ok(!JSON.stringify(delivered).includes(marker));
+    assert.equal(restarted.status(done.id).notifications[0].status, "accepted");
+  }
+});
+
+test("independent queue requests survive an older ACK loss; changing just the message ID cannot replay it", async t => {
+  const h = queueHarness(t), restarted = createDesktopTaskService(h.deps);
+  h.queue.ackLost = true;
+  const keyed = { ...input, requestId: "original-instruction" };
+  const unknown = await h.service.send(keyed);
+  assert.equal(unknown.send_intent?.queue_id, undefined);
+  assert.equal((await restarted.send(keyed)).id, unknown.id);
+  assert.equal((await restarted.send({ ...keyed, messageId: "retry-with-different-id" })).id, unknown.id);
+  assert.equal(h.queue.writes, 1);
+  h.queue.ackLost = false;
+  const next = { ...input, messageId: "independent", requestId: "independent-authorized-request", text: "different follow-up" };
+  const [a, b] = await Promise.all([h.service.send(next), restarted.send(next)]);
+  assert.equal(a.id, b.id);
+  const other = await restarted.send({ ...next, messageId: "third", requestId: "third-independent-request", text: "third follow-up" });
+  assert.equal(h.queue.writes, 3);
+  const confirmed = h.service.status(a.id);
+  assert.equal(confirmed.send_intent?.queue_id, "queue-entry-2");
+  assert.equal(other.send_intent?.queue_id, "queue-entry-3");
+  assert.notEqual(confirmed.send_intent?.client_user_message_id, other.send_intent?.client_user_message_id);
+  assert.equal(confirmed.native_turn_id, undefined);
+  assert.equal(restarted.status(unknown.id).send_intent?.queue_id, undefined);
 });
 
 test("Desktop queue Watch rejects a replaced or unverifiable shared daemon on either side of its read", async t => {
@@ -193,6 +296,141 @@ test("Desktop callback reconciliation preserves unclaimed foreign routes for an 
   assert.deepEqual(h.state.notifications[0].envelope, envelope);
 });
 
+test("exact Status can settle a queue turn found by Recover after expiry while unattended observation remains stopped", async t => {
+  const h = queueHarness(t);
+  const queued = await h.service.send({ ...input, callbackRoute: route, timeoutMs: 100 });
+  const service = createDesktopTaskService(h.deps);
+  h.state.now += 101;
+  const expired = await service.reconcile(queued.id);
+  assert.equal(expired.status, "timed_out");
+  assert.equal(desktopTaskNeedsReconciliation(expired), false);
+  h.queue.observation = { state: "matched", turn: turn("late-turn") };
+  const bound = await service.recover(queued.id, controller);
+  assert.equal(bound.native_turn_id, "late-turn");
+  assert.equal(bound.status, "timed_out");
+  assert.equal(desktopTaskProjection(bound).callback_expected, false);
+  const before = h.queue.reads;
+  h.queue.observation = { state: "matched", turn: { ...turn("late-turn", "completed"),
+    items: [{ id: "final", type: "agentMessage", phase: "final_answer", text: "late result" }] } };
+  assert.equal((await service.reconcileAll()).tasks[0].status, "timed_out");
+  assert.equal(h.queue.reads, before);
+  const done = await service.reconcile(queued.id);
+  assert.equal(done.status, "completed");
+  assert.equal(done.deadline_at, queued.deadline_at);
+  assert.equal(done.renewal_count, undefined);
+  assert.equal(done.final_text, "late result");
+  await createDesktopTaskService(h.deps).reconcile(queued.id);
+  assert.deepEqual(h.state.notifications.map(n => n.envelope.event.id), [queued.id + ":timed_out", queued.id + ":settled"]);
+  assert.equal(h.queue.writes, 1);
+});
+
+test("Renew resumes the original waiting queue entry before a turn exists only with fresh receipt and entry proof", async t => {
+  const h = queueHarness(t), service = h.service;
+  h.queue.observation = { state: "pending", reason: "desktop_queue_entry_waiting" };
+  const queued = await service.send({ ...input, callbackRoute: route, timeoutMs: 100 });
+  h.state.now += 101;
+  const expired = await service.reconcile(queued.id);
+  assert.equal(expired.status, "timed_out");
+  assert.equal((desktopTaskProjection(expired).capabilities as Record<string, boolean>).renew, true);
+  assert.ok((desktopTaskProjection(expired).available_actions as Record<string, unknown>).renew);
+  for (const reason of ["desktop_queue_entry_conflict", "desktop_queue_entry_not_observed", "desktop_queue_entry_unconfirmed_ack"]) {
+    h.queue.observation = { state: "uncertain", reason };
+    await assert.rejects(service.renew(queued.id, controller), { code: "desktop_exact_task_not_active" });
+    assert.equal(service.status(queued.id).deadline_at, expired.deadline_at);
+  }
+  h.queue.observation = { state: "pending", reason: "desktop_queue_entry_waiting" };
+  const renewed = await service.renew(queued.id, { ...controller, timeoutMs: 1_000 });
+  assert.equal(renewed.status, "awaiting_acceptance");
+  assert.equal(renewed.native_turn_id, undefined);
+  assert.equal(renewed.watch_id, queued.watch_id);
+  assert.equal(Date.parse(renewed.deadline_at), h.state.now + 1_000);
+  assert.equal(renewed.renewal_count, 1);
+  assert.equal(desktopTaskNeedsReconciliation(renewed), true);
+  h.queue.observation = { state: "matched", turn: turn("later-active") };
+  assert.equal((await service.reconcileAll()).tasks[0].status, "watching");
+  h.queue.observation = { state: "matched", turn: turn("later-active", "completed") };
+  assert.equal((await service.reconcileAll()).tasks[0].status, "completed");
+  assert.deepEqual(h.state.notifications.map(n => n.envelope.event.id), [queued.id + ":timed_out", queued.id + ":settled"]);
+  assert.equal(h.queue.writes, 1);
+});
+
+test("Desktop queue Recover and Renew tolerate identical monitor polls but retain control and observation fences", async t => {
+  for (const [method, concurrent] of [
+    ["recover", "poll"], ["renew", "poll"], ["recover", "unwatch"], ["renew", "changed-observation"]
+  ] as const) {
+    const h = queueHarness(t), monitor = createDesktopTaskService(h.deps);
+    h.queue.observation = { state: "uncertain", reason: "desktop_queue_history_requires_recover" };
+    const task = await h.service.send({ ...input, callbackRoute: route });
+    let entered!: () => void, release!: () => void;
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const port = h.deps.queue!, read = port.observe;
+    port.observe = async (identity, witness) => {
+      if (witness.historyScan !== "recover") return read(identity, witness);
+      entered(); await gate;
+      return method === "recover"
+        ? { state: "matched", turn: turn("deep-turn", "completed") }
+        : { state: "pending", reason: "desktop_queue_entry_waiting" };
+    };
+    const result = h.service[method](task.id, controller);
+    await reading;
+    try {
+      h.state.now += 2500;
+      if (concurrent === "changed-observation") {
+        h.queue.observation = { state: "uncertain", reason: "desktop_queue_endpoint_changed" };
+      }
+      const polled = await monitor.reconcile(task.id, "monitor");
+      assert.ok(polled.revision > task.revision);
+      assert.notEqual(polled.observed_at, task.observed_at);
+      if (concurrent === "unwatch") monitor.unwatch(task.id, controller);
+    } finally { release(); }
+    if (concurrent === "poll") {
+      const recovered = await result;
+      if (method === "recover") {
+        assert.equal(recovered.native_turn_id, "deep-turn");
+        assert.equal(recovered.status, "completed");
+      } else {
+        assert.equal(recovered.status, "awaiting_acceptance");
+        assert.equal(recovered.renewal_count, 1);
+      }
+    } else {
+      await assert.rejects(result, { code: "desktop_task_changed" });
+      const retained = monitor.status(task.id);
+      if (concurrent === "unwatch") assert.ok(retained.unwatched_at);
+      else assert.equal(retained.observation_error, "desktop_queue_endpoint_changed");
+      assert.equal(retained.native_turn_id, undefined);
+      assert.equal(retained.renewal_count, undefined);
+    }
+    assert.equal(h.queue.writes, 1);
+  }
+});
+
+test("Unwatch and Close prevent late queue completion from restarting observation or notifying", async t => {
+  for (const stop of ["unwatch", "close"] as const) {
+    const h = queueHarness(t);
+    const task = await h.service.send({ ...input, callbackRoute: route, timeoutMs: 100 });
+    h.state.now += 101;
+    await h.service.reconcile(task.id);
+    h.service[stop](task.id, controller);
+    h.queue.observation = { state: "matched", turn: turn("late", "completed") };
+    const reads = h.queue.reads;
+    const service = createDesktopTaskService(h.deps);
+    await service.reconcileAll();
+    assert.equal((await service.reconcile(task.id)).status, "timed_out");
+    assert.equal(h.queue.reads, reads);
+    if (stop === "close") {
+      await assert.rejects(service.recover(task.id, controller), { code: "desktop_task_closed" });
+    } else {
+      const recovered = await service.recover(task.id, controller);
+      assert.equal(recovered.status, "completed");
+      assert.ok(recovered.unwatched_at);
+      assert.equal(desktopTaskNeedsReconciliation(recovered), false);
+    }
+    assert.deepEqual(h.state.notifications.map(n => n.envelope.event.id), [task.id + ":timed_out"]);
+    assert.equal(h.queue.writes, 1);
+  }
+});
+
 test("expired Desktop Send history cannot become another native task or callback", async t => {
   const h = harness(t), request = { ...input, callbackRoute: route };
   const sent = await h.service.send(request);
@@ -242,7 +480,7 @@ test("distinct concurrent sends cannot both reserve the same idle Desktop target
   };
   const sending = createDesktopTaskService(h.deps).send(input);
   await startPending;
-  await assert.rejects(createDesktopTaskService(h.deps).send({ ...input, messageId: "second-message" }), { code: "desktop_send_pending" });
+  await assert.rejects(createDesktopTaskService(h.deps).send({ ...input, messageId: "second-message", requestId: "second-instruction" }), { code: "desktop_send_pending" });
   release();
   assert.equal((await sending).status, "watching"); assert.equal(h.state.starts, 1);
 });
@@ -258,7 +496,7 @@ test("first follower revision growth permits send but changed owner or pending i
   h.state.snapshot = snapshot();
   for (const fresh of [{ ...h.state.snapshot, ownerClientId: "different-owner" }, { ...h.state.snapshot, pendingRequestCount: 1 }]) {
     h.deps.start = async (_identity, options) => { await options.beforeDispatch?.(fresh); throw new Error("must not dispatch"); };
-    const rejected = await createDesktopTaskService(h.deps).send({ ...input, messageId: `blocked-${fresh.ownerClientId}-${fresh.pendingRequestCount}` });
+    const rejected = await createDesktopTaskService(h.deps).send({ ...input, messageId: `blocked-${fresh.ownerClientId}-${fresh.pendingRequestCount}`, requestId: `intent-${fresh.ownerClientId}-${fresh.pendingRequestCount}` });
     assert.equal(rejected.send_intent?.state, "not_sent"); assert.equal(rejected.status, "failed");
   }
   assert.equal(h.state.starts, 1);
@@ -329,6 +567,30 @@ test("commentary and analysis never become final output or stale manual-action c
   assert.equal(result.final_text, ""); assert.equal(result.pending_manual_count, 0);
   assert.equal(h.state.notifications.length, 1);
   assert.equal(h.state.notifications[0].envelope.event.type, "desktop_watch.settled");
+});
+
+test("explicit Watch reads share a native-visible answer while directed callbacks stay with the original Send", async t => {
+  const h = harness(t);
+  const sent = await h.service.send({ ...input, callbackRoute: route });
+  const controllerSession = "passive-controller";
+  const watched = await h.service.watch({ ...input, controllerSession,
+    callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: controllerSession }) });
+  assert.equal(watched.native_turn_id, sent.native_turn_id);
+  const complete = turn("native-one", "completed", h.state.clientId);
+  complete.items.push({ id: "final", type: "agentMessage", phase: "final_answer",
+    answerDisplay: { version: 1, mode: "show", trustedContacts: "skip" }, text: "REQUESTER-ONLY" });
+  h.state.snapshot = snapshot([complete]);
+  const observer = await h.service.reconcile(watched.id);
+  assert.equal(observer.status, "completed");
+  assert.equal(desktopStoredAnswerForLookup(h.repository.load(watched.id)!).final_text, "REQUESTER-ONLY");
+  assert.doesNotMatch(JSON.stringify(desktopTaskProjection(observer)), /REQUESTER-ONLY/);
+  assert.equal(h.state.notifications.length, 1);
+  assert.equal(h.state.notifications[0].route.controller_session_id, controllerSession);
+  assert.doesNotMatch(JSON.stringify(h.state.notifications[0].envelope), /REQUESTER-ONLY/);
+  assert.equal((await h.service.reconcile(sent.id)).final_text, "REQUESTER-ONLY");
+  assert.equal(h.state.notifications.length, 2);
+  assert.equal(h.state.notifications[1].route.controller_session_id, input.controllerSession);
+  assert.match(h.state.notifications[1].envelope.event.body, /REQUESTER-ONLY/);
 });
 
 test("Desktop target identity must agree with the canonical conversation ID", async t => {
@@ -585,14 +847,17 @@ test("timeout and Unwatch withdraw queued async offers without changing the nati
 
 
 const controller = { controllerSession: input.controllerSession };
-test("Desktop unresolved sends retain management across timeout and Unwatch until explicit Close", async t => {
+test("Desktop uncertain Sends retain their original management while new instructions can still reach an idle owner", async t => {
   const h = harness(t);
   h.deps.start = async (_target, options) => { await options.beforeDispatch?.(h.state.snapshot); h.state.starts++; throw new DesktopIpcError("timeout", "unknown", "unknown"); };
   const service = createDesktopTaskService(h.deps);
   const sent = await service.send({ ...input, timeoutMs: 1 }); h.state.now += 2;
   assert.equal((await service.reconcile(sent.id)).status, "timed_out");
   service.unwatch(sent.id, controller);
-  await assert.rejects(service.send({ ...input, messageId: "another-message" }), { code: "desktop_send_pending" });
+  const independent = { ...input, messageId: "another-message" };
+  const next = await service.send(independent);
+  assert.notEqual(next.id, sent.id); assert.equal(next.send_intent?.state, "uncertain");
+  assert.equal(h.state.starts, 2);
   const before = h.state.observes;
   assert.throws(() => service.close(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
   await assert.rejects(service.recover(sent.id, { controllerSession: "other" }), { code: "desktop_controller_mismatch" });
@@ -603,7 +868,7 @@ test("Desktop unresolved sends retain management across timeout and Unwatch unti
   assert.equal(closed.status, "timed_out"); assert.equal(closed.close_reason, "abandoned by controller"); assert.ok(closed.closed_at);
   for (const operation of [service.recover, service.renew, service.retryCallback]) await assert.rejects(operation(sent.id, controller), { code: "desktop_task_closed" });
   assert.equal(h.state.observes, before);
-  assert.equal((await createDesktopTaskService(h.deps).send({ ...input, messageId: "another-message" })).send_intent?.state, "uncertain");
+  assert.equal((await createDesktopTaskService(h.deps).send(independent)).id, next.id);
   assert.equal(h.state.starts, 2);
 });
 
@@ -822,4 +1087,94 @@ test("Desktop preserves existing short deadlines through restart, replay and Rec
   assert.deepEqual(renewed.notifications.filter(note => note.status === "accepted").map(note => note.id), accepted);
   await service.reconcile(sent.id);
   assert.equal(h.state.notifications.length, 1, "accepted timeout notification is neither revived nor redelivered");
+});
+
+test("an optional business key recovers a lost outer result across new tool calls and later settlement", async t => {
+  const h = queueHarness(t);
+  const restart = () => createDesktopTaskService(h.deps);
+  const keyed = { ...input, requestId: "original-user-request" };
+  const first = await h.service.send(keyed); // Discard outer result from the caller's perspective.
+  assert.ok(first.send_intent?.queue_id);
+  assert.equal((await restart().send({ ...keyed, messageId: "new-tool-call" })).id, first.id);
+  await assert.rejects(restart().send({ ...keyed, messageId: "new-tool-call", text: "paraphrased retry" }), { code: "desktop_message_id_conflict" });
+  await assert.rejects(restart().send({ ...keyed, controllerSession: "different-caller", messageId: "foreign-tool-call" }),
+    { code: "desktop_message_id_conflict" });
+  // A concurrent replay with a different tool id and the same business key still returns the first Watch.
+  const repeated = await Promise.all(["retry-a", "retry-b"].map(messageId => restart().send({ ...keyed, messageId })));
+  assert.ok(repeated.every(task => task.id === first.id));
+  assert.equal(h.queue.writes, 1);
+  h.queue.observation = { state: "matched", turn: turn("actual-turn", "completed") };
+  assert.equal((await restart().reconcile(first.id)).status, "completed");
+  assert.equal((await restart().send({ ...keyed, messageId: "retry-after-settlement" })).id, first.id);
+  assert.equal(h.queue.writes, 1);
+  // A different, independently authorized instruction can intentionally contain exactly the same text.
+  h.queue.observation = { state: "pending", reason: "desktop_queue_turn_not_observed" };
+  const second = await restart().send({ ...keyed, controllerSession: "different-caller", messageId: "independent-tool",
+    requestId: "separate-user-instruction" });
+  assert.notEqual(second.id, first.id);
+  assert.notEqual(second.send_intent!.client_user_message_id, first.send_intent!.client_user_message_id);
+  assert.equal(h.queue.writes, 2);
+});
+
+test("an uncertain owner IPC request recovers on its original identity while independent queue instructions may use the same text", async t => {
+  for (const keyed of [true, false]) {
+    const h = queueHarness(t), queueOnly = h.deps.observe;
+    h.deps.observe = async () => snapshot();
+    h.deps.start = async (_target, options) => {
+      await options.beforeDispatch?.(snapshot());
+      h.state.starts++;
+      throw new DesktopIpcError("timeout", "Original owner's acknowledgement was lost", "unknown");
+    };
+    const original = { ...input, ...(keyed ? {requestId: "previous-user-instruction"} : {}) };
+    const old = await h.service.send(original);
+    assert.equal(old.send_intent?.state, "uncertain");
+    h.deps.observe = queueOnly;
+    const rebooted = createDesktopTaskService(h.deps);
+    assert.equal((await rebooted.send(original)).id, old.id);
+    if (keyed) {
+      assert.equal((await rebooted.send({ ...original, messageId: "new-invocation" })).id, old.id);
+      await assert.rejects(rebooted.send({ ...original, messageId: "new-invocation", controllerSession: "another" }), { code: "desktop_message_id_conflict" });
+    }
+    await assert.rejects(rebooted.send({ ...original, text: "changed" }), { code: "desktop_message_id_conflict" });
+    assert.equal(h.queue.writes, 0);
+    const independent = { ...input, messageId: "independent-tool", requestId: "independent-request" };
+    const next = await rebooted.send(independent);
+    assert.notEqual(next.id, old.id);
+    // A known business key wins if its new invocation ID previously belonged to another task.
+    assert.equal((await rebooted.send({ ...independent, messageId: original.messageId })).id, next.id);
+    for (const messageId of [original.messageId, independent.messageId]) {
+      await assert.rejects(rebooted.send({ ...independent, messageId, requestId: "never-bound-request" }),
+        { code: "desktop_message_id_conflict" });
+    }
+    assert.equal(h.queue.writes, 1);
+    const ordinary = { ...input, messageId: "independent-ordinary-send" };
+    const sameText = await rebooted.send(ordinary);
+    assert.notEqual(sameText.id, old.id);
+    assert.equal((await rebooted.send(ordinary)).id, sameText.id);
+    const otherController = await rebooted.send({ ...ordinary, controllerSession: "another" });
+    assert.notEqual(otherController.id, sameText.id);
+    assert.equal(rebooted.status(old.id).send_intent?.delivery_path, undefined);
+    assert.equal(rebooted.status(old.id).send_intent?.state, "uncertain");
+    assert.equal(h.state.starts, 1);
+    assert.equal(h.queue.writes, 3);
+  }
+});
+
+test("a documented pre-dispatch legacy rejection leaves an independent queue Send available", async t => {
+  const h = queueHarness(t), queueOnly = h.deps.observe;
+  h.deps.observe = async () => snapshot();
+  h.deps.start = async () => { throw new DesktopIpcError("owner_changed", "Owner changed before dispatch", "not_sent"); };
+  const original = { ...input, requireEmptyThread: false };
+  const old = await h.service.send(original);
+  assert.equal(old.send_intent?.state, "not_sent");
+  h.deps.observe = queueOnly;
+  const restarted = createDesktopTaskService(h.deps);
+  assert.equal((await restarted.send(input)).id, old.id);
+  assert.equal(h.queue.writes, 0);
+  const independent = { ...input, messageId: "new-invocation-with-its-own-key", requestId: "another-user-instruction" };
+  const queued = await restarted.send(independent);
+  assert.notEqual(queued.id, old.id);
+  assert.ok(queued.send_intent?.queue_id);
+  assert.equal((await restarted.send({ ...independent, messageId: original.messageId })).id, queued.id);
+  assert.equal(h.queue.writes, 1);
 });

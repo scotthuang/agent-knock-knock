@@ -32,6 +32,16 @@ test("pinned AKK verifies the bundled Skill and every Pi tool schema", async () 
         metadata.name,
       );
     }
+    const send = adapter.tools.find(tool => tool.name === "agent_knock_knock_send");
+    assert.ok(send);
+    const discover = Compile(adaptHostToolInputSchema(send.inputSchema));
+    const validate = compileAuthoritativeInputValidator(send.inputSchema);
+    const args = { conversation_id: "desktop:v1:exact_thread", request: "fixture",
+      desktopRequestId: "pi:queue-42", desktopQueueOnlyIfEmpty: true };
+    assert.equal(discover.Check(args), true);
+    assert.equal(discover.Check({ ...args, desktopQueueOnlyIfEmpty: "true" }), false);
+    assert.doesNotThrow(() => validate(args));
+    assert.throws(() => validate({ ...args, conversation_id: "terminal:v2:other" }), /authoritative/u);
   } finally {
     await adapter.lifecycle.stop();
   }

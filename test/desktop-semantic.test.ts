@@ -63,6 +63,14 @@ test("Desktop semantic Send goes directly to its conversation and binds stable I
   assert.equal(argument(calls[0], "--message-id"), expectedId);
   assert.equal(argument(calls[1], "--message-id"), expectedId);
   assert.notEqual(argument(calls[2], "--message-id"), expectedId);
+  assert.ok(calls.every(args => !args.includes("--desktop-request-id")));
+  const keyed = { conversation_id: desktopId, request: "One distinct request", desktopRequestId: "user-instruction-two" };
+  await h.execute("send", keyed, "original-call");
+  await h.execute("send", keyed, "recover-call");
+  const [original, retried] = h.calls().slice(-2);
+  assert.notEqual(argument(original, "--message-id"), argument(retried, "--message-id"));
+  assert.equal(argument(original, "--desktop-request-id"), keyed.desktopRequestId);
+  assert.equal(argument(retried, "--desktop-request-id"), keyed.desktopRequestId);
   assert.equal(argument(calls[0], "--conversation"), desktopId);
   assert.equal(argument(calls[0], "--openclaw-session"), controller.sessionKey);
   assert.equal(argument(calls[0], "--message"), "One benign task");
@@ -76,9 +84,13 @@ test("Desktop semantic Send goes directly to its conversation and binds stable I
 
 test("Desktop semantic mutation rejects mixed targets, unsupported types and missing controller or tool-call identity before relay", async t => {
   const h = harness(t);
+  await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "Conditional task",
+    desktopQueueOnlyIfEmpty: true }), /cannot atomically append only if the queue is empty/u);
   for (const extra of [{ terminal_id: terminalId }, { session_id: "session-one" }, { turn_id: "turn-one" }, { type: "response" }]) {
     await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "No send", ...extra }));
   }
+  await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "No send", desktopRequestId: "" }), /opaque/);
+  await assert.rejects(h.execute("send", { terminal_id: terminalId, request: "No send", desktopRequestId: "wrong-route" }), /exact Desktop/);
   await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "No send" }, "call", {}), /controller session/iu);
   await assert.rejects(h.execute("send", { conversation_id: desktopId, request: "No send" }, ""), /tool call identity/iu);
   await assert.rejects(h.execute("watch", { conversation_id: desktopId, terminal_id: terminalId }));

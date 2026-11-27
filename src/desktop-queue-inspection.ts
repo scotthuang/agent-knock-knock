@@ -2,6 +2,7 @@ import path from "node:path";
 import type { DesktopCatalogEntry } from "./desktop-session-catalog.js";
 import type { DesktopThreadIdentity, DesktopTurn } from "./desktop-types.js";
 import { backendPublicProgress } from "./backend-public-progress.js";
+import { desktopFinalAnswer } from "./desktop-final-answer.js";
 
 type OwnerProof = { ownerId: string; endpointId: string };
 
@@ -27,14 +28,14 @@ export function canInspectDesktopHistory(identity: DesktopThreadIdentity, entry:
 }
 
 /** History gives no evidence of current composer contents, pending interactions, or idleness. */
-export function desktopPersistedHistoryProjection(turn: DesktopTurn | null, readAt: string) {
+export function desktopPersistedHistoryProjection(turn: DesktopTurn | null, readAt: string, target: DesktopThreadIdentity) {
   return {
     pending_interaction_count: null, pending_async_count: null,
     persisted_history: {
       source: "codex_app_server", scope: "latest_persisted_turn",
       latest_turn: turn ? { id: turn.turnId, status: turn.status, items_complete: turn.itemsComplete,
-        ...(turn.status === "completed" && turn.itemsComplete ? { final_text: turn.items.filter(item =>
-          item.type === "agentMessage" && item.phase === "final_answer" && item.delivery !== "async").map(item => item.text ?? "").join("\n\n") } : {}) } : null,
+        ...(turn.itemsComplete && ["completed", "failed", "interrupted"].includes(turn.status)
+          ? desktopFinalAnswer(turn, target) : {}) } : null,
       progress: backendPublicProgress({ nativeTurnId: turn?.turnId ?? null, turn: turn ?? undefined, readAt })
     }
   };

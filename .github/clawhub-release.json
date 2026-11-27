@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.22",
+  "version": "0.16.23",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "f4176480ad78b75ccb91cacb4795bd54baa87436",
-  "asset": "scotthuang-agent-knock-knock-0.16.22.tgz",
-  "sha256": "c43833d0844cb60909a7eebff5b3935f5daf597e2735d4b1bc3573ffd011d68a",
-  "bytes": 4048891,
-  "changelog": "Support an exact, owner-verified Codex Desktop native queue when the legacy IPC endpoint is unavailable. Preserve existing IPC, admission fences, idempotent sends, and exact task observation."
+  "commit": "3e46be78e0390d1bef6e6618407c15bd4b767036",
+  "asset": "scotthuang-agent-knock-knock-0.16.23.tgz",
+  "sha256": "e0fef854ee0311176d7f8fb20251f4f31e350fda48520d2d6b2cfd3c996c6337",
+  "bytes": 4073214,
+  "changelog": "Append to the verified original Codex Desktop thread while work is queued, track the exact submitted message, and read visible final answers with their native display notices. Improve macOS Desktop writer verification in List and Status."
 }
