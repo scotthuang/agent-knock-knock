@@ -163,8 +163,10 @@ function isTaskNotification(record: RecordValue): boolean {
 function currentTaskRoot(records: RecordValue[], byParent: Map<string, RecordValue[]>,
   conflicts: Set<string>, sessionId: string): RecordValue | undefined {
   const byUuid = new Map(records.map(record => [String(record.uuid), record]));
-  const latest = records.filter(record => (isInput(record) || isTaskNotification(record))
-    && sessionOf(record) === sessionId && record.isSidechain !== true).at(-1);
+  const events = records.filter(record => (isInput(record) || isTaskNotification(record))
+    && sessionOf(record) === sessionId && record.isSidechain !== true);
+  const latest = events.at(-1);
+  const latestRoot = events.filter(record => record.type === "user" && !isTaskNotification(record)).at(-1);
   let current = latest;
   const seen = new Set<string>();
   while (current) {
@@ -173,6 +175,8 @@ function currentTaskRoot(records: RecordValue[], byParent: Map<string, RecordVal
       || current.subtype === "turn_duration") return undefined;
     seen.add(id);
     if (current.type === "user" && isInput(current)) {
+      // A late background notification may refer to a previous foreground task.
+      if (current !== latestRoot) return undefined;
       const chain = claudeNativeCausalChain(current, byParent, conflicts, sessionId, isInput);
       return chain?.includes(latest!) ? current : undefined;
     }

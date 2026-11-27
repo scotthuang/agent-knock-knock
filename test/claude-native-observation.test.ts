@@ -362,6 +362,7 @@ test("task owner resolution does not cross missing, conflicting, foreign or comp
   }, ...extra });
   for (const records of [
     [user(1), notification(99)],
+    [user(1), assistant(2, 1, "Earlier progress", { stop_reason: null }), user(3, 2), notification(2)],
     [user(1), assistant(2, 1, "Done"), duration(3, 2), notification(3)],
     [user(1), record("attachment", 2, 1, { sessionId: uuid(99) }), notification(2)],
     [user(1), record("attachment", 2, 1), record("attachment", 2, 99), notification(2)],
