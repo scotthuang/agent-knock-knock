@@ -1,10 +1,10 @@
 {
   "name": "@scotthuang/agent-knock-knock",
-  "version": "0.16.23",
+  "version": "0.16.24",
   "repository": "scotthuang/agent-knock-knock",
-  "commit": "3e46be78e0390d1bef6e6618407c15bd4b767036",
-  "asset": "scotthuang-agent-knock-knock-0.16.23.tgz",
-  "sha256": "e0fef854ee0311176d7f8fb20251f4f31e350fda48520d2d6b2cfd3c996c6337",
-  "bytes": 4073214,
-  "changelog": "Append to the verified original Codex Desktop thread while work is queued, track the exact submitted message, and read visible final answers with their native display notices. Improve macOS Desktop writer verification in List and Status."
+  "commit": "dbec7a97511ede1c042ae7e446f076688af03f24",
+  "asset": "scotthuang-agent-knock-knock-0.16.24.tgz",
+  "sha256": "b1fb4c7e14c02b53ffa5db42847fc616417bb9f390bdab5f0192dd74ad41bf8f",
+  "bytes": 4076872,
+  "changelog": "Watch a task started directly in Claude Code across background notifications. AKK follows the foreground task's causal history and can report best-effort activity for an exact terminal when the task cannot be proven."
 }
