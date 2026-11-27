@@ -22,7 +22,10 @@ export async function selectClaudeWatchRoute(context: {
     if (matches.length > 1) throw claudeWatchRefusal("native_identity_ambiguous", "forbidden");
     nativeId = matches[0]?.nativeId;
     if (!nativeId) {
-      if (discovery.errors.length) throw claudeWatchRefusal("native_discovery_unverified", "not_checked");
+      // The native peer transport is optional for an explicitly selected terminal.
+      // Identity failures and unclassified errors still cannot authorize fallback.
+      const unsafe = discovery.errors.find(({ code }) => code !== "unsupported_platform" && code !== "peer_helper_unavailable");
+      if (unsafe) throw claudeWatchRefusal(`native_discovery_unverified (${unsafe.code})`, "not_checked");
       return { route: "terminal", targetId: target };
     }
   }

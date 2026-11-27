@@ -1,4 +1,5 @@
 import { createClaudeNativeRuntime } from "../src/claude-native-runtime.js";
+import { discoverClaudeNativeSessions } from "../src/claude-native-discovery.js";
 import type { ClaudeNativeCatalogEntry } from "../src/claude-native-identity.js";
 import { claudeWatchActivity } from "../src/claude-native-watch-admission.js";
 import { createTerminalWatchCliAdapter } from "../src/terminal-watch-cli-adapter.js";
@@ -346,6 +347,19 @@ for (const selector of ["conversation", "terminal"] as const) {
     assert.equal(callbacks.length, 1);
   });
 }
+
+test("an exact terminal Watch works without the native transport, but retains discovery identity refusals", async t => {
+  const f = fixture(t);
+  const discovery = await discoverClaudeNativeSessions({ platform: "linux", configDirs: [] });
+  f.runtime({ catalog: { discover: async () => discovery }, close() {} });
+  const result = await f.run("watch-terminal", { terminal: terminalId });
+  assert.equal(result.routing.transport, "terminal");
+  assert.equal(f.calls[0].options.terminal, terminalId);
+
+  discovery.errors.push({ configDir: target.configDir, code: "peer_identity_mismatch" });
+  await assert.rejects(f.run("watch-terminal", { terminal: terminalId }), /native_discovery_unverified.*peer_identity_mismatch/);
+  assert.equal(f.calls.length, 1, "a known identity conflict must not create another Watch");
+});
 
 test("Claude Watch fallback rejects missing, ambiguous, unreadable and changed identities without executing", async t => {
   const f = fixture(t);
