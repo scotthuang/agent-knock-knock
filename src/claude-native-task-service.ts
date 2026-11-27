@@ -1,3 +1,4 @@
+import { claudeNativeWatchAdmission, claudeWatchRefusal } from "./claude-native-watch-admission.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalJson } from "./canonical-json.js";
@@ -168,11 +169,10 @@ export class ClaudeNativeTasks {
   }
   async watch(input: ClaudeNativeTaskInput): Promise<ClaudeNativeTaskRecord> {
     const entry = await this.deps.inspect(input.target);
-    if (!["working", "waiting"].includes(entry.status)) throw new ClaudeNativeError("no_active_task", "No active Claude task can be anchored");
-    const snapshot = await this.deps.observe(entry, {}), selected = snapshot.selectedInput;
-    if (snapshot.readError || !selected || selected.inputUuid !== snapshot.latestInputUuid || selected.kind !== "root_user" || selected.state !== "inProgress") {
-      throw new ClaudeNativeError("task_anchor_unavailable", "Current Claude input is not a verified active root task");
-    }
+    const snapshot = await this.deps.observe(entry, {});
+    const admission = claudeNativeWatchAdmission(entry, snapshot);
+    if (!admission.ready) throw claudeWatchRefusal(admission.reason, admission.fallbackAllowed ? "not_checked" : "forbidden_identity_mismatch");
+    const selected = admission.input;
     const watched = this.deps.repository.withLock(`claude-cli-watch:target-${digest(input.target)}`, () => {
       const old = this.list().find(t => t.native_id === input.nativeId && t.controller_session === input.controllerSession &&
         t.native_input_id === selected.inputUuid && active(t));
@@ -182,7 +182,7 @@ export class ClaudeNativeTasks {
       }
       const task = this.make(input, `claude-cli-watch:${this.uuid()}`, "watch", entry);
       task.native_input_id = selected.inputUuid; task.source = snapshot.source;
-      task.progress = snapshot.progress; task.observed_at = snapshot.readAt;
+      task.progress = admission.progress; task.observed_at = snapshot.readAt;
       this.setWaiting(task, entry.status === "waiting" ? entry.waitingFor ?? "unknown" : undefined);
       return this.deps.repository.save(task, null);
     });

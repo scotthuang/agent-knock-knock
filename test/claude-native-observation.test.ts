@@ -304,3 +304,71 @@ test("multiple calls in one assistant message match interleaved results without 
   assert.equal((await readClaudeNativeSnapshot(f.entry)).selectedInput?.state, "unknown",
     "a tool result cannot inherit ownership from another assistant message");
 });
+
+test("manual Claude task remains current across session-task notifications and pending Bash work", async t => {
+  const human = { ...user(1), isMeta: false, origin: { kind: "human" } };
+  const notice = (id: number, parent: number) => record("attachment", id, parent, { attachment: {
+    type: "queued_command", source_uuid: uuid(id + 100), origin: { kind: "task-notification", producer: "session-task" },
+    content: "PRIVATE_BACKGROUND_NOTIFICATION"
+  } });
+  const tool = record("assistant", 5, 4, { message: { role: "assistant", id: "build-tool", stop_reason: "tool_use",
+    content: [{ type: "tool_use", id: "build", name: "Bash", input: { command: "PRIVATE_BUILD_COMMAND" } }] } });
+  const records = [human, assistant(2, 1, "Building", { stop_reason: null }), notice(3, 2), notice(4, 3), tool];
+  const f = await fixture(t, records);
+  const running = await readClaudeNativeSnapshot({ ...f.entry, status: "working" });
+  assert.equal(running.latestInputUuid, uuid(1), "system task notifications are not new user inputs");
+  assert.equal(running.selectedInput?.origin, "human");
+  assert.equal(running.selectedInput?.state, "inProgress");
+  assert.equal(running.currentTask?.input.inputUuid, uuid(1));
+  assert.deepEqual(running.selectedInput?.pendingTools, [{ toolUseId: "build", name: "Bash", status: "pending" }]);
+  assert.doesNotMatch(JSON.stringify(running), /PRIVATE_/u);
+  await f.write([human, assistant(2, 1, "Building", { stop_reason: null }), notice(3, 2),
+    record("user", 4, 3, { origin: { kind: "task-notification", producer: "session-task" },
+      message: { role: "user", content: "PRIVATE_BACKGROUND_NOTIFICATION" } }), tool]);
+  const userNotice = await readClaudeNativeSnapshot({ ...f.entry, status: "working" });
+  assert.equal(userNotice.latestInputUuid, uuid(1), "notification origin wins over its user-message rendering");
+  assert.equal(userNotice.currentTask?.input.state, "inProgress");
+  await f.write([...records, record("user", 6, 5, { sourceToolAssistantUUID: uuid(5),
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "build", content: "PRIVATE_BUILD_OUTPUT" }] } }),
+    assistant(7, 6, "Build complete"), duration(8, 7)]);
+  const done = await readClaudeNativeSnapshot(f.entry, { exactInputUuid: uuid(1), source: running.source });
+  assert.equal(done.selectedInput?.state, "completed");
+  assert.equal(done.selectedInput?.responseText, "Build complete");
+});
+
+test("mid-turn input keeps its own unproven receipt while Watch resolves its causal task owner", async t => {
+  const folded = record("attachment", 3, 2, { attachment: { type: "queued_command", source_uuid: uuid(20),
+    origin: { kind: "peer", msg_id: uuid(120), verifiedPeerPid: 123 } } });
+  const records = [user(1), assistant(2, 1, "Working", { stop_reason: null }), folded];
+  const f = await fixture(t, records);
+  const current = await readClaudeNativeSnapshot({ ...f.entry, status: "working" });
+  assert.equal(current.latestInputUuid, uuid(20));
+  assert.equal(current.selectedInput?.kind, "absorbed_mid_turn");
+  assert.equal(current.selectedInput?.state, "unknown", "do not turn an absorbed Send into an accepted root task");
+  assert.equal(current.currentTask?.input.inputUuid, uuid(1));
+  assert.equal(current.currentTask?.input.state, "inProgress");
+  const exact = await readClaudeNativeSnapshot(f.entry, { exactInputUuid: uuid(20), messageId: uuid(120) });
+  assert.equal(exact.selectedInput?.reason, "input_absorbed_into_existing_task");
+  await f.write([...records, user(4, 3)]);
+  const newer = await readClaudeNativeSnapshot({ ...f.entry, status: "working" });
+  assert.equal(newer.currentTask?.input.inputUuid, uuid(4));
+  assert.equal(newer.inputs.find(item => item.inputUuid === uuid(1))?.state, "unknown");
+});
+
+test("task owner resolution does not cross missing, conflicting, foreign or completed parent boundaries", async t => {
+  const f = await fixture(t, []);
+  const notification = (parent: number, extra = {}) => record("attachment", 4, parent, { attachment: {
+    type: "queued_command", source_uuid: uuid(40), origin: { kind: "task-notification", producer: "session-task" }
+  }, ...extra });
+  for (const records of [
+    [user(1), notification(99)],
+    [user(1), assistant(2, 1, "Done"), duration(3, 2), notification(3)],
+    [user(1), record("attachment", 2, 1, { sessionId: uuid(99) }), notification(2)],
+    [user(1), record("attachment", 2, 1), record("attachment", 2, 99), notification(2)],
+    [user(1), record("attachment", 2, 4), notification(2)],
+  ]) {
+    await f.write(records);
+    const snapshot = await readClaudeNativeSnapshot({ ...f.entry, status: "working" });
+    assert.equal(snapshot.currentTask, null, "no guessing the previous user root when its causal chain is unproven");
+  }
+});

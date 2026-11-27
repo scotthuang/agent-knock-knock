@@ -7,7 +7,6 @@ import {
   unsafeFallbackWatchPreparation,
   type UserExplicitFallbackWatchReceipt
 } from "./terminal-watch-send-activity.js";
-import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { publicTerminalWatch } from "./terminal-watch-presentation.js";
 import { callbackRouteFingerprint } from "./callback-route-authority.js";
 import {
@@ -48,8 +47,7 @@ import {
   watchAnchorVersionWarnings,
   captureCodexFallbackWatchAnchor,
   captureClaudeFallbackWatchAnchor,
-  capturePaginatedWatchAnchorWithLock,
-  captureTerminalWatchAnchor
+  captureManualWatchAnchor
 } from "./terminal-watch-anchor-capture.js";
 import {
   assertSameUserExplicitFallbackTerminal,
@@ -369,21 +367,7 @@ export function createTerminalWatchCliAdapter(
     const terminalControl = terminalControlForWatch(rawTerminal);
     const agent = terminalAgent(rawTerminal);
     const warnings: string[] = [];
-    let anchor: TerminalWatchAnchor | undefined;
-    try {
-      anchor = agent === "codex" && isCodexPaginatedReadCandidate(rawTerminal.agent_version)
-        ? await capturePaginatedWatchAnchorWithLock(rawTerminal, options, dependencies)
-        : captureTerminalWatchAnchor(
-        agent,
-        rawTerminal,
-        options,
-        dependencies
-      );
-    } catch (error) {
-      warnings.push(
-        `exact_task_anchor_unavailable: ${safeDiagnostic(error)}`
-      );
-    }
+    let anchor = await captureManualWatchAnchor(agent, rawTerminal, projectedTerminal, options, dependencies, warnings);
     if (anchor) {
       warnings.push(...watchAnchorVersionWarnings(anchor, rawTerminal));
     } else {

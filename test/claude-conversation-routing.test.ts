@@ -1,3 +1,9 @@
+import { createClaudeNativeRuntime } from "../src/claude-native-runtime.js";
+import type { ClaudeNativeCatalogEntry } from "../src/claude-native-identity.js";
+import { claudeWatchActivity } from "../src/claude-native-watch-admission.js";
+import { createTerminalWatchCliAdapter } from "../src/terminal-watch-cli-adapter.js";
+import { exactTerminalObservation } from "./terminal-watch-cli-adapter/fixtures.js";
+import { createTerminalWatchOpenClawCallbackRoute } from "../src/callback-transport.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,7 +28,7 @@ function localPsTime(utc: string) {
 const terminal = { id: terminalId, agent: "claude", source: "terminal", process_state: "active", pid: 123,
   native_agent_process_birth: localPsTime(target.processStart), native_agent_session_id: target.sessionId,
   native_agent_identity_observation: { status: "resolved" }, cwd: "/project",
-  terminal_control: { kind: "tmux", capabilities: ["screen_status", "send_keys", "terminal_approval", "durable_completion"] },
+  terminal_control: { kind: "tmux", target: "akk:0.0", session: "akk", window: 0, pane: 0, panePid: 120, capabilities: ["screen_status", "send_keys", "terminal_approval", "durable_completion"] },
   activity_state: "idle", approval_state: { scanned: true, blocked: false },
   _claude_managed_send_eligible: true,
   available_actions: { send: { tool: "agent_knock_knock_send", arguments: { selector: terminalId, expected_terminal_token: "existing-authority" } },
@@ -85,15 +91,18 @@ function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "akk-claude-route-")); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const calls: Array<{ command: string; options: Record<string, unknown> }> = [];
   let rows: Record<string, unknown>[] = [terminal], entries = [entry], inspectError: Error | undefined, executeError: Error | undefined;
-  const runtime = { catalog: { discover: async () => ({ sessions: entries, errors: [] }) },
+  let watchAdmission: any = { ready: true }, customExecute: ((options: Record<string, unknown>) => Promise<Record<string, unknown>>) | undefined;
+  let runtimeOverride: any;
+  const runtime = { watchReadiness: async () => { if (inspectError) throw inspectError; return watchAdmission; }, catalog: { discover: async () => ({ sessions: entries, errors: [] }) },
     inspect: async () => { if (inspectError) throw inspectError; return entry; }, close: async () => {} };
-  const dependencies: CliCommandDependencies = { env: { HOME: root, AKK_RUNTIME_DIR: path.join(root, "runtime") }, cwd: root, runtimeLog() {}, createClaudeNativeRuntime: (() => runtime) as any };
+  const dependencies: CliCommandDependencies = { env: { HOME: root, AKK_RUNTIME_DIR: path.join(root, "runtime") }, cwd: root, runtimeLog() {}, createClaudeNativeRuntime: (() => runtimeOverride ?? runtime) as any };
   const run = async (command: string, options: Record<string, unknown> = {}) => {
     const result = await runCliCommandExecution(command, options, dependencies, async () => {
       assert.equal(await dispatchClaudeConversationCli(command, { storeDir: path.join(root, "store"), ...options }, {
         terminals: async () => rows,
         execute: async (selectedCommand, selectedOptions) => { calls.push({ command: selectedCommand, options: selectedOptions });
           if (executeError) throw executeError;
+          if (customExecute) return customExecute(selectedOptions);
           return { source: String(selectedOptions.conversation).startsWith("claude-cli:") ? "claude_cli" : "terminal",
             agent: "claude", conversation_id: selectedOptions.conversation, status: "observed",
             capabilities: { status: true, cancel: false, set_model: false } }; }
@@ -101,7 +110,9 @@ function fixture(t: { after(fn: () => void): void }) {
     });
     return JSON.parse(result.stdout);
   };
-  return { run, calls, noTerminal() { rows = []; }, terminals(value: Record<string, unknown>[]) { rows = value; }, noNative() { entries = []; },
+  return { run, calls, root, runtime(value: unknown) { runtimeOverride = value; },
+    watchAdmission(value: unknown) { watchAdmission = value; },
+    execute(fn: typeof customExecute) { customExecute = fn; }, noTerminal() { rows = []; }, terminals(value: Record<string, unknown>[]) { rows = value; }, noNative() { entries = []; },
     pin(messageId: string, canonicalTarget: string, choice: ConversationRouteChoice) {
       createConversationRouteStore(path.join(root, "store"), { acquire: () => () => {} }).reserve({
         controllerSession: "agent:main:main", messageId, requestText: "task", canonicalTarget }, choice);
@@ -281,3 +292,143 @@ test("preexisting native and physical terminal reservations keep their original 
     assert.equal(f.calls[0].options.conversation, choice.targetId);
   }
 });
+
+for (const selector of ["conversation", "terminal"] as const) {
+  test(`Claude manual Watch via ${selector} falls back before execution, deduplicates and notifies stable idle once`, async t => {
+    const f = fixture(t);
+    f.watchAdmission({ ready: false, reason: "causal_task_owner_unproven", fallbackAllowed: true });
+    let current: Record<string, unknown> = { ...terminal, activity_state: "working" };
+    f.terminals([current]);
+    const printed: any[] = [], callbacks: any[] = [];
+    let now = Date.parse("2026-10-11T02:00:00Z"), sequence = 0;
+    const storeDir = path.join(f.root, "activity-store");
+    const facade = createTerminalWatchCliAdapter({
+      acquireFileLock: () => () => {}, acquireTerminalLock: () => () => {},
+      observeExactTerminal: async ({ terminalId }) => exactTerminalObservation([current], terminalId),
+      loadClaudeAgentRows: () => { throw new Error("unproven native task must not acquire a different legacy exact anchor"); },
+      now: () => new Date(now), randomUUID: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`,
+      storeDirFromOptions: () => storeDir, terminalDispatchOwnership: () => ({ state: "none" }),
+      terminalIncarnationBlockingTurns: () => [], printJson: value => printed.push(value),
+      callback: {
+        deliver() { throw new Error("use the Host callback route"); },
+        deliverTransport(value) { callbacks.push(value); return { disposition: "accepted", accepted_at: new Date(now).toISOString(), acceptance_id: value.envelope.delivery_id }; }
+      }
+    });
+    f.execute(async options => {
+      assert.equal(claudeWatchActivity(options)?.nativeId, id);
+      await facade.runWatch(options);
+      return printed.at(-1);
+    });
+    const options = { [selector]: selector === "conversation" ? id : terminalId,
+      callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "controller-watch-test" }) };
+    const first = await f.run("watch-terminal", options);
+    const second = await f.run("watch-terminal", options);
+    assert.equal(first.watch.watch_mode, "terminal_activity");
+    assert.equal(first.watch.confidence, "best_effort");
+    assert.equal(second.watch.watch_id, first.watch.watch_id);
+    assert.equal(facade.listPublicWatches(storeDir).length, 1);
+    assert.equal(callbacks.length, 0);
+    await facade.runReconcileWatches({ storeDir });
+    current = { ...current, activity_state: "idle" };
+    now += 5000;
+    await facade.runReconcileWatches({ storeDir });
+    assert.equal(callbacks.length, 0, "one idle observation is insufficient");
+    now += 5000;
+    await facade.runReconcileWatches({ storeDir });
+    await facade.runReconcileWatches({ storeDir });
+    assert.equal(callbacks.length, 1);
+    assert.equal(callbacks[0].envelope.event.type, "completed");
+    assert.equal(callbacks[0].envelope.event.metadata.watch_mode, "terminal_activity");
+    assert.equal(callbacks[0].envelope.event.metadata.confidence, "best_effort");
+    current = { ...current, native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+    await assert.rejects(f.run("watch-terminal", options), /terminal_identity_changed.*forbidden/,
+      "fresh capture must reject identity changes after route preparation");
+    assert.equal(callbacks.length, 1);
+  });
+}
+
+test("Claude Watch fallback rejects missing, ambiguous, unreadable and changed identities without executing", async t => {
+  const f = fixture(t);
+  f.watchAdmission({ ready: false, reason: "causal_task_owner_unproven", fallbackAllowed: true });
+  for (const [rows, reason] of [
+    [[], "no_match"], [[terminal, { ...terminal, id: "terminal:v2:tmux:claude:akk:0.1:123" }], "multiple_matches"],
+    [[{ ...terminal, terminal_control: { capabilities: [] } }], "screen_status_unavailable"],
+    [[{ ...terminal, native_agent_session_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }], "no_match"]
+  ] as const) {
+    f.terminals([...rows]);
+    await assert.rejects(f.run("watch-terminal", { conversation: id }), new RegExp(`causal_task_owner_unproven; terminal_activity fallback: ${reason}`));
+  }
+  f.terminals([terminal]);
+  f.watchAdmission({ ready: false, reason: "identity_mismatch", fallbackAllowed: false });
+  await assert.rejects(f.run("watch-terminal", { conversation: id }), /forbidden_identity_mismatch/);
+  f.inspectFailure("process_changed");
+  await assert.rejects(f.run("watch-terminal", { terminal: terminalId }), /process_changed/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("Claude Watch does not fallback after native execution may have persisted a Watch", async t => {
+  const f = fixture(t); f.executeFailure();
+  await assert.rejects(f.run("watch-terminal", { conversation: id }), /uncertain transport result/);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].options.conversation, id);
+  assert.equal(claudeWatchActivity(f.calls[0].options), undefined);
+});
+
+for (const selector of ["conversation", "terminal"] as const) {
+  test(`manual task plus background notifications via ${selector} gets exact Watch and one durable completion callback`, async t => {
+    const f = fixture(t), configDir = path.join(f.root, "claude");
+    const identity = { ...target, configDir }, nativeId = createClaudeNativeConversationId(identity);
+    const live: ClaudeNativeCatalogEntry = { ...entry, ...identity, nativeId, status: "working",
+      socketPath: "/fixture-unused.sock", peerProtocol: 1, peerFeatures: [], observedAt: "2026-10-11T02:00:00Z" };
+    const project = path.join(configDir, "projects", "fixture");
+    fs.mkdirSync(project, { recursive: true });
+    const filename = path.join(project, `${identity.sessionId}.jsonl`);
+    const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    const row = (n: number, parent: number | null, fields: object) => ({ uuid: uuid(n), parentUuid: parent === null ? null : uuid(parent),
+      sessionId: identity.sessionId, timestamp: `2026-10-11T02:00:0${n}Z`, ...fields });
+    const rows = [
+      row(1, null, { type: "user", origin: { kind: "human" }, message: { role: "user", content: "PRIVATE_BUILD_TASK" } }),
+      row(2, 1, { type: "assistant", message: { role: "assistant", id: "m2", stop_reason: null, content: [{ type: "text", text: "Building" }] } }),
+      row(3, 2, { type: "attachment", attachment: { type: "queued_command", source_uuid: uuid(30),
+        origin: { kind: "task-notification", producer: "session-task" }, content: "PRIVATE_NOTIFICATION" } }),
+      row(4, 3, { type: "assistant", message: { role: "assistant", id: "m4", stop_reason: "tool_use",
+        content: [{ type: "tool_use", id: "bash", name: "Bash", input: {} }] } })
+    ];
+    const write = () => fs.writeFileSync(filename, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    write();
+    const deliveries: any[] = [];
+    const runtime = createClaudeNativeRuntime({ storeDir: path.join(f.root, "native-store"), claudeConfigDirs: [configDir],
+      client: { discover: async () => ({ sessions: [live], errors: [] }), inspect: async () => live,
+        send: async () => { throw new Error("Watch must never send input"); }, close() {} },
+      processCheck: async () => {}, callbackDeliver: delivery => {
+        deliveries.push(delivery); return { disposition: "accepted", accepted_at: new Date().toISOString(), acceptance_id: "test-only" };
+      }
+    });
+    f.runtime(runtime);
+    f.execute(async options => {
+      assert.equal(options.conversation, nativeId);
+      return { watch: await runtime.tasks.watch({ target: identity, nativeId, controllerSession: "manual-controller",
+        callbackRoute: createTerminalWatchOpenClawCallbackRoute({ controllerSessionId: "manual-controller" }) }) };
+    });
+    const options = { [selector]: selector === "conversation" ? nativeId : terminalId };
+    const first = await f.run("watch-terminal", options), repeated = await f.run("watch-terminal", options);
+    assert.equal(first.routing.transport, "claude_native");
+    assert.equal(first.watch.native_input_id, uuid(1));
+    assert.equal(first.watch.send_intent, undefined);
+    assert.equal(repeated.watch.id, first.watch.id);
+    assert.equal(deliveries.length, 0);
+    assert.equal((await runtime.tasks.reconcile(first.watch.id)).status, "watching");
+    rows.push(row(5, 4, { type: "user", sourceToolAssistantUUID: uuid(4), message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "bash", content: "PRIVATE_TOOL_RESULT" }] } }),
+      row(6, 5, { type: "assistant", message: { role: "assistant", id: "m6", stop_reason: "end_turn", content: [{ type: "text", text: "Build finished" }] } }),
+      row(7, 6, { type: "system", subtype: "turn_duration" }));
+    write(); live.status = "idle";
+    const completed = await runtime.tasks.reconcile(first.watch.id);
+    await runtime.tasks.reconcile(first.watch.id);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.notifications[0].status, "accepted");
+    assert.equal(deliveries.length, 1);
+    assert.match(JSON.stringify(deliveries[0].envelope), /Build finished/);
+    assert.doesNotMatch(JSON.stringify(deliveries[0].envelope), /PRIVATE_/);
+  });
+}

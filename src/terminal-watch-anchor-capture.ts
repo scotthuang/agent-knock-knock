@@ -1,3 +1,6 @@
+import { claudeWatchActivity, claudeWatchRefusal } from "./claude-native-watch-admission.js";
+import { exactClaudeTerminal } from "./claude-conversation-routing-identity.js";
+import { safeDiagnostic } from "./terminal-watch-terminal-identity.js";
 /** Capture native Watch anchors without weakening backend identity checks. */
 import { isCodexPaginatedReadCandidate } from "./codex-lifecycle-compatibility.js";
 import { createHash } from "node:crypto";
@@ -201,4 +204,24 @@ export function captureTerminalWatchAnchor(
     agentRows: dependencies.loadClaudeAgentRows(options, { required: true }),
     now: dependencies.now()
   });
+}
+
+/** Native Watch may explicitly choose activity observation, never a different legacy exact task. */
+export async function captureManualWatchAnchor(agent: ExecutorKind, raw: Record<string, unknown>,
+  projected: Record<string, unknown>, options: TerminalWatchCliOptions, dependencies: TerminalWatchCliDependencies,
+  warnings: string[]): Promise<TerminalWatchAnchor | undefined> {
+  const activity = claudeWatchActivity(options);
+  if (activity) {
+    if (!exactClaudeTerminal(activity.nativeId, projected)) throw claudeWatchRefusal("terminal_identity_changed", "forbidden");
+    warnings.push(`exact_task_anchor_unavailable: ${activity.reason}`);
+    return undefined;
+  }
+  try {
+    return agent === "codex" && isCodexPaginatedReadCandidate(raw.agent_version)
+      ? await capturePaginatedWatchAnchorWithLock(raw, options, dependencies)
+      : captureTerminalWatchAnchor(agent, raw, options, dependencies);
+  } catch (error) {
+    warnings.push(`exact_task_anchor_unavailable: ${safeDiagnostic(error)}`);
+    return undefined;
+  }
 }

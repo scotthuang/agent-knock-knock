@@ -1,3 +1,4 @@
+import { claudeNativeWatchAdmission } from "./claude-native-watch-admission.js";
 import { backendObservationStopped, backendTaskRecoveryProjection, isBackendCallbackRetryable } from "./backend-task-recovery.js";
 import { backendCallbackPublicProjection } from "./backend-callback-public-projection.js";
 import { createClaudeNativeConversationId, type ClaudeNativeCatalogEntry } from "./claude-native-identity.js";
@@ -40,7 +41,7 @@ export function claudeNativeSessionProjection(entry: ClaudeNativeCatalogEntry, s
   const selected = snapshot?.selectedInput;
   const current = selected?.inputUuid === snapshot?.latestInputUuid;
   const watching = entry.status === "working" || entry.status === "waiting";
-  const canWatch = watching && (!snapshot || !snapshot.readError && current && selected?.kind === "root_user" && selected.state === "inProgress");
+  const canWatch = watching && (!snapshot || claudeNativeWatchAdmission(entry, snapshot).ready);
   const canSend = entry.status === "idle";
   return {
     id, conversation_id: id, source: "claude_cli", agent: "claude",
