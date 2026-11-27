@@ -17,10 +17,10 @@ The reader and install-target behavior were verified with DSH **0.2.1-rc.2**. Th
 For the supported POSIX Web Host setup, `pnpm`, connector capabilities, permissions, and limitations, see the [DSH connector guide](../../connectors/deepseek-harness/README.md). The equivalent manual command is:
 
 ```sh
-dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.37
+dsh plugin --profile web add @scotthuang/agent-knock-knock-deepseek-harness@0.1.0-rc.38
 ```
 
-The index selects **rc.37**, which pins AKK core **0.16.23** and is available on npm `next`. A bare npm install selects the separate `latest` recommendation, rc.24 with core 0.16.12. Use this market entry or the exact command above for DSH **0.2.2-rc.5**.
+The index selects **rc.38**, which pins AKK core **0.16.24** and is available on npm `next`. A bare npm install selects the separate `latest` recommendation, rc.24 with core 0.16.12. Use this market entry or the exact command above for DSH **0.2.2-rc.5**.
 
 During rc.36 verification in an isolated DSH 0.2.2-rc.5 profile, Discover reported rc.36 as compatible, selected it by default, and returned its exact npm install spec. The connector retains its seven previously declared Host versions. Existing installations require an explicit upgrade.
 
